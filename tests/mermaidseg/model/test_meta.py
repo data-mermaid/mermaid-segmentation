@@ -24,7 +24,13 @@ from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import next_epoch_from_checkpoint, records_train_metrics
 from mermaidseg.model.models import MODEL_CLASSES
-from tests.conftest import IMAGE_SIZE, NUM_CLASSES
+from tests.conftest import (
+    CBM_CONCEPT_VALUE2ID,
+    CBM_NUM_CONCEPTS,
+    IMAGE_SIZE,
+    NUM_CLASSES,
+    cbm_concept_lookup,
+)
 from tests.mermaidseg.conftest import cbm_meta, concept_keep
 
 
@@ -193,10 +199,14 @@ def test_cuda_bf16_check_targets_the_model_device_without_emulation(minimal_conf
     with pytest.raises(RuntimeError, match="mixed_precision_dtype"):
         meta_module.MetaModel(
             run_name="no-bf16-device",
-            num_classes=4,
+            num_classes=NUM_CLASSES,
+            num_concepts=CBM_NUM_CONCEPTS,
             model_kwargs=cfg.model,
             training_kwargs=cfg.training,
             device=torch.device("cuda:1"),
+            source_to_target_lookup=torch.arange(NUM_CLASSES),
+            source_to_concepts_lookup=cbm_concept_lookup(),
+            concept_value2id=CBM_CONCEPT_VALUE2ID,
         )
     assert support_kwargs == [{"including_emulation": False}]
     assert entered_devices == [torch.device("cuda:1")]
@@ -503,7 +513,15 @@ def test_update_evaluator_feeds_metrics_the_argmax_of_class_logits(minimal_confi
     meta = make_meta_model(minimal_config)
     logits = torch.tensor([[[[1.0, 5.0]], [[3.0, 2.0]], [[0.0, 9.0]]]])  # (1, 3, 1, 2)
 
-    meta._update_evaluator(evaluator, logits, torch.zeros(1, 1, 2, dtype=torch.long), None, None)
+    concept_outputs = torch.zeros(1, CBM_NUM_CONCEPTS, 1, 2)
+
+    meta._update_evaluator(
+        evaluator,
+        logits,
+        torch.zeros(1, 1, 2, dtype=torch.long),
+        concept_outputs,
+        concept_outputs,
+    )
 
     assert [p.tolist() for p in recorder.preds] == [[[[1, 2]]]]
 
@@ -584,13 +602,19 @@ def test_validation_epoch_averages_the_batch_losses_and_their_components(fixed_m
     meta = fixed_meta_model(
         class_logits=[0.0, math.log(3.0), 0.0, 0.0], training={"iterations_per_val_epoch": 2}
     )
-    evaluator = Evaluator(num_classes=NUM_CLASSES, device="cpu")
+    evaluator = Evaluator(
+        num_classes=NUM_CLASSES, device="cpu", concept_value2id=CBM_CONCEPT_VALUE2ID
+    )
 
     val_loss, metrics = meta.validation_epoch(_label_batches(1, 2), evaluator)
 
     assert val_loss == pytest.approx(((ln2 + 2 * ln2) + (ln6 + 2 * ln2)) / 2, rel=1e-5)
     assert metrics == {
         "accuracy": pytest.approx(0.5),
+        # Uniform concept scores predict the first value of every rank and the unset binary
+        # state, which matches the label-1 batch and misses the label-2 batch.
+        **dict.fromkeys((f"accuracy/{rank}" for rank in TAXONOMIC_CONCEPTS), pytest.approx(0.5)),
+        "accuracy/multi_hot": pytest.approx(0.5),
         "loss/classification": pytest.approx((ln2 + ln6) / 2, rel=1e-5),
         **dict.fromkeys(
             (f"loss/{rank}" for rank in TAXONOMIC_CONCEPTS), pytest.approx(ln2 / 6, rel=1e-5)
@@ -861,13 +885,6 @@ def test_a_non_finite_grad_norm_skips_the_update_and_its_callback(fixed_meta_mod
     assert last_loss == pytest.approx(4 * math.log(2.0), rel=1e-4)
 
 
-def test_concept_labels_need_a_concept_lookup(fixed_meta_model):
-    meta = fixed_meta_model(source_to_concepts_lookup=None)
-
-    with pytest.raises(RuntimeError, match="source_to_concepts_lookup is not set"):
-        meta._to_concept_labels(torch.ones(1, 1, 2, dtype=torch.long))
-
-
 @pytest.mark.parametrize(
     "swapped",
     [
@@ -909,18 +926,19 @@ def test_consume_metric_shards_scores_each_shard_in_order_and_releases_its_maps(
         device="cpu", metric_dict={"m": metric}, evaluate_concepts=lambda *_a: None
     )
     meta = fixed_meta_model()
+    concepts = torch.zeros(1, CBM_NUM_CONCEPTS, 1, 2)
     # Class scores per pixel: shard one predicts [1, 2], shard two [0, 0].
     shard_one = meta_module.MetricShard(
         outputs=torch.tensor([[[[0.0, 0.0]], [[1.0, 0.0]], [[0.0, 1.0]]]]),
-        concept_outputs=None,
+        concept_outputs=concepts,
         target_labels=torch.ones(1, 1, 2, dtype=torch.long),
-        target_concepts=None,
+        target_concepts=concepts,
     )
     shard_two = meta_module.MetricShard(
         outputs=torch.tensor([[[[1.0, 1.0]], [[0.0, 0.0]], [[0.0, 0.0]]]]),
-        concept_outputs=None,
+        concept_outputs=concepts,
         target_labels=torch.ones(1, 1, 2, dtype=torch.long),
-        target_concepts=None,
+        target_concepts=concepts,
     )
     meta._metric_shards = [shard_one, shard_two]
 

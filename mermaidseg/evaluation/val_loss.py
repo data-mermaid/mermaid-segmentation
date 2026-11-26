@@ -196,7 +196,7 @@ def evaluate_val_loss(
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
     _check_layout(bundle, registry, channel_names)
     cfg.training.loss.binary_concept_names = binary_concept_names(
-        cast("dict[str, Any]", registry.concept_value2id), channel_names
+        registry.concept_value2id, channel_names
     )
 
     source_mask = None

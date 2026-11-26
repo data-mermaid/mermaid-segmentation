@@ -8,7 +8,6 @@ from typing import Any, get_args
 
 from mermaidseg.data.base import VersionDataset
 from mermaidseg.data.config import (
-    DATASET_BUCKET,
     TAXONOMY_NAME,
     DataSection,
     Split,
@@ -17,6 +16,7 @@ from mermaidseg.data.config import (
 from mermaidseg.data.dense_dataset import DenseDataset
 from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.io import build_eval_transform, compile_transform
+from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_taxonomy, open_version
 from segdata_spec.taxonomy import hierarchy_from_table
@@ -29,6 +29,35 @@ def _transform_for(
     if split == "train":
         return compile_transform(spec or {})
     return build_eval_transform(input_size)
+
+
+def source_offsets(versions: Mapping[str, DatasetVersion]) -> dict[str, int]:
+    """Return each source's global offset, in the order of ``versions``.
+
+    The first source gets 0; each next source gets the previous offset plus the previous source's
+    largest ``label_id``, so ``offset + label_id`` is unique across sources and 0 stays background.
+
+    Args:
+        versions: The opened version of each source, in ``data.datasets`` order.
+
+    Returns:
+        Source name -> offset.
+
+    Raises:
+        ValueError: A source's ``labels.parquet`` holds a ``label_id`` below 1.
+    """
+    offsets: dict[str, int] = {}
+    running = 0
+    for name, version in versions.items():
+        label_ids = version.labels.column("label_id").to_pylist()
+        below_one = sorted(i for i in label_ids if i < 1)
+        if below_one:
+            raise ValueError(
+                f"dataset {name!r}: label_id must be at least 1 (0 is background), got {below_one}"
+            )
+        offsets[name] = running
+        running += max(label_ids, default=0)
+    return offsets
 
 
 def _reader(
@@ -70,6 +99,8 @@ def build_datasets(
 ) -> dict[tuple[str, str], VersionDataset]:
     """Open each dataset version and build a reader per defined split block.
 
+    Every reader of a dataset gets that dataset's :func:`source_offsets` offset.
+
     Args:
         section: The validated ``data`` section.
         cache_dir: The directory ``scripts/sync_data.py`` synced into.
@@ -84,13 +115,15 @@ def build_datasets(
 
     Raises:
         segdata_spec.errors.NotSynced: A version was not synced with the entry's ``resize``.
-        ValueError: A reader refuses its selection (see :class:`VersionDataset`), or a dense
-            dataset's block sets ``annotators``.
+        ValueError: A reader refuses its selection (see :class:`VersionDataset`), a dense
+            dataset's block sets ``annotators``, or a ``label_id`` is below 1.
     """
     subsets = image_ids or {}
+    versions = {name: open_dataset_version(section, name, cache_dir) for name in section.datasets}
+    offsets = source_offsets(versions)
     datasets: dict[tuple[str, str], VersionDataset] = {}
     for name, entry in section.datasets.items():
-        version = open_dataset_version(section, name, cache_dir)
+        version = versions[name]
         for split in get_args(Split):
             block = getattr(entry, split)
             if block is None:
@@ -98,8 +131,8 @@ def build_datasets(
             shared: dict[str, Any] = {
                 "groups": entry_split_groups(entry, split, repo_root),
                 "transform": _transform_for(split, block.transform, input_size),
-                "on_missing_images": entry.on_missing_images,
                 "image_ids": subsets.get((name, split)),
+                "global_offset": offsets[name],
             }
             datasets[(name, split)] = _reader(version, split, shared, padding, block.annotators)
     return datasets

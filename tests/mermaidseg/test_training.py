@@ -678,7 +678,7 @@ def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
 
 
 def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
-    pin = {"version": "v1", "manifest_sha256": "aa11", "resize": None, "images_dropped": 3}
+    pin = {"version": "v1", "manifest_sha256": "aa11", "resize": None}
     return {
         "git_sha": "abc123",
         "git_dirty": False,

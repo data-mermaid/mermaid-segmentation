@@ -130,7 +130,7 @@ def _reader(tmp_path, name: str, groups: list[str], **kwargs: Any) -> PointDatas
         points=points,
         name=name,
     )
-    return PointDataset(version, split="train", **kwargs)
+    return PointDataset(version, split="train", global_offset=0, **kwargs)
 
 
 def test_coralnet_rows_come_from_the_image_group_and_follow_the_retried_image(tmp_path):

@@ -148,7 +148,7 @@ def write_sync_marker(stage: Path, pin: Pin) -> None:
     """Mark a staged version as synced with every group, which ``open_version`` requires."""
     directory = synced_marker_dir(stage, resize_id(None), DATASET_BUCKET, pin.name, pin.version)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(None, None, ())))
+    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(None, None)))
 
 
 def plan_lines(stage: Path, pin: Pin, name: str) -> list[dict[str, Any]]:

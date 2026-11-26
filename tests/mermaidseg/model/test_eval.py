@@ -18,13 +18,8 @@ CONCEPT_VALUE2ID: dict[str, dict[Any, Any]] = {
 }
 
 
-def _evaluator(*, concept_metrics: bool = True) -> Evaluator:
-    return Evaluator(
-        num_classes=3,
-        device="cpu",
-        calculate_concept_metrics=concept_metrics,
-        concept_value2id=CONCEPT_VALUE2ID,
-    )
+def _evaluator() -> Evaluator:
+    return Evaluator(num_classes=3, device="cpu", concept_value2id=CONCEPT_VALUE2ID)
 
 
 def _batch(
@@ -85,24 +80,3 @@ def test_computing_the_concept_metrics_resets_them():
         "accuracy/kingdom": pytest.approx(1.0),
         "accuracy/multi_hot": pytest.approx(1.0),
     }
-
-
-@pytest.mark.parametrize(
-    ("concept_metrics", "concept_value2id"),
-    [(False, CONCEPT_VALUE2ID), (True, None)],
-    ids=["disabled", "no_mapping"],
-)
-def test_without_concept_metrics_or_a_mapping_nothing_is_accumulated(
-    concept_metrics, concept_value2id
-):
-    evaluator = Evaluator(
-        num_classes=3,
-        device="cpu",
-        calculate_concept_metrics=concept_metrics,
-        concept_value2id=concept_value2id,
-    )
-    outputs, labels = _mixed_batch()
-
-    evaluator.evaluate_concepts(outputs, labels)
-
-    assert evaluator.compute_concept_metric_results() == {}

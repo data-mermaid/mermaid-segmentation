@@ -96,8 +96,6 @@ def test_dpt_head_runs_on_nonsquare_grid_when_told_the_shape():
     head = DPTHead(
         hidden_size=16,
         out_channels=4,
-        token_width=8,
-        token_height=8,
         neck_hidden_sizes=(8, 8, 8, 8),
         fusion_hidden_size=8,
         reassemble_factors=(4, 2, 1, 0.5),
@@ -117,8 +115,6 @@ def _small_head(**overrides) -> DPTHead:
     kwargs: dict[str, Any] = {
         "hidden_size": 16,
         "out_channels": 4,
-        "token_width": 8,
-        "token_height": 8,
         "neck_hidden_sizes": (8, 8, 8, 8),
         "fusion_hidden_size": 8,
         "reassemble_factors": (4, 2, 1, 0.5),
@@ -130,7 +126,7 @@ def _small_head(**overrides) -> DPTHead:
 def test_dpt_head_drops_the_unused_coarsest_fusion_residual_and_trains_the_rest():
     head = _small_head()
     layers = head.neck.fusion_stage.layers
-    assert getattr(layers[0], "residual_layer1", None) is None
+    assert not hasattr(layers[0], "residual_layer1")
     assert all(layer.residual_layer1 is not None for layer in layers[1:])
 
     token_height, token_width = 4, 4
@@ -150,8 +146,6 @@ def test_dpt_head_rejects_a_grid_that_does_not_match_the_tokens():
     head = DPTHead(
         hidden_size=16,
         out_channels=4,
-        token_width=4,
-        token_height=4,
         neck_hidden_sizes=(8,),
         fusion_hidden_size=8,
         reassemble_factors=(1,),
@@ -163,42 +157,6 @@ def test_dpt_head_rejects_a_grid_that_does_not_match_the_tokens():
         assert "does not match" in str(exc)
     else:
         raise AssertionError("expected a grid/token mismatch")
-
-
-@pytest.mark.parametrize(
-    ("grid", "num_patch_tokens", "expected"),
-    [
-        pytest.param((8, 8), 64, (8, 8), id="configured_grid_matches"),
-        pytest.param((8, 8), 16, (4, 4), id="square_at_another_size"),
-        pytest.param((4, 8), 50, (5, 10), id="keeps_the_two_to_one_aspect"),
-    ],
-)
-def test_infer_token_grid_falls_back_to_the_configured_aspect_ratio(
-    grid, num_patch_tokens, expected
-):
-    height, width = grid
-    head = _small_head(token_height=height, token_width=width)
-
-    assert head._infer_token_grid(num_patch_tokens) == expected
-
-
-def test_infer_token_grid_rejects_a_token_count_the_aspect_cannot_tile():
-    head = _small_head()
-
-    # 7 square-aspect tokens round to 3 rows, which leaves 7 // 3 = 2 columns: 6 != 7.
-    with pytest.raises(ValueError, match="Cannot reshape 7 patch tokens"):
-        head._infer_token_grid(7)
-
-
-def test_dpt_head_without_a_grid_infers_it_from_the_token_count():
-    head = _small_head().eval()
-    tokens = torch.randn(1, 1 + 16, 16)
-    hidden = [tokens] * 4
-
-    inferred = head(hidden)
-    explicit = head(hidden, token_height=4, token_width=4)
-
-    assert torch.equal(inferred, explicit)
 
 
 def test_dpt_head_rejects_the_wrong_number_of_hidden_states():

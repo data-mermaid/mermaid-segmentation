@@ -58,13 +58,11 @@ class FakeMetaModel:
         self,
         run_name: str = "test-run",
         num_classes: int = 3,
-        num_concepts: int | None = None,
-        conceptid2labelid: dict[int, int] | None = None,
+        num_concepts: int = CBM_NUM_CONCEPTS,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
         self.num_concepts = num_concepts
-        self.conceptid2labelid = conceptid2labelid
         self.device = "cpu"
         self.device_type = "cpu"
         self.global_step = 0
@@ -140,7 +138,6 @@ def cbm_test_config() -> ConfigDict:
                 "lora_bias": "none",
             },
             "training": {
-                "training_mode": "concept-bottleneck",
                 "detach_concepts": True,
                 "distributed": False,
                 "world_size": 1,
@@ -279,6 +276,7 @@ def make_meta_model(mock_dinov3_encoder):
 
         mock_dinov3_encoder(mermaidseg.model.models)
         extra_kwargs.setdefault("num_concepts", CBM_NUM_CONCEPTS)
+        extra_kwargs.setdefault("source_to_target_lookup", torch.arange(NUM_CLASSES))
         extra_kwargs.setdefault("concept_value2id", CBM_CONCEPT_VALUE2ID)
         extra_kwargs.setdefault("source_to_concepts_lookup", cbm_concept_lookup())
         return MetaModel(

@@ -271,7 +271,7 @@ def attach_source_rows(
             never-True concepts would silently train as False.
     """
     for ds in datasets:
-        if mask.dataset == ds.SOURCE_NAME:
+        if mask.dataset == ds.source_name:
             sources = _group_source_ids(ds.images["group"])
             _check_covered(sources, mask)
             ds.set_source_rows(mask.rows_for(sources))

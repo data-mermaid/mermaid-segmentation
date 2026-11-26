@@ -11,10 +11,15 @@ import pytest
 
 from mermaidseg.data import DenseDataset, PointDataset
 from mermaidseg.data.config import DataSection
-from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy, open_dataset_version
+from mermaidseg.data.factory import (
+    build_datasets,
+    load_benthic_hierarchy,
+    open_dataset_version,
+    source_offsets,
+)
 from segdata_spec.errors import NotSynced, PinMismatch
 from segdata_spec.manifest import Pin
-from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
+from tests.mermaidseg.data.conftest import ImageSpec, open_written, write_taxonomy, write_version
 
 LABELS = {5: "five"}
 
@@ -121,16 +126,6 @@ def test_entry_resize_is_what_open_version_requires_synced(tmp_path: Path) -> No
         _build(section, cache_dir, tmp_path)
 
 
-def test_on_missing_images_drop_reaches_the_reader(tmp_path: Path) -> None:
-    cache_dir, pin = _points(
-        tmp_path, [ImageSpec("i1"), ImageSpec("i2")], [("i1", 1, 1, 5), ("i2", 1, 1, 5)]
-    )
-    (cache_dir / "img-bucket" / "imgs" / "i2.jpg").unlink()
-    section = _section(pin, on_missing_images="drop", val={"groups": "all"})
-    ds = _build(section, cache_dir, tmp_path)[("ds", "val")]
-    assert (len(ds), ds.images_dropped) == (1, 1)
-
-
 def test_image_ids_subset_a_dataset_and_split(tmp_path: Path) -> None:
     cache_dir, pin = _points(
         tmp_path, [ImageSpec("i1"), ImageSpec("i2")], [("i1", 1, 1, 5), ("i2", 1, 1, 5)]
@@ -139,6 +134,78 @@ def test_image_ids_subset_a_dataset_and_split(tmp_path: Path) -> None:
     built = _build(section, cache_dir, tmp_path, image_ids={("ds", "val"): ["i2"]})
     assert list(built[("ds", "val")].images["image_id"]) == ["i2"]
     assert len(built[("ds", "train")]) == 2
+
+
+def _labelled_version(tmp_path: Path, name: str, labels: dict[int, str]) -> Any:
+    first = min(labels)
+    return open_written(
+        tmp_path / name,
+        kind="points",
+        images=[ImageSpec("i1")],
+        labels=labels,
+        points=[("i1", 1, 1, first)],
+        name=name,
+    )
+
+
+def test_source_offsets_step_by_the_previous_sources_max_label_id(tmp_path: Path) -> None:
+    # A holds two labels, so a count-based offset would give B 2 rather than 100.
+    versions = {
+        "a": _labelled_version(tmp_path, "a", {58: "x", 100: "y"}),
+        "b": _labelled_version(tmp_path, "b", {1: "p", 2: "q"}),
+    }
+    assert source_offsets(versions) == {"a": 0, "b": 100}
+
+
+@pytest.mark.parametrize("bad_id", [0, -1])
+def test_source_offsets_reject_a_label_id_below_one_naming_the_source(
+    tmp_path: Path, bad_id: int
+) -> None:
+    versions = {
+        "a": _labelled_version(tmp_path, "a", {1: "x"}),
+        "b": _labelled_version(tmp_path, "b", {bad_id: "zero", 3: "y"}),
+    }
+    with pytest.raises(ValueError, match="'b'"):
+        source_offsets(versions)
+
+
+def test_every_split_of_a_source_shares_its_offset(tmp_path: Path) -> None:
+    _, _, pin_a = write_version(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("a1", group="g1"), ImageSpec("a2", group="g2")],
+        labels={58: "x", 100: "y"},
+        points=[("a1", 1, 1, 58), ("a2", 1, 1, 100)],
+        name="a",
+    )
+    cache_dir, _, pin_b = write_version(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("b1")],
+        labels={1: "p"},
+        points=[("b1", 1, 1, 1)],
+        name="b",
+    )
+    section = DataSection.model_validate(
+        {
+            "datasets": {
+                "a": {
+                    "version": pin_a.version,
+                    "manifest_sha256": pin_a.manifest_sha256,
+                    "train": {"groups": ["g1"]},
+                    "test": {"groups": ["g2"]},
+                },
+                "b": {
+                    "version": pin_b.version,
+                    "manifest_sha256": pin_b.manifest_sha256,
+                    "val": {"groups": "all"},
+                },
+            }
+        }
+    )
+    built = _build(section, cache_dir, tmp_path)
+    offsets = {key: ds.global_offset for key, ds in built.items()}
+    assert offsets == {("a", "train"): 0, ("a", "test"): 0, ("b", "val"): 100}
 
 
 def test_open_dataset_version_opens_the_pinned_version(tmp_path: Path) -> None:

@@ -17,7 +17,7 @@ so serving can load it.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -28,6 +28,7 @@ from mermaidseg.inference.preprocess import preprocess
 
 if TYPE_CHECKING:
     from mermaidseg.inference.bundle import ModelBundle
+    from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3
 
 
 def class_probabilities(logits: torch.Tensor) -> torch.Tensor:
@@ -45,7 +46,7 @@ class CBMPredictor:
 
     def __init__(
         self,
-        model: torch.nn.Module,
+        model: ConceptBottleneckDPTLoRADINOv3,
         *,
         input_size: tuple[int, int],
         mean: Sequence[float],
@@ -56,29 +57,22 @@ class CBMPredictor:
         """Wrap a model for inference.
 
         Args:
-            model: Concept-bottleneck model exposing ``concept_classifier``.
+            model: The concept-bottleneck model.
             input_size: ``(height, width)`` the images are resized to.
             mean: Per-channel normalisation mean.
             std: Per-channel normalisation standard deviation.
             device: Device the inputs are moved to.
             amp_dtype: Autocast dtype for the forward pass, or ``None`` to run without autocast.
-
-        Raises:
-            ValueError: If ``model`` has no ``concept_classifier``.
         """
-        # Duck-typed: CBM variants expose attributes (concept_outputs_activation) that nn.Module hides.
-        self.model: Any = model.eval()
+        self.model = model.eval()
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.mean = tuple(float(v) for v in mean)
         self.std = tuple(float(v) for v in std)
         self.device = torch.device(device)
         self.amp_dtype = amp_dtype
 
-        if not hasattr(model, "concept_classifier"):
-            raise ValueError("Model does not expose a `concept_classifier`; is this a CBM model?")
-        classifier = cast("Any", model.concept_classifier)
-        self.num_concepts = int(classifier.in_channels)
-        self.num_classes = int(classifier.out_channels)
+        self.num_concepts = int(model.concept_classifier.in_channels)
+        self.num_classes = int(model.concept_classifier.out_channels)
 
     @classmethod
     def from_bundle(cls, bundle: ModelBundle, *, amp_dtype: torch.dtype | None) -> CBMPredictor:
@@ -115,7 +109,7 @@ class CBMPredictor:
         images = images.to(self.device, non_blocking=True)
         with self._autocast():
             outputs = self.model(images)
-        return class_probabilities(outputs.logits), outputs.hidden_states.float()
+        return class_probabilities(outputs.logits), outputs.concept_probs.float()
 
     @torch.inference_mode()
     def predict_points(
@@ -152,13 +146,7 @@ class CBMPredictor:
         images = images.to(self.device, non_blocking=True)
         with self._autocast():
             outputs = self.model(images)
-        logits = getattr(outputs, "concept_logits", None)
-        if logits is None:
-            raise RuntimeError(
-                "Model forward did not return concept_logits. "
-                "Strided Coralscapes eval averages those logits before activation."
-            )
-        return logits.float()
+        return outputs.concept_logits.float()
 
     def activate_concept_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply the model's concept activation to ``(K, H, W)`` averaged logits.
@@ -169,13 +157,7 @@ class CBMPredictor:
         """
         if logits.dim() != 3:
             raise ValueError(f"logits must be (K, H, W); got {tuple(logits.shape)}")
-        activate = getattr(self.model, "concept_outputs_activation", None)
-        if activate is None:
-            raise RuntimeError(
-                "Model has no concept_outputs_activation, so averaged concept logits "
-                "cannot be turned into the features the linear probe expects."
-            )
-        activated = activate(logits.unsqueeze(0))
+        activated = self.model.concept_outputs_activation(logits.unsqueeze(0))
         if activated.dim() != 4 or activated.shape[0] != 1:
             raise RuntimeError(
                 f"concept_outputs_activation must return (1, K, H, W); got {tuple(activated.shape)}"

@@ -1,13 +1,12 @@
-"""Reader over a ``dense`` version: mask PNGs of native label ids mapped to local ids."""
+"""Reader over a ``dense`` version: mask PNGs of native label ids shifted by the global offset."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
 from PIL import Image
 
@@ -15,25 +14,19 @@ from mermaidseg.data.base import VersionDataset
 from segdata_spec.read import DatasetVersion
 
 
-def build_lut(
-    source_id2label_id: Mapping[int, int], max_label_id: int, offset: int
-) -> NDArray[np.int32]:
-    """Return an int32 table mapping a native ``label_id`` to ``local id + offset``.
+def build_lut(label_ids: Iterable[int], max_label_id: int, offset: int) -> NDArray[np.int32]:
+    """Return an int32 table mapping each native ``label_id`` in ``label_ids`` to ``offset + id``.
 
-    Entries outside the vocabulary, and 0, map to 0.
+    0, and an id up to ``max_label_id`` that is not in ``label_ids``, map to 0.
     """
     lut = np.zeros(max_label_id + 1, dtype=np.int32)
-    for local_id, label_id in source_id2label_id.items():
-        lut[label_id] = local_id + offset
+    for label_id in label_ids:
+        lut[label_id] = offset + label_id
     return lut
 
 
 class DenseDataset(VersionDataset):
-    """Dense-mask reader; the mask PNG holds native ``label_id`` values (0 is background).
-
-    Raises:
-        ValueError: ``label_id`` 0 appears in the selected label counts.
-    """
+    """Dense-mask reader; the mask PNG holds native ``label_id`` values (0 is background)."""
 
     KIND: ClassVar[Literal["points", "dense"]] = "dense"
 
@@ -42,33 +35,22 @@ class DenseDataset(VersionDataset):
         version: DatasetVersion,
         *,
         split: Literal["train", "val", "test"],
+        global_offset: int,
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
-        on_missing_images: Literal["fail", "drop"] = "fail",
         image_ids: Collection[str] | None = None,
     ) -> None:
         """Select images and build the label lookup; arguments as in :class:`VersionDataset`."""
-        self._max_label_id = int(max(version.labels.column("label_id").to_pylist(), default=0))
         super().__init__(
             version,
             split=split,
+            global_offset=global_offset,
             groups=groups,
             transform=transform,
-            on_missing_images=on_missing_images,
             image_ids=image_ids,
         )
-        if 0 in self.source_id2label_id.values():
-            raise ValueError(
-                "label_id 0 is counted in the selected images, but mask value 0 is unlabeled"
-            )
-
-    def _apply_offset(self) -> None:
-        self._lut = build_lut(self.source_id2label_id, self._max_label_id, self._global_offset)
-
-    def _label_counts(self) -> pd.Series:
-        counts = self.version.label_counts.to_pandas()
-        selected = counts[counts["image_id"].isin(self.images["image_id"])]
-        return selected.groupby("label_id")["n"].sum()
+        label_ids = version.labels.column("label_id").to_pylist()
+        self._lut = build_lut(label_ids, int(max(label_ids, default=0)), global_offset)
 
     def _row_paths(self, row: Mapping[str, Any]) -> list[Path]:
         return [self.version.image_path(row), self.version.mask_path(row)]

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
@@ -12,28 +10,34 @@ from torch import nn
 
 from mermaidseg.inference.predictor import CBMPredictor, class_predictions, class_probabilities
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
+from tests.mermaidseg.inference import _tiny
 
 
-class _StubModel(nn.Module):
-    """CBM-shaped stub that records the CPU autocast state during forward."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.concept_classifier = nn.Conv2d(3, 2, 1)
-        self.seen: dict[str, object] = {}
-
-    def forward(self, x: torch.Tensor) -> SimpleNamespace:
-        self.seen["enabled"] = torch.is_autocast_enabled("cpu")
-        self.seen["dtype"] = torch.get_autocast_dtype("cpu")
-        return SimpleNamespace(logits=self.concept_classifier(x), hidden_states=x)
+@pytest.fixture(scope="module")
+def tiny_model():
+    return _tiny.build_trained_model()
 
 
-def _predictor(
-    model: nn.Module, amp_dtype: torch.dtype | None = None, size: tuple[int, int] = (8, 8)
-) -> CBMPredictor:
+def _record_autocast(model: nn.Module) -> dict[str, object]:
+    """Record the CPU autocast state seen at the start of each forward."""
+    seen: dict[str, object] = {}
+
+    def hook(_module, _args) -> None:
+        seen["enabled"] = torch.is_autocast_enabled("cpu")
+        seen["dtype"] = torch.get_autocast_dtype("cpu")
+
+    model.register_forward_pre_hook(hook)
+    return seen
+
+
+def _images(batch: int = 1) -> torch.Tensor:
+    return torch.zeros(batch, 3, *_tiny.INPUT_SIZE)
+
+
+def _predictor(model: nn.Module, amp_dtype: torch.dtype | None = None) -> CBMPredictor:
     return CBMPredictor(
-        model,
-        input_size=size,
+        model,  # type: ignore[arg-type]
+        input_size=_tiny.INPUT_SIZE,
         mean=IMAGENET_MEAN,
         std=IMAGENET_STD,
         device="cpu",
@@ -55,30 +59,31 @@ def test_class_probabilities_is_a_float32_softmax_over_the_class_dimension():
 
 
 def test_amp_dtype_runs_forward_under_cpu_autocast():
-    model = _StubModel()
-    _predictor(model, torch.bfloat16).forward_probs(torch.zeros(1, 3, 8, 8))
-    assert model.seen == {"enabled": True, "dtype": torch.bfloat16}
+    model = _tiny.build_trained_model()
+    seen = _record_autocast(model)
+    _predictor(model, torch.bfloat16).forward_probs(_images())
+    assert seen == {"enabled": True, "dtype": torch.bfloat16}
 
 
 def test_no_amp_dtype_runs_forward_without_autocast():
-    model = _StubModel()
-    _predictor(model).forward_probs(torch.zeros(1, 3, 8, 8))
-    assert model.seen["enabled"] is False
+    model = _tiny.build_trained_model()
+    seen = _record_autocast(model)
+    _predictor(model).forward_probs(_images())
+    assert seen["enabled"] is False
 
 
 def test_forward_runs_in_eval_mode_under_inference_mode():
-    model = _StubModel()
+    model = _tiny.build_trained_model().train()
     seen: dict[str, bool] = {}
     model.register_forward_pre_hook(
         lambda m, _a: seen.update(training=m.training, inference=torch.is_inference_mode_enabled())
     )
-    _predictor(model).forward_probs(torch.zeros(1, 3, 8, 8))
+    _predictor(model).forward_probs(_images())
     assert seen == {"training": False, "inference": True}
 
 
-def test_predict_points_equals_forward_probs_upsampled_and_indexed():
-    torch.manual_seed(0)
-    predictor = _predictor(_StubModel())
+def test_predict_points_equals_forward_probs_upsampled_and_indexed(tiny_model):
+    predictor = _predictor(tiny_model)
     image = np.random.default_rng(0).integers(0, 256, (21, 30, 3), dtype=np.uint8)
     points = np.array([[0, 0], [10, 15], [20, 29], [5, 28]])
 
@@ -89,17 +94,17 @@ def test_predict_points_equals_forward_probs_upsampled_and_indexed():
     up_class = F.interpolate(class_probs, size=size, mode="bilinear", align_corners=False)[0]
     up_concept = F.interpolate(concept_probs, size=size, mode="bilinear", align_corners=False)[0]
     rows, cols = points[:, 0], points[:, 1]
-    assert class_pts.shape == (4, 2)
-    assert concept_pts.shape == (4, 3)
+    assert class_pts.shape == (4, len(_tiny.CLASS_NAMES))
+    assert concept_pts.shape == (4, len(_tiny.CONCEPT_NAMES))
     assert torch.allclose(class_pts, up_class[:, rows, cols].T, atol=1e-5)
     assert torch.allclose(concept_pts, up_concept[:, rows, cols].T, atol=1e-5)
 
 
 @pytest.mark.parametrize("points", [np.zeros((4, 3)), np.zeros(4), np.zeros((2, 2, 2))])
-def test_predict_points_rejects_points_that_are_not_n_by_2(points):
+def test_predict_points_rejects_points_that_are_not_n_by_2(tiny_model, points):
     image = np.zeros((8, 8, 3), dtype=np.uint8)
     with pytest.raises(ValueError, match=r"\(N, 2\)"):
-        _predictor(_StubModel()).predict_points(image, points)
+        _predictor(tiny_model).predict_points(image, points)
 
 
 def test_sample_at_points_equals_interpolate_and_index():
@@ -117,46 +122,24 @@ def test_sample_at_points_equals_interpolate_and_index():
     assert torch.allclose(ref, got, atol=1e-5)
 
 
-class _LogitModel(nn.Module):
-    """CBM-shaped stub whose forward output carries ``concept_logits``."""
-
-    def __init__(self, logits: torch.Tensor) -> None:
-        super().__init__()
-        self.concept_classifier = nn.Conv2d(3, 2, 1)
-        self._logits = logits
-
-    def forward(self, x: torch.Tensor) -> SimpleNamespace:
-        return SimpleNamespace(logits=x, hidden_states=x, concept_logits=self._logits)
-
-
-def test_forward_concept_logits_returns_the_models_concept_logits_in_float32():
-    raw = torch.tensor([[[[1.5]], [[-2.0]]]], dtype=torch.bfloat16)  # (1, 2, 1, 1)
-    out = _predictor(_LogitModel(raw)).forward_concept_logits(torch.zeros(1, 3, 8, 8))
+def test_forward_concept_logits_returns_the_models_concept_logits_in_float32(tiny_model):
+    images = _images()
+    with torch.inference_mode():
+        expected = tiny_model(images).concept_logits
+    out = _predictor(tiny_model).forward_concept_logits(images)
     assert out.dtype == torch.float32
-    assert out.tolist() == [[[[1.5]], [[-2.0]]]]
+    assert out.shape == (1, len(_tiny.CONCEPT_NAMES), *_tiny.INPUT_SIZE)
+    assert torch.equal(out, expected)
 
 
 def test_forward_concept_logits_runs_under_the_configured_autocast():
-    class Recording(_LogitModel):
-        enabled: bool | None = None
-
-        def forward(self, x):
-            self.enabled = torch.is_autocast_enabled("cpu")
-            return super().forward(x)
-
-    model = Recording(torch.zeros(1, 2, 1, 1))
-    _predictor(model, torch.bfloat16).forward_concept_logits(torch.zeros(1, 3, 8, 8))
-    assert model.enabled is True
+    model = _tiny.build_trained_model()
+    seen = _record_autocast(model)
+    _predictor(model, torch.bfloat16).forward_concept_logits(_images())
+    assert seen["enabled"] is True
 
 
-def test_forward_concept_logits_raises_when_the_output_has_no_such_field():
-    # _StubModel's output carries only ``logits`` and ``hidden_states``.
-    with pytest.raises(RuntimeError, match="did not return concept_logits"):
-        _predictor(_StubModel()).forward_concept_logits(torch.zeros(1, 3, 8, 8))
-
-
-def _activating(activation) -> CBMPredictor:
-    model = _StubModel()
+def _activating(model: nn.Module, activation) -> CBMPredictor:
     model.concept_outputs_activation = activation  # type: ignore[assignment]
     return _predictor(model)
 
@@ -168,7 +151,9 @@ def test_activate_concept_logits_applies_the_activation_to_a_batched_copy_and_un
         seen.append(tuple(x.shape))
         return torch.sigmoid(x)
 
-    out = _activating(sigmoid).activate_concept_logits(torch.zeros(2, 3, 4))
+    out = _activating(_tiny.build_trained_model(), sigmoid).activate_concept_logits(
+        torch.zeros(2, 3, 4)
+    )
     assert seen == [(1, 2, 3, 4)]
     assert out.shape == (2, 3, 4)
     assert torch.all(out == 0.5)
@@ -176,12 +161,9 @@ def test_activate_concept_logits_applies_the_activation_to_a_batched_copy_and_un
 
 def test_activate_concept_logits_rejects_logits_that_are_not_k_h_w():
     with pytest.raises(ValueError, match=r"must be \(K, H, W\)"):
-        _activating(torch.sigmoid).activate_concept_logits(torch.zeros(1, 2, 3, 4))
-
-
-def test_activate_concept_logits_requires_the_model_to_define_an_activation():
-    with pytest.raises(RuntimeError, match="no concept_outputs_activation"):
-        _predictor(_StubModel()).activate_concept_logits(torch.zeros(2, 3, 4))
+        _activating(_tiny.build_trained_model(), torch.sigmoid).activate_concept_logits(
+            torch.zeros(1, 2, 3, 4)
+        )
 
 
 @pytest.mark.parametrize(
@@ -195,12 +177,9 @@ def test_activate_concept_logits_requires_the_model_to_define_an_activation():
 )
 def test_activate_concept_logits_rejects_an_activation_that_changes_the_shape(activation, match):
     with pytest.raises(RuntimeError, match=match):
-        _activating(activation).activate_concept_logits(torch.zeros(2, 3, 4))
-
-
-def test_a_model_without_a_concept_classifier_is_rejected():
-    with pytest.raises(ValueError, match="concept_classifier"):
-        _predictor(nn.Identity())
+        _activating(_tiny.build_trained_model(), activation).activate_concept_logits(
+            torch.zeros(2, 3, 4)
+        )
 
 
 @pytest.mark.parametrize("shape", [(5, 5), (1, 2, 5, 5)])

@@ -1,5 +1,4 @@
 training:
-    training_mode: "concept-bottleneck"
     detach_concepts: true
     concept_mapping_path: "configs/class_to_concepts.csv"
     concept_removal: configs/concept_removals/min_coverage_trainval.csv

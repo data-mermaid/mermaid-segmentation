@@ -13,7 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -68,8 +68,6 @@ from segdata_spec.s3 import (
     norm_etag,
 )
 
-MissingMode = Literal["fail", "drop"]
-
 _IMAGE_COLUMNS = [
     "image_id",
     "key",
@@ -90,15 +88,13 @@ _IN_FLIGHT_PER_WORKER = 4
 
 @dataclass(frozen=True)
 class DatasetSyncResult:
-    """What ``sync`` did for one dataset pin; ``images_dropped`` and ``resize`` feed lineage.
+    """What ``sync`` did for one dataset pin.
 
     ``resize`` is the spec applied to the dataset's images, or None when they were cached as is.
     """
 
     version: str
     manifest_sha256: str
-    images_dropped: int
-    dropped_image_ids: tuple[str, ...]
     resize: ResizeSpec | None = None
 
 
@@ -407,19 +403,10 @@ def _ordered_futures(
         yield pending.popleft()
 
 
-def _collect_dropped(
-    outcomes: Iterable[tuple[dict[str, Any], Future[None]]], mode: MissingMode
-) -> tuple[str, ...]:
-    """Wait on each row in order; return the ids dropped as missing, raising any other failure."""
-    dropped: list[str] = []
-    for row, future in outcomes:
-        try:
-            future.result()
-        except ImageMissing:
-            if mode == "fail":
-                raise
-            dropped.append(row["image_id"])
-    return tuple(dropped)
+def _collect(outcomes: Iterable[tuple[dict[str, Any], Future[None]]]) -> None:
+    """Wait on each row in order, raising the first failure."""
+    for _, future in outcomes:
+        future.result()
 
 
 def _sync_images(
@@ -427,20 +414,19 @@ def _sync_images(
     cache_dir: Path,
     store: ImageStore,
     images: pa.Table,
-    mode: MissingMode,
     spec: ResizeSpec | None,
     max_workers: int,
-) -> tuple[str, ...]:
-    """Sync every image and mask in ``images`` on a worker pool; return the ids dropped as missing.
+) -> None:
+    """Sync every image and mask in ``images`` on a worker pool.
 
-    Results are consumed in row order, so the error raised and the dropped ids match a serial run.
+    Results are consumed in row order, so the error raised matches a serial run.
     """
     work = partial(_sync_row, client, cache_dir, store, spec)
     rows = images.select(_IMAGE_COLUMNS).to_pylist()
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         try:
             outcomes = _ordered_futures(pool, work, rows, _IN_FLIGHT_PER_WORKER * max_workers)
-            return _collect_dropped(outcomes, mode)
+            _collect(outcomes)
         except BaseException:
             pool.shutdown(cancel_futures=True)
             raise
@@ -450,16 +436,8 @@ def _images_table(table_bytes: Mapping[str, bytes]) -> pa.Table:
     return pq.read_table(io.BytesIO(table_bytes["images.parquet"]))
 
 
-def _dataset_result(
-    pin: Pin, dropped: tuple[str, ...], spec: ResizeSpec | None
-) -> DatasetSyncResult:
-    return DatasetSyncResult(
-        version=pin.version,
-        manifest_sha256=pin.manifest_sha256,
-        images_dropped=len(dropped),
-        dropped_image_ids=dropped,
-        resize=spec,
-    )
+def _dataset_result(pin: Pin, spec: ResizeSpec | None) -> DatasetSyncResult:
+    return DatasetSyncResult(version=pin.version, manifest_sha256=pin.manifest_sha256, resize=spec)
 
 
 def _write_marker(
@@ -468,7 +446,6 @@ def _write_marker(
     pin: Pin,
     spec: ResizeSpec | None,
     groups: Collection[str] | None,
-    dropped: tuple[str, ...],
     marker_id: str | None = None,
 ) -> None:
     """Write this sync's own marker file; markers are never read or rewritten here.
@@ -477,7 +454,7 @@ def _write_marker(
     """
     namespace = marker_id or resize_id(spec)
     directory = synced_marker_dir(cache_dir, namespace, bucket, pin.name, pin.version)
-    marker = SyncMarker(spec, None if groups is None else frozenset(groups), dropped)
+    marker = SyncMarker(spec, None if groups is None else frozenset(groups))
     _write_atomic(new_marker_path(directory), dump_marker(marker))
 
 
@@ -614,8 +591,8 @@ def sync_tables(
     _run_check_split(images, check_split)
     results: dict[str, DatasetSyncResult] = {}
     for name, pin in pins.items():
-        _write_marker(cache_dir, bucket, pin, None, (), (), TABLES_MARKER_ID)
-        results[name] = _dataset_result(pin, (), None)
+        _write_marker(cache_dir, bucket, pin, None, (), TABLES_MARKER_ID)
+        results[name] = _dataset_result(pin, None)
     return SyncResult(datasets=results, taxonomy=taxonomy)
 
 
@@ -626,7 +603,6 @@ def sync(
     *,
     bucket: str,
     selection: Mapping[str, Collection[str] | None] | None = None,
-    on_missing_images: Mapping[str, MissingMode] | None = None,
     check_split: Callable[[str, set[str]], None] | None = None,
     taxonomy: Pin | None = None,
     resize: Mapping[str, ResizeSpec | None] | None = None,
@@ -636,7 +612,7 @@ def sync(
 
     Every manifest, then every table, then the selection and ``resize`` checks, then
     ``check_split`` per dataset, all precede the first image. A dataset absent from ``selection``
-    syncs all groups; one absent from ``on_missing_images`` fails on a missing image.
+    syncs all groups.
 
     A dataset with a spec in ``resize`` caches each image resized per the spec, and each mask
     resized to its image's scaled size, at ``<cache_dir>/resized/<spec.id>/<bucket>/<key>``; the
@@ -646,15 +622,14 @@ def sync(
 
     After a dataset's images and tables verify, a new marker file in
     ``<cache_dir>/synced/<spec.id or original>/<bucket>/<dataset>/<version>/`` records the
-    spec, the synced groups (``"all"`` for no selection) and the dropped image ids. Each sync adds
+    spec and the synced groups (``"all"`` for no selection). Each sync adds
     its own file and never reads or changes the others; ``open_version`` unions them and requires
     at least one.
     A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
     ``resize``, or mapped to None, caches the original bytes.
 
     Images and masks are synced on ``max_workers`` threads (default ``min(8, os.cpu_count())``),
-    with results taken in row order, so the error raised and ``dropped_image_ids`` match a serial
-    run. Configure ``client`` with ``max_pool_connections`` of at least ``max_workers``.
+    with results taken in row order, so the error raised matches a serial run. Configure ``client`` with ``max_pool_connections`` of at least ``max_workers``.
 
     Raises:
         PinMismatch: A manifest, downloaded or cached, differs from its pin.
@@ -663,7 +638,7 @@ def sync(
             pixel size differs from the size scaled from its row's ``width`` and ``height``.
         ImageUndecodable: An original to resize matches its record but Pillow cannot decode it.
         ImageChanged: An image or mask no longer matches its recorded ETag.
-        ImageMissing: An image or mask is absent and its dataset's mode is ``fail``.
+        ImageMissing: An image or mask is absent.
         ValueError: ``max_workers`` is below 1; ``selection`` names
             a dataset not in ``pins`` or a group absent from its dataset, or ``resize`` names a
             dataset not in ``pins`` (raised before any image); or a published key would leave
@@ -673,7 +648,6 @@ def sync(
     """
     workers = _resolve_max_workers(max_workers)
     selection = selection or {}
-    on_missing_images = on_missing_images or {}
     resize = resize or {}
     manifests, images = _fetch_dataset_tables(client, pins, cache_dir, bucket, taxonomy)
     _check_selection(selection, images)
@@ -681,17 +655,16 @@ def sync(
     _run_check_split(images, check_split)
     results: dict[str, DatasetSyncResult] = {}
     for name, pin in pins.items():
-        dropped = _sync_images(
+        _sync_images(
             client,
             cache_dir,
             manifests[name].image_store,
             _select_groups(images[name], selection.get(name)),
-            on_missing_images.get(name, "fail"),
             resize.get(name),
             workers,
         )
-        _write_marker(cache_dir, bucket, pin, resize.get(name), selection.get(name), dropped)
-        results[name] = _dataset_result(pin, dropped, resize.get(name))
+        _write_marker(cache_dir, bucket, pin, resize.get(name), selection.get(name))
+        results[name] = _dataset_result(pin, resize.get(name))
     return SyncResult(datasets=results, taxonomy=taxonomy)
 
 
@@ -728,7 +701,7 @@ def _sync_features(
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         try:
             outcomes = _ordered_futures(pool, work, rows, _IN_FLIGHT_PER_WORKER * max_workers)
-            _collect_dropped(outcomes, "fail")
+            _collect(outcomes)
         except BaseException:
             pool.shutdown(cancel_futures=True)
             raise

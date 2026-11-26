@@ -15,19 +15,18 @@ LABELS = {5: "five", 7: "seven", 9: "nine"}
 
 
 @pytest.mark.parametrize(
-    ("annotators", "label_ids", "painted"),
+    ("annotators", "painted"),
     [
-        # host labels (1, 1) as 5; archived alone labels (2, 2) as 7; 5 and 7 tie on one point.
-        (["host", "archived"], {1: 5, 2: 7}, (1, 2, 0)),
+        # host labels (1, 1) as 5; archived alone labels (2, 2) as 7.
+        (["host", "archived"], (5, 7, 0)),
         # archived labels both points as 7.
-        (["archived", "host"], {1: 7}, (1, 1, 0)),
+        (["archived", "host"], (7, 7, 0)),
     ],
     ids=["host-first", "archived-first"],
 )
 def test_annotator_priority_falls_back_and_drops_unlisted(
     tmp_path: Path,
     annotators: list[str],
-    label_ids: dict[int, int],
     painted: tuple[int, int, int],
 ) -> None:
     points = [
@@ -39,9 +38,8 @@ def test_annotator_priority_falls_back_and_drops_unlisted(
     version = open_written(
         tmp_path, kind="points", images=[ImageSpec("i1")], labels=LABELS, points=points
     )
-    ds = PointDataset(version, split="val", annotators=annotators)
+    ds = PointDataset(version, split="val", global_offset=0, annotators=annotators)
     _, mask = ds[0]
-    assert ds.source_id2label_id == label_ids
     assert (mask[1, 1], mask[2, 2], mask[3, 3]) == painted
 
 
@@ -61,7 +59,7 @@ def test_annotators_none_requires_a_single_annotator(
         tmp_path, kind="points", images=[ImageSpec("i1")], labels=LABELS, points=points
     )
     with expectation:
-        ds = PointDataset(version, split="val")
+        ds = PointDataset(version, split="val", global_offset=0)
         assert ds[0][1].astype(bool).sum() == 2
 
 
@@ -74,8 +72,29 @@ def test_image_without_a_selected_point_is_dropped(tmp_path: Path) -> None:
         labels=LABELS,
         points=points,
     )
-    ds = PointDataset(version, split="val", annotators=["host"])
+    ds = PointDataset(version, split="val", global_offset=0, annotators=["host"])
     assert list(ds.images["image_id"]) == ["i1"]
+
+
+@pytest.mark.parametrize(
+    ("label_id", "raises"),
+    [(9, False), (10, True), (6, False), (0, True), (-1, True), (1, False)],
+    ids=["max", "above-max", "absent-from-labels", "zero", "negative", "one"],
+)
+def test_point_label_ids_must_lie_between_one_and_the_versions_max(
+    tmp_path: Path, label_id: int, raises: bool
+) -> None:
+    version = _write_points(tmp_path, [("i1", 1, 1, label_id)], ["i1"])
+    expectation = pytest.raises(ValueError, match=str(label_id)) if raises else nullcontext()
+    with expectation:
+        PointDataset(version, split="val", global_offset=0, annotators=["default"])
+
+
+def test_a_point_id_absent_from_labels_is_painted_at_its_offset_id(tmp_path: Path) -> None:
+    version = _write_points(tmp_path, [("i1", 1, 1, 6)], ["i1"])
+    ds = PointDataset(version, split="val", global_offset=10, annotators=["default"])
+    _, mask = ds[0]
+    assert mask[1, 1] == 16
 
 
 @pytest.mark.parametrize(
@@ -93,7 +112,7 @@ def test_points_must_lie_inside_the_image(tmp_path: Path, row: int, col: int, ra
     )
     expectation = pytest.raises(ValueError, match="outside") if raises else nullcontext()
     with expectation:
-        assert len(PointDataset(version, split="val")) == 1
+        assert len(PointDataset(version, split="val", global_offset=0)) == 1
 
 
 @pytest.mark.parametrize(
@@ -109,7 +128,7 @@ def test_unknown_annotator_raises_naming_each(
         tmp_path, kind="points", images=[ImageSpec("i1")], labels=LABELS, points=points
     )
     with pytest.raises(ValueError, match="annotators") as info:
-        PointDataset(version, split="val", annotators=listed)
+        PointDataset(version, split="val", global_offset=0, annotators=listed)
     assert all(name in str(info.value) for name in named)
     assert "'archived'" not in str(info.value)
 
@@ -132,20 +151,12 @@ def test_points_holds_the_selected_rows(tmp_path: Path) -> None:
     version = open_written(
         tmp_path, kind="points", images=[ImageSpec("i1")], labels=LABELS, points=points
     )
-    ds = PointDataset(version, split="val", annotators=["host", "archived"])
+    ds = PointDataset(version, split="val", global_offset=0, annotators=["host", "archived"])
     assert list(ds.points.columns) == ["image_id", "row", "col", "label_id", "annotator"]
     assert sorted(_selected_rows(ds)) == [
         ("i1", 1, 1, 5, "host"),
         ("i1", 2, 2, 7, "archived"),
     ]
-
-
-def test_points_omit_a_dropped_images_points(tmp_path: Path) -> None:
-    points = [("i1", 0, 0, 5), ("i2", 1, 1, 7), ("i2", 2, 2, 7)]
-    version = _write_points(tmp_path, points, ["i1", "i2"])
-    version.image_path({"key": "i2.jpg"}).unlink()
-    ds = PointDataset(version, split="val", on_missing_images="drop")
-    assert _selected_rows(ds) == [("i1", 0, 0, 5, "default")]
 
 
 def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: list[str]) -> Any:
@@ -156,15 +167,6 @@ def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: 
         labels=LABELS,
         points=points,
     )
-
-
-def test_set_source_vocabulary_repaints_points_with_the_new_ids(tmp_path: Path) -> None:
-    # Local ids are five=1 (two points) and seven=2; the new vocabulary reverses them.
-    points = [("i1", 0, 0, 5), ("i1", 1, 1, 5), ("i1", 2, 2, 7)]
-    ds = PointDataset(_write_points(tmp_path, points, ["i1"]), split="val")
-    ds.set_source_vocabulary({1: "seven", 2: "five"}, {"seven": 1, "five": 2}, 3)
-    _, mask = ds[0]
-    assert (mask[0, 0], mask[1, 1], mask[2, 2], mask[3, 3]) == (2, 2, 1, 0)
 
 
 @pytest.mark.parametrize(

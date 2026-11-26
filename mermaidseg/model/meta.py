@@ -148,12 +148,11 @@ class MetaModel:
     """Wrapper for training and inference of segmentation models.
 
     Handles model initialisation, optimizer/scheduler/loss wiring, and the
-    train/validation loop primitives. The only training mode is
-    ``"concept-bottleneck"``: joint segmentation + concept supervision.
+    train/validation loop primitives: joint segmentation + concept supervision.
 
     Source-label datasets emit ``source_labels`` in the joint global source
     space (see :class:`SourceLabelRegistry`); ``MetaModel`` converts them to
-    ``target_labels`` (and optional ``concept_labels``) on-device via long-tensor
+    ``target_labels`` and ``concept_labels`` on-device via long-tensor
     lookups passed via ``source_to_target_lookup`` and
     ``source_to_concepts_lookup``.
 
@@ -170,10 +169,8 @@ class MetaModel:
         optimizer: Optimiser instance.
         scheduler: LR scheduler.
         source_to_target_lookup: 1-D long tensor of shape ``(N+1,)``
-            mapping global source IDs to target label IDs. ``None`` enables identity passthrough
-            (synthetic / single-source pipelines whose source space already matches target space).
+            mapping global source IDs to target label IDs.
         source_to_concepts_lookup: Float tensor of shape ``(N+1, C)``.
-        conceptid2labelid: Maps concept IDs to target label IDs.
         concept_value2id: Maps concept names and values to IDs.
         resuming_within_epoch: True after loading a mid-epoch step checkpoint.
     """
@@ -188,25 +185,24 @@ class MetaModel:
     loss: torch.nn.Module
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler
-    source_to_target_lookup: torch.Tensor | None
-    source_to_concepts_lookup: torch.Tensor | None
-    conceptid2labelid: dict[int, int] | None
-    concept_value2id: dict[str, dict[str, list[int]]] | None
+    num_concepts: int
+    source_to_target_lookup: torch.Tensor
+    source_to_concepts_lookup: torch.Tensor
+    concept_value2id: dict[str, dict[str, list[int]]]
     resuming_within_epoch: bool
 
     def __init__(
         self,
         run_name: str,
         num_classes: int,
-        num_concepts: int | None = None,
+        num_concepts: int,
         *,
         model_kwargs: ConfigDict,
         training_kwargs: ConfigDict,
         device: str | torch.device,
-        source_to_target_lookup: torch.Tensor | None = None,
-        source_to_concepts_lookup: torch.Tensor | None = None,
-        conceptid2labelid: dict[int, int] | None = None,
-        concept_value2id: dict[str, dict[str, list[int]]] | None = None,
+        source_to_target_lookup: torch.Tensor,
+        source_to_concepts_lookup: torch.Tensor,
+        concept_value2id: dict[str, dict[str, list[int]]],
         model: torch.nn.Module | None = None,
     ):
         """Build the model, loss, optimizer, scheduler, and label lookups.
@@ -218,9 +214,8 @@ class MetaModel:
             model_kwargs: Model-specific config passed to the architecture.
             training_kwargs: Training hyperparameters.
             device: Device the model and tensors live on.
-            source_to_target_lookup: Source-to-target label lookup, or ``None`` for identity.
+            source_to_target_lookup: Source-to-target label lookup.
             source_to_concepts_lookup: Source-to-concept lookup.
-            conceptid2labelid: Maps concept IDs to target label IDs.
             concept_value2id: Maps concept names and values to IDs.
             model: A prebuilt model to use as is; no encoder is loaded and no model is built.
         """
@@ -234,10 +229,6 @@ class MetaModel:
         self.model_name = model_kwargs.pop("name")
         self.model_kwargs = model_kwargs
 
-        self.training_mode = training_kwargs.pop("training_mode")
-        assert self.training_mode == "concept-bottleneck", (
-            f"Invalid training_mode: {self.training_mode}"
-        )
         self._metric_shards: list[MetricShard] | None = None
         # One process per GPU (torchrun). The process group must already exist;
         # each rank's loader yields that rank's shard of the global microbatch.
@@ -286,17 +277,8 @@ class MetaModel:
         self.iterations_per_val_epoch = int(training_kwargs.iterations_per_val_epoch)
         self._val_loader_iter: _BaseDataLoaderIter | None = None
         self._val_loader: _BatchLoader | None = None
-        self.source_to_target_lookup = (
-            source_to_target_lookup.to(device).long()
-            if source_to_target_lookup is not None
-            else None
-        )
-        self.source_to_concepts_lookup = (
-            source_to_concepts_lookup.to(device).float()
-            if source_to_concepts_lookup is not None
-            else None
-        )
-        self.conceptid2labelid = conceptid2labelid
+        self.source_to_target_lookup = source_to_target_lookup.to(device).long()
+        self.source_to_concepts_lookup = source_to_concepts_lookup.to(device).float()
         self.concept_value2id = concept_value2id
 
         model_kwargs["num_classes"] = self.num_classes
@@ -319,8 +301,7 @@ class MetaModel:
 
         loss_cls = lookup_class(LOSS_CLASSES, "loss", training_kwargs.loss.pop("type"))
         loss_kwargs = dict(training_kwargs.loss)
-        if self.concept_value2id is not None:
-            loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
+        loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
         self.loss = loss_cls(**loss_kwargs)
 
         # Taxonomic KL coherence term added to the concept loss. The trainer drops the
@@ -336,7 +317,7 @@ class MetaModel:
             )
             self.taxonomic_loss = TaxonomicLoss(
                 taxonomy,
-                cast("dict[str, dict[str, list[int]]]", self.concept_value2id),
+                self.concept_value2id,
                 **taxonomic_kwargs,
             ).to(device)
 
@@ -435,13 +416,7 @@ class MetaModel:
         return True
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
-        """Map source-space labels to target-space labels via the lookup tensor.
-
-        When ``source_to_target_lookup`` is ``None``, source labels are assumed to already be in
-        target space (identity passthrough — useful for single-source or synthetic pipelines).
-        """
-        if self.source_to_target_lookup is None:
-            return source_labels
+        """Map source-space labels to target-space labels via the lookup tensor."""
         return source_labels_to_target_labels(source_labels, self.source_to_target_lookup)
 
     def set_concept_source_mask(self, keep: torch.Tensor | None) -> None:
@@ -453,7 +428,7 @@ class MetaModel:
         not masked.
         """
         if keep is not None:
-            if self.num_concepts is not None and keep.shape[1] != self.num_concepts:
+            if keep.shape[1] != self.num_concepts:
                 raise ValueError(
                     f"concept source mask has {keep.shape[1]} channels, the model {self.num_concepts}"
                 )
@@ -461,10 +436,6 @@ class MetaModel:
         self.concept_source_keep = keep
 
     def _to_concept_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
-        if self.source_to_concepts_lookup is None:
-            raise RuntimeError(
-                "MetaModel.source_to_concepts_lookup is not set; cannot run concept modes."
-            )
         return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
 
     def _update_evaluator(
@@ -472,17 +443,15 @@ class MetaModel:
         evaluator: Any,
         outputs: torch.Tensor,
         target_labels: torch.Tensor,
-        concept_outputs: torch.Tensor | None,
-        target_concepts: torch.Tensor | None,
+        concept_outputs: torch.Tensor,
+        target_concepts: torch.Tensor,
     ) -> None:
         """Update ``evaluator`` with one batch already small enough to sit on its device."""
         device = getattr(evaluator, "device", self.device)
         outputs = outputs.detach().to(device)
         target_labels = target_labels.to(device)
-        if concept_outputs is not None:
-            concept_outputs = concept_outputs.detach().to(device)
-        if target_concepts is not None:
-            target_concepts = target_concepts.to(device)
+        concept_outputs = concept_outputs.detach().to(device)
+        target_concepts = target_concepts.to(device)
 
         preds = class_predictions(outputs) if outputs.ndim > 3 else outputs
         for metric in evaluator.metric_dict.values():
@@ -511,6 +480,8 @@ class MetaModel:
             shard.target_concepts = None
             assert outputs is not None
             assert target_labels is not None
+            assert concept_outputs is not None
+            assert target_concepts is not None
             self._update_evaluator(
                 evaluator, outputs, target_labels, concept_outputs, target_concepts
             )
@@ -537,6 +508,8 @@ class MetaModel:
             raise RuntimeError("distributed forward did not return metric shards.")
         assert outputs is not None
         assert target_labels is not None
+        assert concept_outputs is not None
+        assert target_concepts is not None
         self._update_evaluator(evaluator, outputs, target_labels, concept_outputs, target_concepts)
 
     def _get_ddp_step(self) -> DistributedDataParallel:
@@ -556,8 +529,6 @@ class MetaModel:
                 and step.concept_keep is self.concept_source_keep
             ):
                 return ddp
-        if self.source_to_concepts_lookup is None:
-            raise RuntimeError("distributed requires concept labels.")
         step = DDPLossStep(
             ShardStep(
                 self.model,
@@ -684,9 +655,7 @@ class MetaModel:
         ):
             segmentation_outputs = self.model(images)
 
-        assert target_concepts is not None, (
-            "target_concepts must be provided in 'concept-bottleneck' mode"
-        )
+        assert target_concepts is not None, "target_concepts is required without distributed"
         loss, outputs, concept_outputs, loss_components = apply_concept_bottleneck_loss(
             segmentation_outputs,
             self.loss,

@@ -10,7 +10,7 @@
 that accumulates counts per batch, so memory does not grow with the dataset
 (see :mod:`mermaidseg.evaluation.hierarchical`).
 
-With ``training_mode="concept-bottleneck"`` the model already applies a per-rank softmax, so
+The concept-bottleneck model already applies a per-rank softmax, so
 the default ``score_transform="none"`` is correct. Use ``"softmax"`` for raw logits, or
 ``"renormalize"`` for positive scores that do not sum to 1. Only ECE depends on this.
 """

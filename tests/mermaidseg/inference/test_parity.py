@@ -19,7 +19,7 @@ def test_inference_path_matches_the_eval_path(run, bundle_dir):
     with torch.no_grad():
         outputs = run[1](eval_batch)
     eval_class = class_probabilities(outputs.logits)
-    eval_concepts = outputs.hidden_states.float()
+    eval_concepts = outputs.concept_probs.float()
 
     predictor = CBMPredictor.from_bundle(load_bundle(bundle_dir, "cpu"), amp_dtype=None)
     inf_class, inf_concepts = predictor.forward_probs(predictor.preprocess(image)[None])

@@ -9,11 +9,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from segdata_spec import DATASET_BUCKET as DATASET_BUCKET
 from segdata_spec.manifest import Pin
 from segdata_spec.resize import ResizeSpec
 from segdata_spec.splits import read_split_file
-from segdata_spec.sync import MissingMode
 
 TAXONOMY_NAME = "mermaid-benthic"
 
@@ -53,7 +51,6 @@ class DatasetEntry(_Strict):
     version: str
     manifest_sha256: str
     split_file: Path | None = None
-    on_missing_images: MissingMode = "fail"
     resize: ResizeSpec | None = None
     train: SplitSelection | None = None
     val: SplitSelection | None = None
@@ -122,7 +119,6 @@ class SyncPlan:
     pins: dict[str, Pin]
     taxonomy: Pin | None
     selection: dict[str, set[str] | None]
-    on_missing_images: dict[str, MissingMode]
     split_files: dict[str, Path]
     resize: dict[str, ResizeSpec | None] = field(default_factory=dict)
 
@@ -195,7 +191,6 @@ def sync_plan(data_cfg: Mapping[str, Any], repo_root: Path) -> SyncPlan:
         },
         taxonomy=taxonomy,
         selection={name: _entry_selection(e, repo_root) for name, e in section.datasets.items()},
-        on_missing_images={name: e.on_missing_images for name, e in section.datasets.items()},
         resize={name: e.resize for name, e in section.datasets.items()},
         split_files={
             name: repo_root / e.split_file

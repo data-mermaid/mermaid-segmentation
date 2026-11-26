@@ -19,7 +19,7 @@ _POSITION = ["image_id", "row", "col"]
 def rasterize_points(
     rows: NDArray[np.integer[Any]],
     cols: NDArray[np.integer[Any]],
-    local_ids: NDArray[np.integer[Any]],
+    label_ids: NDArray[np.integer[Any]],
     shape: tuple[int, int],
     padding: int | None,
     offset: int,
@@ -32,7 +32,7 @@ def rasterize_points(
     Args:
         rows: Point rows.
         cols: Point columns.
-        local_ids: Local source ids (``1..N``), one per point.
+        label_ids: The ``label_id`` of each point.
         shape: Mask ``(height, width)``.
         padding: Half-size of the painted square in pixels; ``None`` or 0 paints one pixel.
         offset: Added to every foreground id.
@@ -45,7 +45,7 @@ def rasterize_points(
         return mask
     rows = rows.astype(np.intp)
     cols = cols.astype(np.intp)
-    ids = local_ids.astype(np.int32) + np.int32(offset)
+    ids = label_ids.astype(np.int32) + np.int32(offset)
     if padding is not None and padding > 0:
         r0 = np.maximum(0, rows - padding)
         c0 = np.maximum(0, cols - padding)
@@ -122,6 +122,26 @@ def select_points(
     return selected
 
 
+def _check_label_ids_in_range(label_ids: NDArray[np.int32], version: DatasetVersion) -> None:
+    """Raise if any point ``label_id`` is below 1 or exceeds the largest of ``labels.parquet``.
+
+    An id below that maximum but absent from the table stays allowed: it is painted as
+    ``offset + id`` and becomes background only through the registry lookup
+    (``SourceLabelRegistry.source_to_target``).
+    """
+    known = version.labels.column("label_id").to_pylist()
+    limit = max(known, default=0)
+    below = np.unique(label_ids[label_ids < 1])
+    if below.size:
+        raise ValueError(f"point label_id {below.tolist()} is below 1; 0 is background")
+    above = np.unique(label_ids[label_ids > limit])
+    if above.size:
+        raise ValueError(
+            f"point label_id {above.tolist()} exceeds the largest label_id {limit} "
+            "in labels.parquet"
+        )
+
+
 class PointDataset(VersionDataset):
     """Point-annotation reader; each item's mask is the image's points, painted with ``padding``.
 
@@ -141,9 +161,9 @@ class PointDataset(VersionDataset):
         version: DatasetVersion,
         *,
         split: Literal["train", "val", "test"],
+        global_offset: int,
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
-        on_missing_images: Literal["fail", "drop"] = "fail",
         image_ids: Collection[str] | None = None,
         annotators: Sequence[str] | None = None,
         padding: int | None = None,
@@ -153,9 +173,9 @@ class PointDataset(VersionDataset):
         Args:
             version: The opened version.
             split: The split; only ``"train"`` resamples a sample whose mask is empty.
+            global_offset: Added to every point's ``label_id``.
             groups: Image groups to keep; ``None`` keeps all.
             transform: Called as ``transform(image=, mask=)`` and returning a dict with both.
-            on_missing_images: ``"fail"`` or ``"drop"`` images whose files are not cached.
             image_ids: Keeps only these images of the selection; ``None`` keeps all.
             annotators: Annotators in priority order. A point keeps the labels of the first one
                 that annotated it, and a point with none of them is dropped. ``None`` requires a
@@ -163,8 +183,9 @@ class PointDataset(VersionDataset):
             padding: Half-size in pixels of the square painted around each point.
 
         Raises:
-            ValueError: ``annotators`` is ``None`` and the version has several annotators, or a
-                point lies outside its image.
+            ValueError: ``annotators`` is ``None`` and the version has several annotators, a
+                point lies outside its image, or a selected point's ``label_id`` exceeds the
+                version's largest ``label_id`` in ``labels.parquet``.
         """
         self.padding = padding
         self._annotators = annotators
@@ -172,38 +193,31 @@ class PointDataset(VersionDataset):
         super().__init__(
             version,
             split=split,
+            global_offset=global_offset,
             groups=groups,
             transform=transform,
-            on_missing_images=on_missing_images,
             image_ids=image_ids,
         )
-        # ``drop`` mode removes images after ``_filter_images``, so their points go here.
+        # ``image_ids`` narrows the images after ``_filter_images``; drop the other images' points.
         self.points = self.points[self.points["image_id"].isin(self.images["image_id"])]
         points = self.points
         self._rows = points["row"].to_numpy(dtype=np.intp)
         self._cols = points["col"].to_numpy(dtype=np.intp)
+        self._label_ids = points["label_id"].to_numpy(dtype=np.int32)
+        _check_label_ids_in_range(self._label_ids, version)
         self._positions = points.reset_index(drop=True).groupby("image_id", sort=False).indices
-        self._refresh_source_ids()
-
-    def _refresh_source_ids(self) -> None:
-        label_to_local = {label: i for i, label in self.source_id2label_id.items()}
-        self._local_ids = self.points["label_id"].map(label_to_local).to_numpy(dtype=np.int32)
 
     def _filter_images(self, images: pd.DataFrame) -> pd.DataFrame:
         self.points = select_points(self.points, images, self._annotators)
         return images[images["image_id"].isin(self.points["image_id"])]
-
-    def _label_counts(self) -> pd.Series:
-        selected = self.points[self.points["image_id"].isin(self.images["image_id"])]
-        return selected.groupby("label_id").size()
 
     def _read_mask(self, row: Mapping[str, Any], image_shape: tuple[int, int]) -> NDArray[np.int32]:
         positions = self._positions[row["image_id"]]
         return rasterize_points(
             self._rows[positions],
             self._cols[positions],
-            self._local_ids[positions],
+            self._label_ids[positions],
             image_shape,
             self.padding,
-            self._global_offset,
+            self.global_offset,
         )

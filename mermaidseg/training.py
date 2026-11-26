@@ -366,7 +366,7 @@ def run(args: argparse.Namespace) -> None:
         lineage = collect_lineage(
             resolved_config=to_plain_dict(cfg_logger),
             seed=seed,
-            data_version=data_version(section, dataset_dict),
+            data_version=data_version(section),
         )
         if checkpoint_data is not None:
             lineage = inherit_lineage(lineage, checkpoint_data.get("lineage"))
@@ -430,7 +430,6 @@ def run(args: argparse.Namespace) -> None:
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,
         device=device,
-        calculate_concept_metrics=cfg.training.training_mode != "standard",
         concept_value2id=registry.concept_value2id,
     )
     # -- 5. Train (run lifecycle managed by `with`) ---------------------------
@@ -441,6 +440,7 @@ def run(args: argparse.Namespace) -> None:
         logger_context = Logger(
             config=cfg_logger,
             meta_model=meta_model,
+            id2concept=dict(enumerate(schema.channel_names)),
             log_checkpoint=1,
             checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},

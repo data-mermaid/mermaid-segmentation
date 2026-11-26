@@ -11,6 +11,8 @@ import pytest
 import torch
 import yaml
 
+from mermaidseg.data import PointDataset
+from mermaidseg.data.config import Split
 from mermaidseg.io import ConfigDict
 from mermaidseg.run_setup import (
     MODEL_CHECKPOINT_KEYS,
@@ -22,6 +24,7 @@ from mermaidseg.run_setup import (
     target_labels,
     write_resolved_config,
 )
+from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
 
 def test_resolved_config_yaml_holds_the_overridden_values(tmp_path):
@@ -117,19 +120,30 @@ def test_target_labels_are_sorted_whatever_the_config_order():
 # ---------- build_registry ----------
 
 
-class _SourceDataset:
-    """A dataset with a labelled source vocabulary, as ``build_registry`` wires it."""
+def _reader(
+    tmp_path: Path,
+    name: str,
+    labels: dict[int, tuple[str, str]],
+    split: Split = "train",
+    global_offset: int = 0,
+) -> PointDataset:
+    """A reader of source ``name`` over ``label_id -> (name, benthic attribute)``."""
+    rows = [
+        {"label_id": i, "name": label, "mermaid_benthic_attribute": attribute}
+        for i, (label, attribute) in labels.items()
+    ]
+    version = open_written(
+        tmp_path / name / split,
+        kind="points",
+        images=[ImageSpec("i1")],
+        labels=rows,
+        points=[("i1", 0, 0, min(labels))],
+        name=name,
+    )
+    return PointDataset(version, split=split, global_offset=global_offset)
 
-    def __init__(self, source_name: str, names: list[str]) -> None:
-        self.SOURCE_NAME = source_name
-        self.source_id2name = dict(enumerate(names, start=1))
-        self.source_name2id = {name: i for i, name in self.source_id2name.items()}
-        self.num_source_classes = len(names) + 1
-        self.label_targets = {"pocillopora alive": "Pocillopora", "sand": "Sand"}
-        self.global_offset: int | None = None
 
-    def set_global_offset(self, offset: int) -> None:
-        self.global_offset = offset
+_CORALSCAPES = {1: ("pocillopora alive", "Pocillopora"), 2: ("sand", "Sand")}
 
 
 def _schema_config(tmp_path: Path, *sources: str) -> Path:
@@ -155,23 +169,19 @@ def _registry_training_cfg(**overrides) -> ConfigDict:
             "concept_mapping_path": "configs/class_to_concepts.csv",
             "concept_removal": None,
             "class_subset": ["Pocillopora", "Sand"],
-            "training_mode": "concept-bottleneck",
             "label_roll_up": False,
             **overrides,
         }
     )
 
 
-def _coralscapes_dataset_dict() -> dict[tuple[str, str], _SourceDataset]:
-    names = ["pocillopora alive", "sand"]
-    return {("coralscapes_v2", "train"): _SourceDataset("coralscapes_v2", names)}
+def _coralscapes_dataset_dict(tmp_path: Path) -> dict[tuple[str, str], PointDataset]:
+    return {("coralscapes_v2", "train"): _reader(tmp_path, "coralscapes_v2", _CORALSCAPES)}
 
 
-def test_build_registry_freezes_concepts_to_the_schema_and_wires_the_datasets(
-    tmp_path, monkeypatch
-):
+def test_build_registry_freezes_concepts_to_the_schema(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    dataset_dict = _coralscapes_dataset_dict()
+    dataset_dict = _coralscapes_dataset_dict(tmp_path)
     registry, schema = build_registry(
         dataset_dict,
         _registry_training_cfg(),
@@ -180,28 +190,39 @@ def test_build_registry_freezes_concepts_to_the_schema_and_wires_the_datasets(
     assert registry.target_id2label == {1: "pocillopora", 2: "sand"}
     assert schema.num_channels > 0
     assert registry.num_concepts == schema.num_channels
-    assert dataset_dict[("coralscapes_v2", "train")].global_offset == 0
 
 
 def test_build_registry_exits_naming_a_dataset_missing_from_the_concept_schema(tmp_path):
-    dataset_dict = {("coralnet", "train"): _SourceDataset("coralnet", ["sand"])}
+    dataset_dict = {("coralnet", "train"): _reader(tmp_path, "coralnet", {1: ("sand", "Sand")})}
     with pytest.raises(SystemExit, match=r"\['coralnet'\].*missing from the frozen concept schema"):
         build_registry(
             dataset_dict,
             _registry_training_cfg(),
             schema_config=_schema_config(tmp_path, "coralscapes_v2"),
         )
-    assert dataset_dict[("coralnet", "train")].global_offset is None
 
 
-def test_build_registry_raises_when_the_registry_has_fewer_concepts_than_the_schema(
-    tmp_path, monkeypatch
-):
+def test_build_registry_registers_one_reader_per_source(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # Standard mode builds no concept lookup, so the registry has 0 channels against the schema's.
-    with pytest.raises(RuntimeError, match=r"registry has 0 concept channels, schema \d+"):
-        build_registry(
-            _coralscapes_dataset_dict(),
-            _registry_training_cfg(training_mode="standard"),
-            schema_config=_schema_config(tmp_path, "coralscapes_v2"),
-        )
+    val = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="val")
+    train = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="train")
+    pacific = _reader(
+        tmp_path,
+        "pacific_labeled_corals",
+        {1: ("acropora", "Acropora")},
+        split="val",
+        global_offset=10,
+    )
+    dataset_dict = {
+        ("coralscapes_v2", "val"): val,
+        ("coralscapes_v2", "train"): train,
+        ("pacific_labeled_corals", "val"): pacific,
+    }
+    registry, _ = build_registry(
+        dataset_dict,
+        _registry_training_cfg(),
+        schema_config=_schema_config(tmp_path, "coralscapes_v2", "pacific_labeled_corals"),
+    )
+    # pacific has no train split, so its only split stands in.
+    assert len(registry.datasets) == 2
+    assert registry.datasets[1] is pacific

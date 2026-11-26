@@ -38,8 +38,8 @@ def pacific_reader(section: DataSection, cache_dir: Path, repo_root: Path) -> Po
     return PointDataset(
         open_dataset_version(section, SOURCE_NAME, cache_dir),
         split="val",
+        global_offset=0,
         groups=groups,
-        on_missing_images=entry.on_missing_images,
         annotators=entry.val.annotators,
     )
 
