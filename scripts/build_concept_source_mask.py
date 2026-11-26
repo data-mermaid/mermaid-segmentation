@@ -20,20 +20,22 @@ CoralNet train sources of the run's data config change.
 from __future__ import annotations
 
 import argparse
-import datetime
 from pathlib import Path
 
 import yaml
 
-from mermaidseg.data.config import DataSection, Split, entry_split_groups
-from mermaidseg.data.factory import open_dataset_version
-from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path, repo_relative
+from mermaidseg.data.config import DataSection, Split
+from mermaidseg.dataset_reconciliation.artifact_meta import (
+    concept_sidecar_meta,
+    meta_path,
+    repo_relative,
+)
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     MASK_COLUMNS,
     _source_sort_key,
     only_false_pairs,
-    point_annotations,
+    section_point_annotations,
     source_concept_counts,
 )
 from mermaidseg.dataset_reconciliation.concepts import DEFAULT_CLASS_TO_CONCEPTS_CSV
@@ -73,19 +75,11 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     split: Split = args.split
 
+    git = git_state()
+
     section = DataSection.model_validate(load_section(args.data_config, "data"))
-    version = open_dataset_version(section, DATASET, args.cache_dir)
-    if version.points is None:
-        raise SystemExit(f"{DATASET} {version.manifest.version} has no points.parquet")
-    entry = section.datasets[DATASET]
-    groups = entry_split_groups(entry, split, REPO_ROOT)
-    annotations = point_annotations(
-        DATASET,
-        version.points.to_pandas(),
-        version.images.to_pandas(),
-        version.labels.to_pandas(),
-        groups,
-        getattr(entry, split).annotators,
+    annotations, dataset_version = section_point_annotations(
+        section, args.cache_dir, split, DATASET
     )
 
     schema_sources = set(load_section(args.schema_config, "data")["datasets"])
@@ -105,20 +99,14 @@ def main(argv: list[str] | None = None) -> None:
         "rule": "only_false",
         "rule_description": "source has n_false > 0 and n_true == 0 for the binary concept",
         "dataset": DATASET,
-        "dataset_version": version.manifest.version,
+        "dataset_version": dataset_version,
         "split": split,
-        "data_config": repo_relative(args.data_config),
-        "data_config_sha1": file_sha1(args.data_config),
-        "concepts_csv": repo_relative(args.concepts),
-        "concepts_csv_sha1": file_sha1(args.concepts),
-        "schema_config": repo_relative(args.schema_config),
+        **concept_sidecar_meta(args.data_config, args.concepts, args.schema_config, git),
         "n_sources": n_sources,
         "n_binary_concepts": n_concepts,
         "n_pairs": n_sources * n_concepts,
         "n_masked": len(masked),
         "n_points": len(annotations),
-        "created": datetime.datetime.now().isoformat(timespec="seconds"),
-        **git_state(),
         "source_ids": sorted({str(s) for s in counts["source_id"]}, key=_source_sort_key),
     }
     meta_path(args.out).write_text(yaml.safe_dump(meta, sort_keys=False))

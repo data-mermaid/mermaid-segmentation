@@ -21,16 +21,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 
 from mermaidseg.data.base import VersionDataset
+from mermaidseg.data.config import DataSection, Split, entry_split_groups
+from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.data.point_dataset import select_points
 from mermaidseg.dataset_reconciliation.artifact_meta import (
     file_sha1,
-    meta_path,
+    read_sidecar,
     source_id_of_group,
 )
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_keys
+from mermaidseg.io import REPO_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,33 @@ def point_annotations(
     )
 
 
+def section_point_annotations(
+    section: DataSection, cache_dir: Path, split: Split, dataset: str = "coralnet"
+) -> tuple[pd.DataFrame, str]:
+    """Open ``dataset``'s pinned version and return its :func:`point_annotations` over ``split``.
+
+    Returns:
+        The annotations and the dataset version they come from.
+
+    Raises:
+        ValueError: The version has no ``points.parquet``, or :func:`point_annotations` fails.
+    """
+    version = open_dataset_version(section, dataset, cache_dir)
+    if version.points is None:
+        raise ValueError(f"{dataset} {version.manifest.version} has no points.parquet")
+    entry = section.datasets[dataset]
+    groups = entry_split_groups(entry, split, REPO_ROOT)
+    annotations = point_annotations(
+        dataset,
+        version.points.to_pandas(),
+        version.images.to_pandas(),
+        version.labels.to_pandas(),
+        groups,
+        getattr(entry, split).annotators,
+    )
+    return annotations, version.manifest.version
+
+
 def only_false_pairs(counts: pd.DataFrame) -> pd.DataFrame:
     """Rows of ``counts`` with False points and no True points: the pairs to mask."""
     return counts[(counts["n_false"] > 0) & (counts["n_true"] == 0)].reset_index(drop=True)
@@ -191,12 +220,15 @@ def load_concept_source_mask(
       from the run by ``training.concept_removal``) are skipped, anything else is an error;
     - with ``concepts_csv``, its sha1 matches the one recorded in the ``.meta.yaml`` sidecar, so a
       mask built for another concept table is refused;
+    - the sidecar lists the sources the builder counted (``source_ids``).
     """
     path = Path(path)
-    meta_file = meta_path(path)
-    if not meta_file.is_file():
-        raise FileNotFoundError(f"concept source mask {path} has no sidecar {meta_file}")
-    meta = yaml.safe_load(meta_file.read_text())
+    meta = read_sidecar(
+        path,
+        artifact="concept source mask",
+        builder="build_concept_source_mask",
+        required=("source_ids",),
+    )
     if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
         raise ValueError(
             f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "

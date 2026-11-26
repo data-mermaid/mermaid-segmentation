@@ -20,7 +20,8 @@ LABELS = pd.DataFrame(
 )
 
 
-def test_main_writes_the_channels_that_fail_the_rule_over_the_train_groups(tmp_path):
+def _write_inputs(tmp_path):
+    """Write the cache, data config and concepts; return ``(cache_dir, data_config, concepts, pin)``."""
     cache_dir, _, pin = write_version(
         tmp_path,
         kind="points",
@@ -52,6 +53,11 @@ def test_main_writes_the_channels_that_fail_the_rule_over_the_train_groups(tmp_p
     )
     concepts = tmp_path / "concepts.csv"
     concept_table().to_csv(concepts, index=False)
+    return cache_dir, data_config, concepts, pin
+
+
+def test_main_writes_the_channels_that_fail_the_rule_over_the_train_groups(tmp_path):
+    cache_dir, data_config, concepts, pin = _write_inputs(tmp_path)
     out = tmp_path / "removal.csv"
 
     script.main(
@@ -109,3 +115,31 @@ def test_main_writes_the_channels_that_fail_the_rule_over_the_train_groups(tmp_p
     assert meta["dataset_versions"] == {"coralnet": pin.version}
     assert {"git_sha", "git_dirty"} <= set(meta)
     assert "git_commit" not in meta
+
+
+def test_git_state_is_read_before_the_output_is_written(tmp_path, monkeypatch):
+    cache_dir, data_config, concepts, _ = _write_inputs(tmp_path)
+    out = tmp_path / "new_dir" / "removal.csv"
+    monkeypatch.setattr(
+        script,
+        "git_state",
+        lambda: {"git_sha": "x", "git_dirty": out.exists()},
+    )
+
+    script.main(
+        [
+            "--cache-dir",
+            str(cache_dir),
+            "--data-config",
+            str(data_config),
+            "--schema-config",
+            str(data_config),
+            "--concepts",
+            str(concepts),
+            "--out",
+            str(out),
+        ]
+    )
+
+    meta = yaml.safe_load((out.parent / "removal.meta.yaml").read_text())
+    assert (meta["git_sha"], meta["git_dirty"]) == ("x", False)

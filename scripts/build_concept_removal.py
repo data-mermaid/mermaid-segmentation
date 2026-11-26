@@ -19,13 +19,16 @@ frozen concept schema training uses.
 from __future__ import annotations
 
 import argparse
-import datetime
 from pathlib import Path
 
 import yaml
 
 from mermaidseg.data.config import DataSection
-from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path, repo_relative
+from mermaidseg.dataset_reconciliation.artifact_meta import (
+    concept_sidecar_meta,
+    meta_path,
+    repo_relative,
+)
 from mermaidseg.dataset_reconciliation.concept_removal import (
     CoverageRule,
     concept_coverage,
@@ -62,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument(f"--{name.replace('_', '-')}", type=int, default=value)
     args = p.parse_args(argv)
     rule = CoverageRule(**{name: getattr(args, name) for name in rule.as_dict()})
+    git = git_state()
 
     section = DataSection.model_validate(load_section(args.data_config, "data"))
     counts = section_train_label_counts(section, args.cache_dir)
@@ -86,19 +90,13 @@ def main(argv: list[str] | None = None) -> None:
             f"(dense mask = {rule.dense_annotations_per_mask}) or (no non-CoralNet dataset and "
             f"CoralNet sources < {rule.min_coralnet_sources})"
         ),
-        "data_config": repo_relative(args.data_config),
-        "data_config_sha1": file_sha1(args.data_config),
         "dataset_versions": {name: section.datasets[name].version for name in counted},
         "datasets_counted": counted,
-        "concepts_csv": repo_relative(args.concepts),
-        "concepts_csv_sha1": file_sha1(args.concepts),
-        "schema_config": repo_relative(args.schema_config),
         "n_channels": int(len(coverage)),
         "n_removed": int(len(removed)),
         "removed_by_kind": {k: int(v) for k, v in by_kind["sum"].items()},
         "channels_by_kind": {k: int(v) for k, v in by_kind["size"].items()},
-        "created": datetime.datetime.now().isoformat(timespec="seconds"),
-        **git_state(),
+        **concept_sidecar_meta(args.data_config, args.concepts, args.schema_config, git),
     }
     meta_path(args.out).write_text(yaml.safe_dump(meta, sort_keys=False))
 

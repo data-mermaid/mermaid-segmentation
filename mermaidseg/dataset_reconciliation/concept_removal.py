@@ -23,13 +23,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-import yaml
 
 from mermaidseg.data.config import DataSection, entry_split_groups
 from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.dataset_reconciliation.artifact_meta import (
     file_sha1,
-    meta_path,
+    read_sidecar,
     source_id_of_group,
 )
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_keys
@@ -160,10 +159,7 @@ def load_concept_removal(path: str | Path, *, concepts_csv: str | Path | None = 
     With ``concepts_csv``, its sha1 must match the one in the ``.meta.yaml`` sidecar.
     """
     path = Path(path)
-    meta_file = meta_path(path)
-    if not meta_file.is_file():
-        raise FileNotFoundError(f"concept removal {path} has no sidecar {meta_file}")
-    meta = yaml.safe_load(meta_file.read_text())
+    meta = read_sidecar(path, artifact="concept removal", builder="build_concept_removal")
     if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
         raise ValueError(
             f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "

@@ -160,7 +160,7 @@ def test_the_train_blocks_annotator_priority_picks_each_points_label(tmp_path):
     ("kind", "error", "message"),
     [
         ("points", ValueError, r"groups not in the dataset version: \['s99'\]"),
-        ("dense", SystemExit, "has no points.parquet"),
+        ("dense", ValueError, "has no points.parquet"),
     ],
     ids=["unknown-group", "no-points"],
 )
@@ -177,3 +177,17 @@ def test_main_guards_raise(tmp_path, kind, error, message):
 
     with pytest.raises(error, match=message):
         _run(_inputs(tmp_path, cache_dir, pin, {"groups": ["s99"]}), tmp_path / "mask.csv")
+
+
+def test_git_state_is_read_before_the_output_is_written(inputs, tmp_path, monkeypatch):
+    out = tmp_path / "new_dir" / "mask.csv"
+    monkeypatch.setattr(
+        script,
+        "git_state",
+        lambda: {"git_sha": "x", "git_dirty": out.exists()},
+    )
+
+    _run(inputs, out)
+
+    meta = yaml.safe_load((out.parent / "mask.meta.yaml").read_text())
+    assert (meta["git_sha"], meta["git_dirty"]) == ("x", False)
