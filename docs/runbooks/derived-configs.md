@@ -18,7 +18,7 @@ Two committed configs are built by scripts from `configs/data_config.yaml`, the 
 
 Both training configs (`configs/training_config_cbm_final.yaml` and `configs/training_config_cbm_final_hires.yaml`) point at the removal list and the source mask.
 
-Each CSV has a `.meta.yaml` sidecar beside it. It records the inputs, their sha1 hashes, the dataset versions and the git commit that built it. To see whether a CSV is stale, compare its recorded inputs with the current files.
+Each CSV has a `.meta.yaml` sidecar beside it. It records the inputs, their sha1 hashes, the dataset versions, the full commit sha that built it (`git_sha`) and whether tracked files differed from that commit (`git_dirty`). To see whether a CSV is stale, compare its recorded inputs with the current files.
 
 The CoralscapesV2 probe point sets are derived too. They belong to evaluation; see [Rebuild the probe point sets](evaluate-a-model.md#rebuild-the-probe-point-sets).
 
@@ -66,9 +66,10 @@ The `.meta.yaml` sidecar lists the CoralNet sources that the mask was built from
 
 ## After a rebuild
 
-1. Review the diff of each CSV and its `.meta.yaml`.
-2. Commit the derived configs together with the input change that caused them.
-3. For SageMaker, merge and build the image again. A job reads `configs/` from its image. See [Build the training image](train-on-sagemaker.md#build-the-training-image).
+1. Build from a clean, committed tree. A dirty tree is recorded in the sidecar, not refused. If you rebuild both configs, write the first one outside the repo (or commit it) before you build the second; otherwise the second build sees a dirty tree. Before you commit, check that each sidecar says `git_dirty: false`.
+2. Review the diff of each CSV and its `.meta.yaml`.
+3. Commit the derived configs together with the input change that caused them.
+4. For SageMaker, merge and build the image again. A job reads `configs/` from its image. See [Build the training image](train-on-sagemaker.md#build-the-training-image).
 
 A change to the derived configs changes model outputs. Run the evaluation and put the metrics in the PR. See [Compare two models](evaluate-a-model.md#compare-two-models).
 
