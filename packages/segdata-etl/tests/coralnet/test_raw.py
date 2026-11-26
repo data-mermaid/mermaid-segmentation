@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import math
@@ -23,7 +24,7 @@ from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.git import GitState
-from segdata_spec.manifest import Manifest, ParentRef, manifest_sha256
+from segdata_spec.manifest import Manifest, ParentRef, dump_manifest, manifest_sha256
 from segdata_spec.schema import IMAGES_SCHEMA
 
 from .conftest import _make_jpeg_bytes
@@ -320,18 +321,6 @@ def test_parent_rows_matching_the_listed_etag_are_reused_without_any_request(
     assert (images["20"]["etag"], images["20"]["crc64nvme"]) == (md5_hex(PNG), crc64nvme(PNG))
     assert source.image_heads() == [_key(2, "20")]
     assert source.image_gets() == [_key(2, "20")]
-
-
-def test_parent_rows_with_a_quoted_fingerprint_are_reused_without_any_request(
-    source: RecordingS3, tmp_path: Path
-) -> None:
-    parent = _parent([("10", "s1/10.jpg", quoted_etag(JPEG)), ("20", "s2/20.png", "stale")])
-
-    result = _build(source, tmp_path, parent_images=parent)
-
-    images = {row["image_id"]: row for row in result.tables["images.parquet"].to_pylist()}
-    assert images["10"]["etag"] == "parent-etag"
-    assert source.image_heads() == [_key(2, "20")]
 
 
 def test_carried_rows_keep_the_parents_media_type_unsniffed(
@@ -1088,3 +1077,44 @@ def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
 
     with pytest.raises(ValueError, match="MERMAID_CORALNET_BUCKET"):
         raw.run_raw(args)
+
+
+def _quote_parent_fingerprints(parent: Path) -> str:
+    """Rewrite a staged parent as an older version that stored quoted source ETags; return its sha."""
+    images = pq.read_table(parent / "images.parquet")
+    column = images.schema.get_field_index("source_fingerprint")
+    quoted = [f'"{fp}"' for fp in images.column(column).to_pylist()]
+    sink = io.BytesIO()
+    pq.write_table(images.set_column(column, "source_fingerprint", pa.array(quoted)), sink)
+    data = sink.getvalue()
+    (parent / "images.parquet").write_bytes(data)
+    manifest = Manifest.model_validate_json((parent / "manifest.json").read_bytes())
+    files = dict(manifest.files)
+    files["images.parquet"] = files["images.parquet"].model_copy(
+        update={"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    )
+    body = dump_manifest(manifest.model_copy(update={"files": files}))
+    (parent / "manifest.json").write_bytes(body)
+    return manifest_sha256(body)
+
+
+def test_a_parent_with_quoted_fingerprints_is_reused_and_carried_with_bare_ones(
+    staging: RecordingS3, tmp_path: Path
+) -> None:
+    stage = tmp_path / "stage"
+    _stage_raw(stage)
+    parent = _only_version(stage)
+    sha = _quote_parent_fingerprints(parent)
+    (stage / "checkpoints" / "coralnet-raw-run1-abcdef1.parquet").unlink()
+    del staging.objects[(SRC, _key(1, "10"))]
+    staging.gets.clear()
+
+    _stage_raw(stage, "--parent-version", parent.name, "--parent-manifest-sha256", sha)
+
+    (child,) = [p for p in parent.parent.iterdir() if p != parent]
+    new = {r["image_id"]: r for r in pq.read_table(child / "images.parquet").to_pylist()}
+    assert (new["10"]["source_fingerprint"], new["20"]["source_fingerprint"]) == (
+        md5_hex(JPEG),
+        md5_hex(PNG),
+    )
+    assert staging.image_gets() == []

@@ -49,6 +49,7 @@ from segdata_etl.common.featurevector import (
 )
 from segdata_etl.common.s3_objects import EXTENSIONS
 from segdata_etl.common.stage import next_version
+from segdata_etl.common.versions import bare_fingerprints
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.features import feature_file_key, feature_store_name
 from segdata_spec.git import probe_git, refuse_unpublishable
@@ -491,7 +492,7 @@ def load_parent_rows(stage_dir: Path, version: str | None) -> dict[str, dict[str
     path = cache_path(
         stage_dir, DATASET_BUCKET, dataset_prefix(DATASET, version) + "images.parquet"
     )
-    return {row["image_id"]: row for row in pq.read_table(path).to_pylist()}
+    return {row["image_id"]: row for row in bare_fingerprints(pq.read_table(path)).to_pylist()}
 
 
 def load_parent_labels(stage_dir: Path, version: str | None) -> pa.Table | None:

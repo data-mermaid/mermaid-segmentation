@@ -26,3 +26,13 @@ def test_count_labels_counts_points_per_image_and_label_sorted_by_image_then_lab
         {"image_id": "a", "label_id": 7, "n": 1},
         {"image_id": "b", "label_id": 5, "n": 1},
     ]
+
+
+def test_bare_fingerprints_strips_quotes_and_keeps_bare_values_and_other_columns():
+    images = pa.table({"image_id": ["a", "b"], "source_fingerprint": ['"e1"', "e2"]})
+
+    bare = versions.bare_fingerprints(images)
+
+    assert bare.column("source_fingerprint").to_pylist() == ["e1", "e2"]
+    assert bare.column("image_id").to_pylist() == ["a", "b"]
+    assert bare.schema == images.schema

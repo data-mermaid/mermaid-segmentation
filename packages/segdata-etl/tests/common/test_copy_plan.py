@@ -17,14 +17,10 @@ def _probe(parent_fingerprint: str, client: Any) -> Any:
     return probe_image(client, "src", "i1", "raw/i1.jpg", _HEAD, parent, build_row)
 
 
-def test_probe_image_reuses_a_parent_row_whose_fingerprint_is_quoted():
+def test_probe_image_reuses_a_parent_row_whose_fingerprint_matches_the_bare_etag():
     client = FakeS3()
 
-    outcome = _probe('"e1"', client)
+    outcome = _probe("e1", client)
 
     assert outcome.reused is True
     assert client.calls == []
-
-
-def test_probe_image_reuses_a_parent_row_whose_fingerprint_is_unquoted():
-    assert _probe("e1", FakeS3()).reused is True

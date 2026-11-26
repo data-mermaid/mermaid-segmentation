@@ -752,3 +752,14 @@ def test_labels_write_an_empty_growth_form_not_null_for_a_pair_without_one():
     rows = mermaid.labels_table(pairs).to_pylist()
 
     assert [r["mermaid_growth_form"] for r in rows] == ["", "Branching"]
+
+
+def test_load_parent_rows_strips_quotes_from_the_parents_source_fingerprints(tmp_path):
+    version = "20261120-abcdef1"
+    path = tmp_path / DATASET_BUCKET / "datasets" / "mermaid" / version / "images.parquet"
+    path.parent.mkdir(parents=True)
+    pq.write_table(pa.table({"image_id": ["a", "b"], "source_fingerprint": ['"e1"', "e2"]}), path)
+
+    rows = mermaid.load_parent_rows(tmp_path, version)
+
+    assert {i: r["source_fingerprint"] for i, r in rows.items()} == {"a": "e1", "b": "e2"}

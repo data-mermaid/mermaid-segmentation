@@ -50,7 +50,7 @@ from segdata_etl.common.s3_objects import (
     sniff_media_type,
 )
 from segdata_etl.common.stage import next_version
-from segdata_etl.common.versions import count_labels, image_store
+from segdata_etl.common.versions import bare_fingerprints, count_labels, image_store
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
@@ -529,7 +529,6 @@ def _known_rows(parent_images: pa.Table | None, done: pd.DataFrame) -> pd.DataFr
     if parent_images is None:
         return done
     parent = parent_images.select(_OBJECT_COLUMNS).to_pandas()
-    parent["source_fingerprint"] = parent["source_fingerprint"].map(norm_etag)
     return pd.concat([parent, done], ignore_index=True)
 
 
@@ -746,9 +745,11 @@ def run_raw(args: argparse.Namespace) -> int:
     parent_images = (
         None
         if parent is None
-        else pq.read_table(
-            io.BytesIO(
-                read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)["images.parquet"]
+        else bare_fingerprints(
+            pq.read_table(
+                io.BytesIO(
+                    read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)["images.parquet"]
+                )
             )
         )
     )

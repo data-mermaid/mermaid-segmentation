@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import ImageStore
@@ -28,3 +29,13 @@ def count_labels(points: pa.Table) -> pa.Table:
 def image_store(bucket: str, dataset: str) -> ImageStore:
     """Return the segdata-owned image store of ``dataset`` in ``bucket``."""
     return ImageStore(bucket=bucket, prefix=image_prefix(dataset), owner="segdata")
+
+
+def bare_fingerprints(images: pa.Table) -> pa.Table:
+    """Return a parent ``images.parquet`` table with the quotes stripped from ``source_fingerprint``.
+
+    Older versions stored quoted source ETags; a probe compares them with the bare ETag of a HEAD.
+    """
+    column = images.schema.get_field_index("source_fingerprint")
+    bare = pc.utf8_trim(images.column(column), characters='"')
+    return images.set_column(column, "source_fingerprint", bare)

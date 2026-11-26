@@ -138,13 +138,15 @@ def probe_image(
 ) -> ImageOutcome:
     """Decide one image from its source HEAD and, unless a parent row matches, its bytes.
 
+    ``parent_rows`` hold bare source fingerprints, as ``versions.bare_fingerprints`` leaves them.
+
     A multipart ETag or a missing CRC64NVME means the whole object is read, so the row records the
     ETag and CRC64NVME a single-part copy will have; the source ETag stays the fingerprint.
     ``build_row`` turns the object facts and header into the dataset's ``images.parquet`` row.
     """
     source_etag = norm_etag(head["ETag"])
     parent = parent_rows.get(image_id)
-    if parent is not None and norm_etag(parent["source_fingerprint"]) == source_etag:
+    if parent is not None and parent["source_fingerprint"] == source_etag:
         return ImageOutcome(image_id, row=parent, reused=True, found_as_jpg=found_as_jpg)
     if needs_full_read(head):
         whole = read_whole_object(client, bucket, source_key, head)
