@@ -459,10 +459,13 @@ def _record_calls(repo: Path, uv_exit: int = 0, uv_fails_on: str = "") -> Path:
     return calls
 
 
-def _launch_for_real(repo: Path, tmp_path_cache: Path) -> subprocess.CompletedProcess[str]:
+def _launch_for_real(
+    repo: Path, tmp_path_cache: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
     return _run_launcher(
         repo,
         "final",
+        *args,
         dry_run=False,
         env_overrides={
             "MERMAIDSEG_CACHE_DIR": str(tmp_path_cache),
@@ -491,6 +494,42 @@ def test_final_syncs_then_warms_the_encoder_before_any_sbatch(repo):
         _WARM_CALL,
     ]
     assert [line.split()[0] for line in lines[2:]] == ["sbatch", "sbatch"]
+
+
+def test_skip_sync_checks_the_cache_then_warms_the_encoder_before_any_sbatch(repo):
+    calls = _record_calls(repo)
+    cache = repo.parent / "cache dir"
+
+    result = _launch_for_real(repo, cache, "--skip-sync")
+
+    assert result.returncode == 0, result.stderr
+    lines = calls.read_text().splitlines()
+    assert lines[:2] == [
+        f"uv run --locked python scripts/check_cache.py "
+        f"--data-config configs/data_config.yaml --cache-dir {cache}",
+        _WARM_CALL,
+    ]
+    assert [line.split()[0] for line in lines[2:]] == ["sbatch", "sbatch"]
+
+
+def test_skip_sync_submits_nothing_when_the_cache_check_fails(repo):
+    calls = _record_calls(repo, uv_exit=3, uv_fails_on="check_cache")
+
+    result = _launch_for_real(repo, repo.parent / "cache", "--skip-sync")
+
+    assert result.returncode == 1
+    assert [line.split()[0] for line in calls.read_text().splitlines()] == ["uv"]
+    assert "cache check failed; nothing submitted" in result.stderr
+
+
+def test_dry_run_with_skip_sync_runs_no_check_and_prints_two_would_submit_lines(repo):
+    calls = _record_calls(repo)
+
+    result = _run_launcher(repo, "final", "--skip-sync")
+
+    assert result.returncode == 0, result.stderr
+    assert not calls.exists() or calls.read_text() == ""
+    assert result.stdout.count("would submit") == 2
 
 
 def test_final_trains_both_jobs_on_the_model_config_it_warmed(repo):
