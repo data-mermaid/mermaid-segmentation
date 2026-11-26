@@ -186,7 +186,10 @@ def test_build_drops_every_annotator_row_of_a_point_past_an_edge_and_counts_the_
 
     version = stage_version(pacific_labeled_corals, s3, repo, tmp_path, capsys).version
 
-    assert version.manifest.stats.dropped == {"points_out_of_bounds": 2}
+    assert version.manifest.stats.dropped == {
+        "image_unreadable_header": 0,
+        "points_out_of_bounds": 2,
+    }
     assert version.points is not None
     assert version.points.num_rows == 5
     assert (1, 7) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}

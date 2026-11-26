@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from botocore.exceptions import ClientError
 
@@ -34,6 +34,14 @@ UPLOADS_NAME = "uploads.jsonl"
 
 _FIRST_READ = 64 * 1024
 _MAX_READ = 1024 * 1024
+
+
+class ImageHeader(NamedTuple):
+    """An image's media type and pixel size, read from its leading bytes."""
+
+    media_type: str
+    width: int
+    height: int
 
 
 @dataclass(frozen=True)
@@ -65,8 +73,8 @@ def _read_range(client: Any, bucket: str, key: str, etag: str, last_byte: int) -
 
 def read_image_header(
     client: Any, bucket: str, key: str, etag: str, size: int
-) -> tuple[str, int, int] | None:
-    """Return ``(media_type, width, height)`` from the object's leading bytes, or None if unreadable.
+) -> ImageHeader | None:
+    """Return the image header from the object's leading bytes, or None if unreadable.
 
     The first 64 KB usually holds the header; a JPEG whose SOF lies further in is read up to 1 MB.
 
@@ -87,7 +95,7 @@ def read_image_header(
         if is_precondition_failed(exc):
             raise SourceChanged(f"s3://{bucket}/{key} changed while it was read") from exc
         raise
-    return None if dims is None else (media_type, dims[0], dims[1])
+    return None if dims is None else ImageHeader(media_type, dims[0], dims[1])
 
 
 def needs_full_read(head: Mapping[str, Any]) -> bool:
@@ -112,7 +120,7 @@ def read_full(client: Any, bucket: str, key: str, etag: str) -> bytes:
 
 def read_whole_object(
     client: Any, bucket: str, key: str, head: Mapping[str, Any]
-) -> tuple[tuple[str, int, int], ObjectFacts] | None:
+) -> tuple[ImageHeader, ObjectFacts] | None:
     """Download the object and derive the header and the values a single-part copy will carry."""
     data = read_full(client, bucket, key, head["ETag"])
     media_type = sniff_media_type(data)
@@ -120,7 +128,7 @@ def read_whole_object(
     if media_type is None or dims is None:
         return None
     facts = ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), norm_etag(head["ETag"]))
-    return (media_type, dims[0], dims[1]), facts
+    return ImageHeader(media_type, dims[0], dims[1]), facts
 
 
 def probe_image(
@@ -130,7 +138,7 @@ def probe_image(
     source_key: str,
     head: Mapping[str, Any],
     parent_rows: Mapping[str, dict[str, Any]],
-    build_row: Callable[[ObjectFacts, tuple[str, int, int]], dict[str, Any]],
+    build_row: Callable[[ObjectFacts, ImageHeader], dict[str, Any]],
     *,
     found_as_jpg: bool = False,
 ) -> ImageOutcome:

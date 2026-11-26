@@ -27,6 +27,7 @@ import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.copy_plan import (
+    ImageHeader,
     ImageOutcome,
     ObjectFacts,
     copy_plan,
@@ -153,19 +154,18 @@ def _image_row(
     image_id: str,
     source_key: str,
     facts: ObjectFacts,
-    header: tuple[str, int, int],
+    header: ImageHeader,
     region: tuple[Any, Any],
 ) -> dict[str, Any]:
-    media_type, width, height = header
     return {
         "image_id": image_id,
-        "key": f"{image_id}.{EXTENSIONS[media_type]}",
+        "key": f"{image_id}.{EXTENSIONS[header.media_type]}",
         "etag": facts.etag,
         "size": facts.size,
         "crc64nvme": facts.crc64nvme,
-        "media_type": media_type,
-        "width": width,
-        "height": height,
+        "media_type": header.media_type,
+        "width": header.width,
+        "height": header.height,
         "group": GROUP,
         "mask_key": None,
         "mask_etag": None,

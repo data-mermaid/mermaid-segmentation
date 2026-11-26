@@ -2,8 +2,7 @@
 
 Curates raw's points with the packaged blacklist and overrides and maps labels by the MERMAID
 LabelMapping API, checked against the pinned taxonomy. Stages tables only, on raw's image store,
-for ``segdata promote`` to publish. The published ``coralnet`` v1 was built with the frozen
-cleaned_up_rerun mapping at git e6abfad.
+for ``segdata promote`` to publish.
 """
 
 from __future__ import annotations
@@ -151,8 +150,7 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     reads the cache first, so ``--cache-dir`` set to the stage dir reads a raw staged there. The
     taxonomy pin must still be published in the dataset bucket, even when the cache holds it. The
     version reuses raw's image store and stages no copy or upload plan. Labels map by the live
-    MERMAID LabelMapping API, whose digest and fetch time the manifest records. The published v1
-    was built with the frozen cleaned_up_rerun mapping at git e6abfad.
+    MERMAID LabelMapping API, whose digest and fetch time the manifest records.
 
     Raises:
         PublishRefused: The git tree is dirty or unpushed, or the taxonomy pin is not published

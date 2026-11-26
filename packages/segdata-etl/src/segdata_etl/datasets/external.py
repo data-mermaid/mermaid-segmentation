@@ -24,6 +24,7 @@ import pyarrow.compute as pc
 from segdata_etl.common import versions
 from segdata_etl.common.cli_flags import pin_command_parts, pin_flags, pin_values
 from segdata_etl.common.copy_plan import (
+    ImageHeader,
     ImageOutcome,
     ObjectFacts,
     StagedFile,
@@ -31,7 +32,12 @@ from segdata_etl.common.copy_plan import (
     probe_image,
     stage_bytes,
 )
-from segdata_etl.common.ingested import IngestedDataset, IngestedObject
+from segdata_etl.common.ingested import (
+    IngestedDataset,
+    IngestedObject,
+    read_ingested,
+    source_info,
+)
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.release import INGEST_BUCKET
 from segdata_etl.common.s3_objects import (
@@ -40,8 +46,13 @@ from segdata_etl.common.s3_objects import (
     head_with_checksum,
     md5_hex,
 )
-from segdata_etl.common.stage import DEFAULT_CACHE_DIR, Publishable, stage_version
-from segdata_etl.label_maps.curated import CuratedSource
+from segdata_etl.common.stage import (
+    DEFAULT_CACHE_DIR,
+    Publishable,
+    publishable_repo,
+    stage_version,
+)
+from segdata_etl.label_maps.curated import CuratedSource, curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
@@ -81,13 +92,13 @@ class IngestedProbe:
     """What probing the ingested images found.
 
     ``images`` holds the readable images in input order; ``rows`` their ``images.parquet`` rows by
-    image id; ``sniffed`` their ``(media_type, width, height)`` by ingested key; ``unreadable`` the
+    image id; ``sniffed`` maps each ingested key to its ``ImageHeader``; ``unreadable`` the
     ids of the images whose header could not be read.
     """
 
     images: list[IngestedImage]
     rows: dict[str, dict[str, Any]]
-    sniffed: dict[str, tuple[str, int, int]]
+    sniffed: dict[str, ImageHeader]
     unreadable: list[str]
 
 
@@ -238,10 +249,10 @@ def require_known_labels(points: pa.Table, labels: pa.Table) -> None:
         raise ValueError(f"{len(unknown)} points carry label ids not in labels.parquet: {ids}")
 
 
-def _sizes_table(
-    images: Iterable[IngestedImage], sniffed: Mapping[str, tuple[str, int, int]]
-) -> pa.Table:
-    rows = [(image.image_id, *sniffed[image.key][1:]) for image in images]
+def _sizes_table(images: Iterable[IngestedImage], sniffed: Mapping[str, ImageHeader]) -> pa.Table:
+    rows = [
+        (image.image_id, sniffed[image.key].width, sniffed[image.key].height) for image in images
+    ]
     return pa.table(
         {
             "image_id": pa.array([r[0] for r in rows], pa.string()),
@@ -251,15 +262,21 @@ def _sizes_table(
     )
 
 
-def _bounds_join(
+def drop_points_outside(
     points: pa.Table,
     images: Iterable[IngestedImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-) -> tuple[pa.Table, pa.ChunkedArray]:
-    """Join points to their image sizes; return the join in point order and an ``inside`` mask.
+    sniffed: Mapping[str, ImageHeader],
+    dropped: dict[str, int],
+) -> tuple[pa.Table, dict[str, int]]:
+    """Drop points outside their image's sniffed size; return the kept points and ``dropped``.
 
-    A point is inside when ``0 <= row < height`` and ``0 <= col < width``. The mask is null for a
-    point whose image has no sniffed size.
+    A point is inside when ``0 <= row < height`` and ``0 <= col < width``. Kept points stay in
+    order. ``points_out_of_bounds`` joins ``dropped`` only when some point is dropped, and the
+    count is logged. It counts point rows, so a long-form position with several annotator rows
+    counts once per row.
+
+    Raises:
+        ValueError: A point's image has no sniffed size.
     """
     positioned = points.select(["image_id", "row", "col"]).append_column(
         "_position", pa.array(range(points.num_rows), pa.int64())
@@ -272,45 +289,12 @@ def _bounds_join(
         pc.and_kleene(pc.greater_equal(row, 0), pc.less(row, joined.column("height"))),
         pc.and_kleene(pc.greater_equal(col, 0), pc.less(col, joined.column("width"))),
     )
-    return joined, inside
-
-
-def drop_points_outside(
-    points: pa.Table,
-    images: Iterable[IngestedImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-) -> tuple[pa.Table, int]:
-    """Return the points inside their image's sniffed size, in order, and the number dropped.
-
-    A point is inside when ``0 <= row < height`` and ``0 <= col < width``. The count is of point
-    rows, so a long-form position with several annotator rows counts once per row.
-
-    Raises:
-        ValueError: A point's image has no sniffed size.
-    """
-    joined, inside = _bounds_join(points, images, sniffed)
     unsized = joined.filter(pc.is_null(inside))
     if unsized.num_rows:
         ids = sorted(set(unsized.column("image_id").to_pylist()))[:5]
         raise ValueError(f"{unsized.num_rows} points whose image has no sniffed size: {ids}")
     kept = points.filter(inside)
-    return kept, points.num_rows - kept.num_rows
-
-
-def drop_points_outside_and_record(
-    points: pa.Table,
-    images: Iterable[IngestedImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-    dropped: dict[str, int],
-) -> tuple[pa.Table, dict[str, int]]:
-    """Drop out-of-bounds points; return the kept points and ``dropped`` with the count merged in.
-
-    ``points_out_of_bounds`` is added only when some point is dropped, and the count is logged.
-
-    Raises:
-        ValueError: A point's image has no sniffed size.
-    """
-    kept, n_out_of_bounds = drop_points_outside(points, images, sniffed)
+    n_out_of_bounds = points.num_rows - kept.num_rows
     if not n_out_of_bounds:
         return kept, dropped
     logger.info("dropped %d points outside their image", n_out_of_bounds)
@@ -342,20 +326,17 @@ def _mask_dest_key(image: IngestedImage) -> str:
     return f"{image.group}/{image.image_id}_mask.png"
 
 
-def _image_row(
-    image: IngestedImage, facts: ObjectFacts, header: tuple[str, int, int]
-) -> dict[str, Any]:
+def _image_row(image: IngestedImage, facts: ObjectFacts, header: ImageHeader) -> dict[str, Any]:
     """Build the maskless ``images.parquet`` row of ``image``; ``attrs`` as sorted-key JSON."""
-    media_type, width, height = header
     return {
         "image_id": image.image_id,
-        "key": image_key(image, media_type),
+        "key": image_key(image, header.media_type),
         "etag": facts.etag,
         "size": facts.size,
         "crc64nvme": facts.crc64nvme,
-        "media_type": media_type,
-        "width": width,
-        "height": height,
+        "media_type": header.media_type,
+        "width": header.width,
+        "height": header.height,
         "group": image.group,
         "mask_key": None,
         "mask_etag": None,
@@ -398,7 +379,7 @@ def _probe_result(
     rows = {o.image_id: o.row for o in outcomes if o.row is not None}
     kept = [image for image in images if image.image_id in rows]
     sniffed = {
-        image.key: (
+        image.key: ImageHeader(
             rows[image.image_id]["media_type"],
             rows[image.image_id]["width"],
             rows[image.image_id]["height"],
@@ -429,9 +410,7 @@ def drop_unreadable_points(points: pa.Table, probe: IngestedProbe) -> pa.Table:
 
 
 def _with_unreadable(dropped: Mapping[str, int], probe: IngestedProbe) -> dict[str, int]:
-    """Merge ``image_unreadable_header`` into ``dropped`` when the probe dropped an image."""
-    if not probe.unreadable:
-        return dict(dropped)
+    """Merge ``image_unreadable_header`` into ``dropped``, recording 0 when no image was dropped."""
     return {**dropped, "image_unreadable_header": len(probe.unreadable)}
 
 
@@ -522,7 +501,7 @@ def publish_version(
     """Stage a new version and its plans under ``args.stage_dir``; print its version and sha256.
 
     ``tables`` holds the dataset-specific tables; ``images.parquet`` is built from the probe, and
-    ``image_unreadable_header`` joins ``dropped`` when the probe dropped an image. Each image is
+    ``image_unreadable_header`` always joins ``dropped``. Each image is
     planned as a copy from the ingest prefix in ``copies.jsonl``. ``masks`` holds each kept
     image's mask bytes by image id; they are staged and listed in ``uploads.jsonl``.
 
@@ -551,3 +530,96 @@ def publish_version(
         uploads=uploads,
     )
     return 0
+
+
+@dataclass(frozen=True)
+class ExternalInputs:
+    """What every external builder reads before it touches the images.
+
+    ``dropped`` is the ingest's own drop counts; ``curated`` the dataset's curated label map.
+    """
+
+    repo: Publishable
+    taxonomy: Taxonomy
+    ingested: IngestedDataset
+    source: SourceInfo
+    dropped: dict[str, int]
+    curated: pa.Table
+    labels: pa.Table
+
+
+def read_external_inputs(args: argparse.Namespace, client: Any, dataset: str) -> ExternalInputs:
+    """Check the tree is publishable, then read the taxonomy, ingest prefix and curated labels.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed, or the pinned taxonomy is not published.
+    """
+    repo = publishable_repo()
+    taxonomy = load_taxonomy(
+        client,
+        DATASET_BUCKET,
+        version=args.taxonomy_version,
+        manifest_sha256=args.taxonomy_manifest_sha256,
+        cache_dir=args.cache_dir,
+    )
+    ingested = read_ingested(client, dataset, bucket=args.ingest_bucket)
+    curated = load_curated(dataset)
+    return ExternalInputs(
+        repo=repo,
+        taxonomy=taxonomy,
+        ingested=ingested,
+        source=source_info(ingested),
+        dropped=ingested.manifest.ingestion.dropped,
+        curated=curated,
+        labels=build_labels(ingested.classes, curated, taxonomy.benthic_attributes),
+    )
+
+
+def build_point_dataset(
+    args: argparse.Namespace,
+    client: Any,
+    *,
+    dataset: str,
+    annotated_ids: Callable[[pd.DataFrame], Iterable[tuple[str, str]]],
+    what: str,
+) -> int:
+    """Stage a points dataset whose images sit at ``images/<group>/<image_id>.<ext>``.
+
+    ``annotated_ids`` maps the ingested annotations to the ``(group, image_id)`` pairs they
+    name; ``what`` labels them in the error when they differ from the images ingested.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
+    """
+    inputs = read_external_inputs(args, client, dataset)
+    ingested, labels = inputs.ingested, inputs.labels
+    points = build_points(ingested.annotations.assign(annotator="default"), ingested.classes)
+    images = ingested_images(ingested.objects, group_folder_identity)
+    require_same_ids(
+        {(image.group, image.image_id) for image in images},
+        set(annotated_ids(ingested.annotations)),
+        what=what,
+    )
+    require_known_labels(points, labels)
+    probe = probe_ingested_images(client, images, ingested=ingested, workers=args.workers)
+    points = drop_unreadable_points(points, probe)
+    points, dropped = drop_points_outside(points, probe.images, probe.sniffed, inputs.dropped)
+    return publish_version(
+        dataset=dataset,
+        kind="points",
+        tables={
+            "points.parquet": points,
+            "labels.parquet": labels,
+            "stats/label_counts.parquet": versions.count_labels(points),
+        },
+        source=inputs.source,
+        label_mapping=label_mapping_record(
+            labels, curated_source(dataset), git_sha=inputs.repo.git.sha
+        ),
+        dropped=dropped,
+        repo=inputs.repo,
+        client=client,
+        probe=probe,
+        ingested=ingested,
+        args=args,
+    )

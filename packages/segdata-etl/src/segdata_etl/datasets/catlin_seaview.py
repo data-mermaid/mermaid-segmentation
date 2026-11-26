@@ -6,12 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from segdata_etl.common import versions
-from segdata_etl.common.ingested import read_ingested, source_info
-from segdata_etl.common.stage import publishable_repo
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import curated_source, load_curated
-from segdata_spec import DATASET_BUCKET
 
 DATASET = "catlin_seaview"
 
@@ -28,51 +23,12 @@ def run(args: argparse.Namespace, client: Any) -> int:
     Raises:
         PublishRefused: The git tree is dirty or unpushed.
     """
-    repo = publishable_repo()
-    taxonomy = external.load_taxonomy(
+    return external.build_point_dataset(
+        args,
         client,
-        DATASET_BUCKET,
-        version=args.taxonomy_version,
-        manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=args.cache_dir,
-    )
-    ingested = read_ingested(client, DATASET, bucket=args.ingest_bucket)
-    source = source_info(ingested)
-    dropped = ingested.manifest.ingestion.dropped
-    curated = load_curated(DATASET)
-    labels = external.build_labels(ingested.classes, curated, taxonomy.benthic_attributes)
-    points = external.build_points(
-        ingested.annotations.assign(annotator="default"), ingested.classes
-    )
-    images = external.ingested_images(ingested.objects, external.group_folder_identity)
-    annotated = set(
-        zip(ingested.annotations["region"], ingested.annotations["image_id"], strict=True)
-    )
-    external.require_same_ids(
-        {(image.group, image.image_id) for image in images}, annotated, what="catlin images"
-    )
-    external.require_known_labels(points, labels)
-    probe = external.probe_ingested_images(client, images, ingested=ingested, workers=args.workers)
-    points = external.drop_unreadable_points(points, probe)
-    points, dropped = external.drop_points_outside_and_record(
-        points, probe.images, probe.sniffed, dropped
-    )
-    return external.publish_version(
         dataset=DATASET,
-        kind="points",
-        tables={
-            "points.parquet": points,
-            "labels.parquet": labels,
-            "stats/label_counts.parquet": versions.count_labels(points),
-        },
-        source=source,
-        label_mapping=external.label_mapping_record(
-            labels, curated_source(DATASET), git_sha=repo.git.sha
+        annotated_ids=lambda annotations: zip(
+            annotations["region"], annotations["image_id"], strict=True
         ),
-        dropped=dropped,
-        repo=repo,
-        client=client,
-        probe=probe,
-        ingested=ingested,
-        args=args,
+        what="catlin images",
     )

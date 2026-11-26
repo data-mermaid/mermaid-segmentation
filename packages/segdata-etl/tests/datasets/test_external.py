@@ -8,6 +8,7 @@ import pyarrow as pa
 import pytest
 from s3_fake import FakeS3
 
+from segdata_etl.common.copy_plan import ImageHeader
 from segdata_etl.common.ingested import IngestedObject
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import CURATED_SCHEMA, CuratedSource
@@ -132,43 +133,28 @@ def test_image_key_takes_png_extension_from_media_type() -> None:
     assert external.image_key(image, "image/png") == "g/7.png"
 
 
-SIZES = {"7.jpg": ("image/jpeg", 4, 3)}
+SIZES = {"7.jpg": ImageHeader("image/jpeg", 4, 3)}
 IMAGE_7 = external.IngestedImage(image_id="7", group="g", key="7.jpg", etag="e")
 
 
-def test_drop_points_outside_keeps_the_last_pixel_and_drops_each_edge_past_it() -> None:
+def test_drop_points_outside_drops_each_edge_past_the_last_pixel_and_counts_them() -> None:
     points = _points(
         ("7", 2, 3, 1), ("7", 3, 0, 2), ("7", 0, 4, 3), ("7", -1, 0, 4), ("7", 0, -1, 5)
     )
-    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES)
-    assert dropped == 4
+    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES, {"a": 1})
     assert kept.column("label_id").to_pylist() == [1]
-
-
-def test_drop_points_outside_keeps_in_bounds_points_in_order_and_counts_the_rest() -> None:
-    points = _points(("7", 2, 3, 1), ("7", 1, 4, 2), ("7", 0, 0, 3), ("7", 3, 1, 4), ("7", 1, 1, 5))
-    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES)
-    assert dropped == 2
-    assert kept.column("label_id").to_pylist() == [1, 3, 5]
     assert kept.schema == points.schema
+    assert dropped == {"a": 1, "points_out_of_bounds": 4}
+
+
+def test_drop_points_outside_adds_no_key_when_every_point_is_inside() -> None:
+    inside = _points(("7", 0, 0, 1))
+    assert external.drop_points_outside(inside, [IMAGE_7], SIZES, {"a": 1}) == (inside, {"a": 1})
 
 
 def test_drop_points_outside_refuses_a_point_whose_image_has_no_size() -> None:
     with pytest.raises(ValueError, match=r"no sniffed size.*'8'"):
-        external.drop_points_outside(_points(("7", 0, 0, 1), ("8", 0, 0, 1)), [IMAGE_7], SIZES)
-
-
-def test_drop_points_outside_and_record_merges_the_count_only_when_points_are_dropped() -> None:
-    inside = _points(("7", 0, 0, 1))
-    assert external.drop_points_outside_and_record(inside, [IMAGE_7], SIZES, {"a": 1}) == (
-        inside,
-        {"a": 1},
-    )
-    kept, dropped = external.drop_points_outside_and_record(
-        _points(("7", 0, 0, 1), ("7", 3, 0, 2)), [IMAGE_7], SIZES, {"a": 1}
-    )
-    assert kept.num_rows == 1
-    assert dropped == {"a": 1, "points_out_of_bounds": 1}
+        external.drop_points_outside(_points(("7", 0, 0, 1), ("8", 0, 0, 1)), [IMAGE_7], SIZES, {})
 
 
 def test_require_known_labels_refuses_a_label_id_missing_from_labels() -> None:

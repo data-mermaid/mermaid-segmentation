@@ -5,7 +5,8 @@ Each kept original is probed (HEAD, plus a full read for a multipart or CRC-less
 values its server-side copy will carry, and ``copies.jsonl`` plans that copy for ``segdata
 promote``; nothing is written to S3. Width and height come from the build run. Probed rows are
 checkpointed under the stage dir so a rerun probes only the rest, and a parent pin carries forward
-the parent's rows whose listed source ETag is unchanged. An image the scrape no longer lists but
+the parent's rows whose listed source ETag is unchanged; a parent not staged is synced from the
+dataset bucket into the cache dir. An image the scrape no longer lists but
 the parent holds keeps the parent's row and gets no copy: its object is already published.
 """
 
@@ -51,11 +52,13 @@ from segdata_etl.common.s3_objects import (
 from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.common.versions import bare_fingerprints, count_labels, image_store
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.errors import ManifestNotFound
 from segdata_spec.layout import image_prefix
-from segdata_spec.manifest import ParentRef, SourceInfo
+from segdata_spec.manifest import ParentRef, Pin, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.stage import read_parent_tables
+from segdata_spec.sync import sync_tables
 
 from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
@@ -688,6 +691,27 @@ def _parent_ref(args: argparse.Namespace) -> ParentRef | None:
     )
 
 
+def _read_parent_tables(
+    args: argparse.Namespace, client: Any, parent: ParentRef
+) -> dict[str, bytes]:
+    """Read the parent's tables from the stage dir, else from the cache dir after a sync.
+
+    A parent staged under ``args.stage_dir`` needs no S3 access. Otherwise its manifest and tables
+    are synced from the dataset bucket into ``args.cache_dir``, which the sync reads first.
+
+    Raises:
+        PinMismatch: The staged or cached parent manifest differs from its pin.
+    """
+    try:
+        return read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)
+    except ManifestNotFound:
+        pin = Pin(
+            name=parent.dataset, version=parent.version, manifest_sha256=parent.manifest_sha256
+        )
+        sync_tables(client, {pin.name: pin}, args.cache_dir, bucket=DATASET_BUCKET)
+        return read_parent_tables((args.stage_dir, args.cache_dir), DATASET_BUCKET, parent)
+
+
 def checkpoint_path(stage_dir: Path, build_run: str, git_sha: str) -> Path:
     """The probe checkpoint of one build run at one commit, beside the staged bucket tree."""
     return stage_dir / "checkpoints" / f"{DATASET}-{build_run}-{git_sha[:_SHA_LENGTH]}.parquet"
@@ -728,7 +752,7 @@ def run_raw(args: argparse.Namespace) -> int:
     Raises:
         PublishRefused: The git tree is dirty or unpushed, or ``uv.lock`` is missing.
         ValueError: ``MERMAID_CORALNET_BUCKET`` is unset.
-        PinMismatch: The staged parent's manifest differs from its pin.
+        PinMismatch: The staged or synced parent's manifest differs from its pin.
         SourceChanged: An original was replaced between its HEAD and its read.
     """
     repo = publishable_repo()
@@ -741,11 +765,7 @@ def run_raw(args: argparse.Namespace) -> int:
         None
         if parent is None
         else bare_fingerprints(
-            pq.read_table(
-                io.BytesIO(
-                    read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)["images.parquet"]
-                )
-            )
+            pq.read_table(io.BytesIO(_read_parent_tables(args, client, parent)["images.parquet"]))
         )
     )
     result = build_raw(
@@ -770,6 +790,7 @@ def run_raw(args: argparse.Namespace) -> int:
             type="coralnet-scrape", uri=f"s3://{source_bucket}/{prefix}/", revision=args.build_run
         ),
         parents=() if parent is None else (parent,),
+        extra_parent_dirs=(args.cache_dir,),
         dropped=result.dropped,
         copies=_copies(result.tables["images.parquet"], source_bucket, result.carried),
     )

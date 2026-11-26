@@ -16,12 +16,10 @@ import pyarrow as pa
 from botocore.exceptions import ClientError
 from PIL import Image
 
-from segdata_etl.common.ingested import IngestedDataset, read_ingested, source_info
+from segdata_etl.common.ingested import IngestedDataset
 from segdata_etl.common.s3_objects import SourceChanged
-from segdata_etl.common.stage import publishable_repo
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import curated_source, load_curated
-from segdata_spec import DATASET_BUCKET
+from segdata_etl.label_maps.curated import curated_source
 from segdata_spec.s3 import is_precondition_failed
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
@@ -158,7 +156,7 @@ def _mask_problem(
 
 def _require_masks_match(
     images: Sequence[external.IngestedImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
+    sniffed: Mapping[str, external.ImageHeader],
     stats: Mapping[str, _MaskStats],
     tile_labels: Mapping[str, set[int]],
     label_ids: Collection[int],
@@ -171,7 +169,7 @@ def _require_masks_match(
     for image in images:
         problem = _mask_problem(
             stats[image.image_id],
-            sniffed[image.key][1:],
+            (sniffed[image.key].width, sniffed[image.key].height),
             tile_labels.get(image.image_id, set()),
             label_ids,
         )
@@ -199,19 +197,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
     Raises:
         PublishRefused: The git tree is dirty or unpushed.
     """
-    repo = publishable_repo()
-    taxonomy = external.load_taxonomy(
-        client,
-        DATASET_BUCKET,
-        version=args.taxonomy_version,
-        manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=args.cache_dir,
-    )
-    ingested = read_ingested(client, DATASET, bucket=args.ingest_bucket)
-    source = source_info(ingested)
-    dropped = ingested.manifest.ingestion.dropped
-    curated = load_curated(DATASET)
-    labels = external.build_labels(ingested.classes, curated, taxonomy.benthic_attributes)
+    inputs = external.read_external_inputs(args, client, DATASET)
+    repo, ingested, source = inputs.repo, inputs.ingested, inputs.source
+    dropped, labels = inputs.dropped, inputs.labels
     images = _with_masks(external.ingested_images(ingested.objects, benthos_identity))
     external.require_same_ids(
         {image.image_id for image in images},

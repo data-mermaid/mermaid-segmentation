@@ -11,11 +11,8 @@ from typing import Any
 import pandas as pd
 
 from segdata_etl.common import versions
-from segdata_etl.common.ingested import read_ingested, source_info
-from segdata_etl.common.stage import publishable_repo
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import curated_source, load_curated
-from segdata_spec import DATASET_BUCKET
+from segdata_etl.label_maps.curated import curated_source
 
 DATASET = "pacific_labeled_corals"
 ANNOTATORS = ("archived", "host", *(f"visitor{i}" for i in range(1, 6)))
@@ -115,19 +112,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
     Raises:
         PublishRefused: The git tree is dirty or unpushed.
     """
-    repo = publishable_repo()
-    taxonomy = external.load_taxonomy(
-        client,
-        DATASET_BUCKET,
-        version=args.taxonomy_version,
-        manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=args.cache_dir,
-    )
-    ingested = read_ingested(client, DATASET, bucket=args.ingest_bucket)
-    source = source_info(ingested)
-    dropped = ingested.manifest.ingestion.dropped
-    curated = load_curated(DATASET)
-    labels = external.build_labels(ingested.classes, curated, taxonomy.benthic_attributes)
+    inputs = external.read_external_inputs(args, client, DATASET)
+    repo, ingested, source = inputs.repo, inputs.ingested, inputs.source
+    dropped, labels = inputs.dropped, inputs.labels
     points = external.build_points(_long_annotations(ingested.annotations), ingested.classes)
     _require_unique_positions(ingested.annotations)
     images = external.ingested_images(ingested.objects, pacific_identity)
@@ -142,9 +129,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     points = external.drop_unreadable_points(points, probe)
     # Bounds depend only on (image_id, row, col), so a position leaves with all its annotator
     # rows; points_out_of_bounds counts point rows, as in the other builders.
-    points, dropped = external.drop_points_outside_and_record(
-        points, probe.images, probe.sniffed, dropped
-    )
+    points, dropped = external.drop_points_outside(points, probe.images, probe.sniffed, dropped)
     return external.publish_version(
         dataset=DATASET,
         kind="points",

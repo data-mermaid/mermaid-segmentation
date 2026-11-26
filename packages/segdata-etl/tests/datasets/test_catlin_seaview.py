@@ -260,7 +260,11 @@ def test_build_drops_a_point_past_the_right_edge_and_records_it(
 
     version = stage_version(catlin_seaview, s3, repo, tmp_path, capsys).version
 
-    assert version.manifest.stats.dropped == {"damaged_images": 2, "points_out_of_bounds": 1}
+    assert version.manifest.stats.dropped == {
+        "damaged_images": 2,
+        "image_unreadable_header": 0,
+        "points_out_of_bounds": 1,
+    }
     assert version.points is not None
     assert version.points.num_rows == len(ANNOTATIONS)
     assert (1, 6) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}

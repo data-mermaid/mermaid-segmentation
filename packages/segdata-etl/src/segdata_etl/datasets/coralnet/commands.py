@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ...common.cli_flags import half_pin_error, pin_flags
+from ...common.stage import DEFAULT_CACHE_DIR
 
 _DEFAULT_OUTPUT_DIR = Path("outputs/coralnet-dataset")
 
@@ -136,6 +137,13 @@ def add_subcommands(sub: Any) -> None:
     )
     _add_source_ids_flag(p_raw, _RAW_SOURCE_IDS_HELP)
     pin_flags(p_raw, "parent-", "the coralnet-raw parent to reuse", required=False)
+    p_raw.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_DIR,
+        help="Local cache a published parent is synced into; the stage dir reads staged parents "
+        "(default: %(default)s)",
+    )
     p_raw.add_argument(
         "--workers",
         type=int,

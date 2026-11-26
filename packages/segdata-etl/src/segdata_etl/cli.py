@@ -1,4 +1,11 @@
-"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split``, ``curate``, ``promote`` and ``features``."""
+"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split``, ``curate``, ``promote`` and ``features``.
+
+``build`` stages a dataset version: ``build coralnet`` for CoralNet, ``build <name>`` for ``mermaid``,
+``coralscapes_v2`` and ``ucsd_mosaics``, and the external builders ``catlin_seaview``,
+``moorea_labeled_corals``, ``pacific_labeled_corals`` and ``benthos_yuval``, which stage a prefix
+that ``ingest`` published. ``taxonomy`` stages the MERMAID benthic taxonomy. ``promote`` publishes
+what ``build``, ``curate`` and ``taxonomy`` staged.
+"""
 
 from __future__ import annotations
 
@@ -259,7 +266,11 @@ def build_parser(
     """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split``, ``curate``, ``promote`` and ``features``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
-    build = top.add_parser("build", help="Build and publish a dataset")
+    build = top.add_parser(
+        "build",
+        help="Stage a dataset version ('segdata promote' publishes it); the raw loaders are "
+        "'segdata ingest'",
+    )
     build_sub = build.add_subparsers(dest="dataset", required=True)
     coralnet_commands.add_subcommands(build_sub)
     _add_external_builds(build_sub)

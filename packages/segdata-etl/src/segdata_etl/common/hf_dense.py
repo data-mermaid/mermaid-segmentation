@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 
-from segdata_etl.common.copy_plan import StagedFile, stage_bytes
+from segdata_etl.common.copy_plan import ImageHeader, StagedFile, stage_bytes
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     image_size,
@@ -122,8 +122,8 @@ def _shards_or_raise(files: Sequence[str], source: DenseSource) -> list[tuple[st
     return shards
 
 
-def read_header(image: bytes, mask: bytes) -> tuple[str, int, int] | None:
-    """Return ``(media_type, width, height)`` of the image, or None if it or the mask is unreadable.
+def read_header(image: bytes, mask: bytes) -> ImageHeader | None:
+    """Return the header of the image, or None if it or the mask is unreadable.
 
     The image must be JPEG or PNG with a readable size and the mask must be PNG.
     """
@@ -131,7 +131,7 @@ def read_header(image: bytes, mask: bytes) -> tuple[str, int, int] | None:
     if media_type is None or sniff_media_type(mask) != _PNG:
         return None
     dims = image_size(image)
-    return None if dims is None else (media_type, dims[0], dims[1])
+    return None if dims is None else ImageHeader(media_type, dims[0], dims[1])
 
 
 class MaskInvalid(ValueError):
@@ -175,21 +175,20 @@ def image_row(
     info: RowInfo,
     image: bytes,
     mask: bytes,
-    header: tuple[str, int, int],
+    header: ImageHeader,
 ) -> dict[str, Any]:
     """Build the ``images.parquet`` row; keys are relative to the dataset's image prefix."""
-    media_type, width, height = header
     etag, size, crc = _object_fields(image)
     mask_etag, mask_size, mask_crc = _object_fields(mask)
     return {
         "image_id": image_id,
-        "key": f"{info.group}/{info.stem}.{EXTENSIONS[media_type]}",
+        "key": f"{info.group}/{info.stem}.{EXTENSIONS[header.media_type]}",
         "etag": etag,
         "size": size,
         "crc64nvme": crc,
-        "media_type": media_type,
-        "width": width,
-        "height": height,
+        "media_type": header.media_type,
+        "width": header.width,
+        "height": header.height,
         "group": info.group,
         "mask_key": f"{info.group}/{info.stem}{MASK_SUFFIX}",
         "mask_etag": mask_etag,
@@ -300,7 +299,7 @@ def _stage_shard(
                 out.unreadable += 1
                 continue
             try:
-                label_counts = label_pixel_counts(mask, header[1:], vocab_ids)
+                label_counts = label_pixel_counts(mask, (header.width, header.height), vocab_ids)
             except MaskInvalid as exc:
                 logger.warning("dropping image %s: invalid mask: %s", image_id, exc)
                 out.mask_invalid += 1
@@ -312,7 +311,9 @@ def _stage_shard(
             out.counts.extend((image_id, label, n) for label, n in sorted(label_counts.items()))
             prefix = source.image_prefix
             out.files.append(
-                StagedFile(prefix + record["key"], record["size"], record["crc64nvme"], header[0])
+                StagedFile(
+                    prefix + record["key"], record["size"], record["crc64nvme"], header.media_type
+                )
             )
             out.files.append(
                 StagedFile(

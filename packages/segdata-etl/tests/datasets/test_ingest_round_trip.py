@@ -80,7 +80,7 @@ def test_catlin_build_records_the_ingest_source_and_damaged_image_count(
         str(tmp_path / "work"),
     )
 
-    assert manifest.stats.dropped == {"damaged_images": 2}
+    assert manifest.stats.dropped == {"damaged_images": 2, "image_unreadable_header": 0}
     assert manifest.source.license == "CC BY-NC-SA 4.0"
     assert manifest.source.citation == (
         "Seaview Survey Photo-quadrat and Image Classification Dataset "
@@ -100,7 +100,11 @@ def test_moorea_build_records_the_ingest_source_damaged_images_and_off_points(
         "moorea_labeled_corals", moorea_labeled_corals, raw, tmp_path, monkeypatch, capsys
     )
 
-    assert manifest.stats.dropped == {"damaged_images": 1, "off_annotations": 2}
+    assert manifest.stats.dropped == {
+        "damaged_images": 1,
+        "image_unreadable_header": 0,
+        "off_annotations": 2,
+    }
     assert manifest.source.license == "CC BY 4.0"
     assert manifest.source.citation == (
         "Beijbom et al., 'Automated Annotation of Coral Reef Survey Images', IEEE CVPR, 2012."
@@ -133,6 +137,7 @@ def test_pacific_build_records_the_ingest_source_and_both_annotation_drop_counts
     assert manifest.stats.dropped == {
         "annotations_unknown_archived": 1,
         "annotations_unmapped_imageid": 1,
+        "image_unreadable_header": 0,
     }
     assert manifest.source.license == "CC0 1.0 (Dryad)"
     assert manifest.source.citation == (
@@ -163,7 +168,7 @@ def test_benthos_build_records_the_ingest_source_and_no_drops(
         str(tmp_path / "work"),
     )
 
-    assert manifest.stats.dropped == {}
+    assert manifest.stats.dropped == {"image_unreadable_header": 0}
     assert manifest.source.license == "CC0 1.0 (Dryad)"
     assert manifest.source.citation == (
         "Yuval, M., Alonso, I., Murillo, A. C., Treibitz, T. (2021). "
