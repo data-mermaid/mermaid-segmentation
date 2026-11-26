@@ -106,7 +106,7 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
 
         Raises:
             ValueError: The reader kind differs from the manifest kind, ``labels.parquet`` repeats
-                a name (compared case-folded), a group is unknown or not in
+                a name (compared case-folded) or holds a ``label_id`` below 1, a group is unknown or not in
                 ``version.synced_groups``, or an image id is not in the selection.
             FileNotFoundError: A selected file is not cached.
         """
@@ -126,6 +126,12 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         if duplicated:
             raise ValueError(
                 f"dataset {manifest.dataset!r}: labels.parquet repeats the names {duplicated}"
+            )
+        below_one = sorted(i for i in version.labels.column("label_id").to_pylist() if i < 1)
+        if below_one:
+            raise ValueError(
+                f"dataset {manifest.dataset!r}: labels.parquet holds the label_ids {below_one}; "
+                "0 is background and ids start at 1"
             )
         self.version = version
         self.source_name = manifest.dataset

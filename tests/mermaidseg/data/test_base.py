@@ -235,3 +235,23 @@ def test_duplicated_label_name_raises_naming_the_dataset(
     )
     with pytest.raises(ValueError, match=rf"'a'.*{duplicated}"):
         PointDataset(version, split="val", global_offset=0)
+
+
+@pytest.mark.parametrize(
+    ("label_id", "raises"), [(0, True), (1, False)], ids=["background-id", "first-foreground-id"]
+)
+def test_label_ids_below_one_raise_naming_the_dataset(
+    tmp_path: Path, label_id: int, raises: bool
+) -> None:
+    version = open_written(
+        tmp_path,
+        kind="dense",
+        images=[ImageSpec("i1", mask=np.zeros((8, 8), np.uint8))],
+        labels={label_id: "acro", 2: "sand"},
+        name="a",
+    )
+    if raises:
+        with pytest.raises(ValueError, match=rf"'a'.*\[{label_id}\]"):
+            DenseDataset(version, split="val", global_offset=0)
+    else:
+        DenseDataset(version, split="val", global_offset=0)

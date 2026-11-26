@@ -123,12 +123,17 @@ def select_points(
 
 
 def _check_label_ids_in_range(label_ids: NDArray[np.int32], version: DatasetVersion) -> None:
-    """Raise if any point ``label_id`` exceeds the largest ``label_id`` of ``labels.parquet``.
+    """Raise if any point ``label_id`` is below 1 or exceeds the largest of ``labels.parquet``.
 
-    An id below that maximum but absent from the table stays allowed; it maps to background.
+    An id below that maximum but absent from the table stays allowed: it is painted as
+    ``offset + id`` and becomes background only through the registry lookup
+    (``SourceLabelRegistry.source_to_target``).
     """
     known = version.labels.column("label_id").to_pylist()
     limit = max(known, default=0)
+    below = np.unique(label_ids[label_ids < 1])
+    if below.size:
+        raise ValueError(f"point label_id {below.tolist()} is below 1; 0 is background")
     above = np.unique(label_ids[label_ids > limit])
     if above.size:
         raise ValueError(

@@ -78,16 +78,23 @@ def test_image_without_a_selected_point_is_dropped(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("label_id", "raises"),
-    [(9, False), (10, True), (6, False)],
-    ids=["max", "above-max", "absent-from-labels"],
+    [(9, False), (10, True), (6, False), (0, True), (-1, True), (1, False)],
+    ids=["max", "above-max", "absent-from-labels", "zero", "negative", "one"],
 )
-def test_point_label_ids_are_checked_against_the_versions_max(
+def test_point_label_ids_must_lie_between_one_and_the_versions_max(
     tmp_path: Path, label_id: int, raises: bool
 ) -> None:
     version = _write_points(tmp_path, [("i1", 1, 1, label_id)], ["i1"])
     expectation = pytest.raises(ValueError, match=str(label_id)) if raises else nullcontext()
     with expectation:
         PointDataset(version, split="val", global_offset=0, annotators=["default"])
+
+
+def test_a_point_id_absent_from_labels_is_painted_at_its_offset_id(tmp_path: Path) -> None:
+    version = _write_points(tmp_path, [("i1", 1, 1, 6)], ["i1"])
+    ds = PointDataset(version, split="val", global_offset=10, annotators=["default"])
+    _, mask = ds[0]
+    assert mask[1, 1] == 16
 
 
 @pytest.mark.parametrize(
