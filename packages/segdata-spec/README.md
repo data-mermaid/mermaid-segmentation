@@ -108,7 +108,7 @@ All derive from `errors.SegdataError`.
 | `ManifestNotFound` | A pinned manifest is absent from the bucket. |
 | `ChecksumMismatch` | A table, image or mask differs from its recorded checksum or size, or a cached resized output has no valid index entry or differs from it. |
 | `ImageChanged` | An image no longer matches its recorded ETag. |
-| `ImageMissing` | An image is absent and the dataset's mode is `fail`. |
+| `ImageMissing` | An image or mask is absent. |
 | `SplitCoverageError` | A dataset version has a group that its split file does not list. |
 | `ImageUndecodable` | An image or mask matches its checksums but cannot be decoded (for example, a format other than JPEG or PNG). Names the S3 key. |
 

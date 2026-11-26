@@ -46,7 +46,7 @@ Prerequisites: AWS credentials that read `mermaid-ic-datasets`, and disk space f
    uv run python scripts/sync_data.py --data-config configs/data_config.yaml --cache-dir <cache-dir>
    ```
 
-   `--workers N` sets the download threads (default 16). The script prints one line per dataset: the version, the resize id (`original` when the dataset is not resized) and the number of dropped images. It prints the taxonomy version last.
+   `--workers N` sets the download threads (default 16). The script prints one line per dataset: the version and the resize id (`original` when the dataset is not resized). It prints the taxonomy version last.
 
 2. Pass the same directory to the run: `scripts/train.py --cache-dir <cache-dir>` or `scripts/evaluate.py --cache-dir <cache-dir>`.
 
