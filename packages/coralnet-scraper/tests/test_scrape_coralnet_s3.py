@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -113,10 +114,17 @@ def test_main_passes_configured_bucket_prefix_and_discovered_ids(monkeypatch, fa
     assert discover.call_args.args[0] is kwargs["downloader"].session
 
 
-@pytest.mark.parametrize(("argv", "prune"), [([], False), (["--prune"], True)])
-def test_main_passes_the_prune_flag(monkeypatch, argv, prune):
-    _, run, _ = _run_main(monkeypatch, argv)
+@pytest.mark.parametrize(
+    ("argv", "prune", "dry_run"),
+    [([], False, False), (["--prune"], True, False), (["--prune", "--dry-run"], True, True)],
+)
+def test_main_passes_the_prune_and_dry_run_flags(monkeypatch, fake_s3, argv, prune, dry_run):
+    _, run, _ = _run_main(monkeypatch, argv, {1: DownloadResult(ok=True)}, fake_s3=fake_s3)
+
     assert run.call_args.kwargs["prune"] is prune
+    assert run.call_args.kwargs["dry_run"] is dry_run
+    settings = _run_report(fake_s3)["settings"]
+    assert (settings["prune"], settings["dry_run"]) == (prune, dry_run)
 
 
 def test_main_passes_delay_seconds(monkeypatch):
@@ -239,6 +247,7 @@ def test_main_reports_a_circuit_breaker_stop(monkeypatch, caplog, fake_s3):
         "requests_per_second": 1.5,
         "source_ids": None,
         "prune": True,
+        "dry_run": False,
         "allow_source_drop": True,
     }
     assert report["transport"] == _TRANSPORT
@@ -359,11 +368,19 @@ def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
         ["--prune", "verify-existing"],
         ["--allow-source-drop", "invalidate", "--all"],
         ["--prune", "invalidate", "--changed"],
+        ["--dry-run", "verify-existing"],
     ],
 )
 def test_prune_and_allow_source_drop_are_rejected_with_a_subcommand(argv):
     with pytest.raises(SystemExit) as exc:
         cli._parse_args(argv)
+
+    assert exc.value.code == 2
+
+
+def test_batch_dry_run_without_prune_is_rejected():
+    with pytest.raises(SystemExit) as exc:
+        cli._parse_args(["--dry-run"])
 
     assert exc.value.code == 2
 
@@ -505,7 +522,7 @@ def test_invalidate_all_deletes_every_marker(monkeypatch, fake_s3):
         _store_source(fake_s3, sid, 10)
     fake_s3.put("my-bucket", "my-prefix/_meta/discovered_source_ids.json", b"[1, 22]")
 
-    code, _, _ = _run_command(monkeypatch, fake_s3, ["invalidate", "--all"])
+    code, _, _ = _run_command(monkeypatch, fake_s3, ["invalidate", "--all", "--yes"])
 
     assert code == 0
     assert _remaining(fake_s3) == [
@@ -513,6 +530,37 @@ def test_invalidate_all_deletes_every_marker(monkeypatch, fake_s3):
         "s1/annotations.csv",
         "s22/annotations.csv",
     ]
+
+
+def test_invalidate_all_without_yes_or_dry_run_exits_2_and_deletes_nothing(monkeypatch, fake_s3):
+    for sid in (1, 22):
+        _store_source(fake_s3, sid, 10)
+    before = _remaining(fake_s3)
+
+    with pytest.raises(SystemExit) as exc:
+        _run_command(monkeypatch, fake_s3, ["invalidate", "--all"])
+
+    assert exc.value.code == 2
+    assert _remaining(fake_s3) == before
+
+
+@pytest.mark.parametrize(
+    "selector", [["--source-ids", "1"], ["--all"], ["--changed"]], ids=["ids", "all", "changed"]
+)
+def test_invalidate_dry_run_deletes_nothing_and_names_the_sources(
+    monkeypatch, fake_s3, caplog, selector
+):
+    caplog.set_level(logging.INFO)
+    _store_source(fake_s3, 1, 5)
+
+    code, _, _ = _run_command(
+        monkeypatch, fake_s3, ["invalidate", *selector, "--dry-run"], totals={1: 6}
+    )
+
+    assert code == 0
+    assert ("my-bucket", "my-prefix/s1/_complete.json") in fake_s3.objects
+    assert ("my-bucket", "my-prefix/s1/_partial/state.json") in fake_s3.objects
+    assert "Would invalidate 1 sources: [1]" in [r.getMessage() for r in caplog.records]
 
 
 def test_invalidate_changed_deletes_the_marker_of_a_source_whose_total_changed(

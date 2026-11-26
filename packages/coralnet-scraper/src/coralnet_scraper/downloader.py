@@ -1546,9 +1546,18 @@ class CoralNetDownloader:
         s3_io.delete_prefix(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
         logger.info("Source %s complete: s3://%s/%s", source_id, bucket_name, key)
 
-    def _prune_orphans(self, source_id: int, bucket_name: str, s3_prefix: str) -> int:
-        """Delete the source's image objects that its image list lacks; return how many."""
+    def _prune_orphans(
+        self, source_id: int, bucket_name: str, s3_prefix: str, *, dry_run: bool = False
+    ) -> int:
+        """Delete the source's image objects that its image list lacks; return how many.
+
+        With ``dry_run`` it logs each orphan key and deletes nothing.
+        """
         keys = orphan_image_keys(self.s3, bucket_name, s3_prefix, source_id)
+        if dry_run:
+            for key in keys:
+                logger.info("Source %s: would prune orphan image object %s", source_id, key)
+            return 0
         s3_io.delete_keys(self.s3, bucket_name, keys)
         if keys:
             logger.info("Source %s: pruned %d orphan image objects", source_id, len(keys))
@@ -1588,6 +1597,7 @@ class CoralNetDownloader:
         s3_prefix: str = DEFAULT_PREFIX,
         *,
         prune: bool = False,
+        dry_run: bool = False,
     ) -> DownloadResult:
         """Download one source's artifacts to S3, resuming the stages a previous run finished.
 
@@ -1602,6 +1612,8 @@ class CoralNetDownloader:
             bucket_name: Destination S3 bucket.
             s3_prefix: Destination key prefix.
             prune: Delete image objects the verified image list lacks, before the marker.
+            dry_run: With ``prune``, log those objects and delete none; verification and the
+                marker run as usual.
 
         Returns:
             The outcome, with failure codes in ``errors`` and per-kind image counts in
@@ -1641,7 +1653,13 @@ class CoralNetDownloader:
             logger.info("Source %s reports zero images; skipping", sid)
             return DownloadResult(ok=True, skipped_no_images=True)
         return self._download_stages(
-            sid, bucket_name, s3_prefix, overview_html, counts.total_images, prune=prune
+            sid,
+            bucket_name,
+            s3_prefix,
+            overview_html,
+            counts.total_images,
+            prune=prune,
+            dry_run=dry_run,
         )
 
     def _download_details(
@@ -1707,6 +1725,7 @@ class CoralNetDownloader:
         total_images: int,
         *,
         prune: bool,
+        dry_run: bool,
     ) -> DownloadResult:
         """Run the stages of a source with images, then verify it and write its marker.
 
@@ -1747,7 +1766,7 @@ class CoralNetDownloader:
                 self._finish_stage(sid, bucket_name, s3_prefix, state, "images")
         if errs:
             return DownloadResult(ok=False, errors=errs, image_failures=image_failures)
-        errs += self._verify_and_mark(sid, bucket_name, s3_prefix, total_images, prune)
+        errs += self._verify_and_mark(sid, bucket_name, s3_prefix, total_images, prune, dry_run)
         return DownloadResult(ok=not errs, errors=errs, image_failures=image_failures)
 
     def _verify_and_mark(
@@ -1757,8 +1776,11 @@ class CoralNetDownloader:
         s3_prefix: str,
         total_images: int,
         prune: bool,
+        dry_run: bool,
     ) -> list[str]:
         """Verify the source and write its marker when it passes.
+
+        With ``prune`` the orphan image objects go first (only logged under ``dry_run``).
 
         Returns:
             ``["verification_failed"]`` after discarding ``_partial/`` when verification
@@ -1767,7 +1789,11 @@ class CoralNetDownloader:
         verification = verify_source(
             self.s3, bucket_name, s3_prefix, source_id, expected_total=total_images
         )
-        if verification.ok and prune and self._prune_orphans(source_id, bucket_name, s3_prefix):
+        if (
+            verification.ok
+            and prune
+            and self._prune_orphans(source_id, bucket_name, s3_prefix, dry_run=dry_run)
+        ):
             verification = verify_source(
                 self.s3, bucket_name, s3_prefix, source_id, expected_total=total_images
             )

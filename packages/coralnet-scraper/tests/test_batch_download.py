@@ -33,19 +33,27 @@ def test_should_skip_only_a_source_with_a_marker(fake_s3):
     assert _skip(fake_s3, 2) is True
 
 
-@pytest.mark.parametrize("prune", [False, True])
-def test_run_batch_download_downloads_only_unmarked_sources_and_counts_the_skipped(fake_s3, prune):
+@pytest.mark.parametrize(("prune", "dry_run"), [(False, False), (True, False), (True, True)])
+def test_run_batch_download_downloads_only_unmarked_sources_and_counts_the_skipped(
+    fake_s3, prune, dry_run
+):
     _mark(fake_s3, 1)
     downloader = MagicMock()
     result = MagicMock(skipped_no_confirmed=False)
     downloader.download_source.return_value = result
 
     outcome = bd.run_batch_download(
-        [1, 2], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3, prune=prune
+        [1, 2],
+        downloader=downloader,
+        bucket="b",
+        s3_prefix="p",
+        s3_client=fake_s3,
+        prune=prune,
+        dry_run=dry_run,
     )
 
     downloader.download_source.assert_called_once_with(
-        2, bucket_name="b", s3_prefix="p", prune=prune
+        2, bucket_name="b", s3_prefix="p", prune=prune, dry_run=dry_run
     )
     assert outcome.results == {2: result}
     assert outcome.skipped_complete == 1
@@ -203,7 +211,7 @@ class _ScriptedDownloader:
         self.attempted: list[int] = []
 
     def download_source(
-        self, sid: int, *, bucket_name: str, s3_prefix: str, prune: bool
+        self, sid: int, *, bucket_name: str, s3_prefix: str, prune: bool, dry_run: bool
     ) -> DownloadResult:
         self.attempted.append(sid)
         outcome = self.script[sid]

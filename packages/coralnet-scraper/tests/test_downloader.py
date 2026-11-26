@@ -1379,22 +1379,30 @@ def test_a_paginated_export_skips_pages_with_a_saved_chunk(http_server, fake_s3,
 
 
 @pytest.mark.parametrize(
-    ("prune", "orphan_kept", "warnings"),
-    [(True, False, []), (False, True, ["orphan_image_objects:1"])],
-    ids=["prune", "keep"],
+    ("prune", "dry_run", "orphan_kept", "warnings"),
+    [
+        (True, False, False, []),
+        (False, False, True, ["orphan_image_objects:1"]),
+        (True, True, True, ["orphan_image_objects:1"]),
+    ],
+    ids=["prune", "keep", "dry-run"],
 )
 def test_prune_deletes_orphan_objects_before_the_marker(
-    http_server, fake_s3, prune, orphan_kept, warnings
+    http_server, fake_s3, caplog, prune, dry_run, orphan_kept, warnings
 ):
+    caplog.set_level(logging.INFO)
     _script_source(http_server, [[1]])
     fake_s3.put("b", "p/s1/images/99.jpg", b"OLD")
 
-    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p", prune=prune)
+    res = _site_downloader(http_server, fake_s3).download_source(
+        1, "b", "p", prune=prune, dry_run=dry_run
+    )
 
     assert res.ok is True
     assert (("b", "p/s1/images/99.jpg") in fake_s3.objects) is orphan_kept
     assert json.loads(fake_s3.objects[("b", _MARKER)])["warnings"] == warnings
-    if prune:
+    assert any("p/s1/images/99.jpg" in r.getMessage() for r in caplog.records) is dry_run
+    if prune and not dry_run:
         assert fake_s3.events.index(("delete", "p/s1/images/99.jpg")) > fake_s3.events.index(
             ("put", "p/s1/images/1.jpg")
         )

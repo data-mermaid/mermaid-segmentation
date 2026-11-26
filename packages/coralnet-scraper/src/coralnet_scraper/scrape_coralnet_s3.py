@@ -175,6 +175,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Delete image objects missing from a verified image list, before its marker",
     )
     p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --prune, log the orphan image objects instead of deleting them",
+    )
+    p.add_argument(
         "--allow-source-drop",
         action="store_true",
         help="Run even when CoralNet lists under 95%% of the sources it listed last run",
@@ -203,9 +208,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Only marked sources whose live image count differs from the marker's",
     )
+    invalidate.add_argument(
+        "--dry-run",
+        dest="invalidate_dry_run",
+        action="store_true",
+        help="Log the sources that would be invalidated; delete nothing",
+    )
+    invalidate.add_argument(
+        "--yes", action="store_true", help="Confirm --all, which invalidates every source"
+    )
     args = p.parse_args(argv)
-    if args.command is not None and (args.prune or args.allow_source_drop):
-        p.error(f"--prune and --allow-source-drop do not apply to {args.command}")
+    if args.command is not None and (args.prune or args.allow_source_drop or args.dry_run):
+        p.error(f"--prune, --dry-run and --allow-source-drop do not apply to {args.command}")
+    if args.command is None and args.dry_run and not args.prune:
+        p.error("--dry-run needs --prune")
+    if (
+        args.command == "invalidate"
+        and args.invalidate_all
+        and not (args.yes or args.invalidate_dry_run)
+    ):
+        p.error("invalidate --all needs --yes (or --dry-run to preview)")
     return args
 
 
@@ -297,6 +319,8 @@ def _invalidate(
 ) -> int:
     """Delete the completion marker and ``_partial/`` of the sources ``args`` selects.
 
+    With ``--dry-run`` it logs the keys it would delete, and deletes nothing.
+
     Returns:
         1 when ``--changed`` could not read some source's live count, else 0.
     """
@@ -308,9 +332,15 @@ def _invalidate(
     else:
         ids, unchecked = _changed_source_ids(downloader, s3, bucket, prefix)
     for sid in ids:
-        s3.delete_object(Bucket=bucket, Key=s3_io.object_key_complete_marker(prefix, sid))
-        s3_io.delete_prefix(s3, bucket, s3_io.partial_prefix(prefix, sid))
-    logger.info("Invalidated %d sources: %s", len(ids), ids)
+        marker_key = s3_io.object_key_complete_marker(prefix, sid)
+        partial = s3_io.partial_prefix(prefix, sid)
+        if args.invalidate_dry_run:
+            logger.info("Source %s: would delete %s and %s", sid, marker_key, partial)
+            continue
+        s3.delete_object(Bucket=bucket, Key=marker_key)
+        s3_io.delete_prefix(s3, bucket, partial)
+    verb = "Would invalidate" if args.invalidate_dry_run else "Invalidated"
+    logger.info("%s %d sources: %s", verb, len(ids), ids)
     if unchecked:
         logger.error("Could not check %d sources: %s", len(unchecked), unchecked)
     return 1 if unchecked else 0
@@ -402,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         s3_prefix=prefix,
         s3_client=s3,
         prune=bool(args.prune),
+        dry_run=bool(args.dry_run),
         delay_seconds=float(args.delay_seconds),
     )
     transport = downloader.transport_stats()
@@ -412,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
             "requests_per_second": downloader.requests_per_second,
             "source_ids": args.source_ids,
             "prune": bool(args.prune),
+            "dry_run": bool(args.dry_run),
             "allow_source_drop": bool(args.allow_source_drop),
         },
         started_at=started_at,

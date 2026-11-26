@@ -133,6 +133,7 @@ def run_batch_download(
     s3_prefix: str,
     s3_client: Any,
     prune: bool = False,
+    dry_run: bool = False,
     delay_seconds: float = 0.0,
 ) -> BatchOutcome:
     """Download each source that is not skipped.
@@ -144,6 +145,7 @@ def run_batch_download(
         s3_prefix: Destination key prefix.
         s3_client: S3 client used for the skip check.
         prune: Let each downloaded source delete image objects its verified image list lacks.
+        dry_run: With ``prune``, log the orphan objects instead of deleting them.
         delay_seconds: Pause after each download.
 
     Returns:
@@ -170,7 +172,7 @@ def run_batch_download(
                 skipped_complete += 1
                 continue
             res = downloader.download_source(
-                sid, bucket_name=bucket, s3_prefix=s3_prefix, prune=prune
+                sid, bucket_name=bucket, s3_prefix=s3_prefix, prune=prune, dry_run=dry_run
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("Source %s failed: %s", sid, e)
