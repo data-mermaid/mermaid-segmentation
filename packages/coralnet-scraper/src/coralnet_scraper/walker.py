@@ -20,7 +20,7 @@ from coralnet_scraper.errors import (
     _TotalChanged,
     _WalkCountMismatch,
 )
-from coralnet_scraper.session import _PAGE_EXPORT_TIMEOUT, CoralNetSession
+from coralnet_scraper.session import _PAGE_EXPORT_TIMEOUT, CoralNetSession, browse_page_url
 
 logger = logging.getLogger(__name__)
 
@@ -124,25 +124,6 @@ def _check_walk_page(
         raise WalkIncomplete(f"browse page {page} repeats an image id")
 
 
-def _refs_by_page(refs: list[ImageRef]) -> dict[int, list[ImageRef]]:
-    """Return the images of each browse page, pages ascending, images in walk order."""
-    pages: dict[int, list[ImageRef]] = {}
-    for ref in refs:
-        pages.setdefault(ref.page, []).append(ref)
-    return {page: pages[page] for page in sorted(pages)}
-
-
-def _partial_key(s3_prefix: str, source_id: int, name: str) -> str:
-    """Return the key of the file ``name`` in a source's ``_partial/``."""
-    return f"{s3_io.partial_prefix(s3_prefix, source_id)}{name}"
-
-
-def _browse_page_url(coralnet_url: str, source_id: int, page_num: int) -> str:
-    """Return the URL of a source's browse page ``page_num``, counted from 1."""
-    base = f"{coralnet_url}/source/{source_id}/browse/images/"
-    return base if page_num == 1 else f"{base}?page={page_num}"
-
-
 class SourceWalker:
     """Walk the browse pages of a source, checkpointing the walk in its ``_partial/``."""
 
@@ -223,7 +204,7 @@ class SourceWalker:
                 ``expected`` (``_partial/`` is discarded), or the walk found another number
                 of images (the walk's progress is discarded).
         """
-        key = _partial_key(s3_prefix, source_id, _WALK_FILE)
+        key = s3_io.partial_key(s3_prefix, source_id, _WALK_FILE)
         saved = s3_io.read_json_s3(self.s3, bucket_name, key)
         progress = _WalkProgress.from_json(saved) if saved is not None else _WalkProgress()
         if progress.complete:
@@ -246,9 +227,7 @@ class SourceWalker:
             SessionExpired: If a browse page has no export form.
             WalkIncomplete: If a page breaks a walk rule.
         """
-        url: str | None = _browse_page_url(
-            self.auth.CORALNET_URL, source_id, progress.last_page + 1
-        )
+        url: str | None = browse_page_url(self.auth.CORALNET_URL, source_id, progress.last_page + 1)
         while url is not None:
             response = self.auth.session.get(url, timeout=_PAGE_EXPORT_TIMEOUT)
             response.raise_for_status()
@@ -283,6 +262,6 @@ class SourceWalker:
             self._reset_partial(source_id, bucket_name, s3_prefix, total)
             raise _TotalChanged(total)
         if found != expected:
-            key = _partial_key(s3_prefix, source_id, _WALK_FILE)
+            key = s3_io.partial_key(s3_prefix, source_id, _WALK_FILE)
             self.s3.delete_object(Bucket=bucket_name, Key=key)
             raise _WalkCountMismatch(found, expected)

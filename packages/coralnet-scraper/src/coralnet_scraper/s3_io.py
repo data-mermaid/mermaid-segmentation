@@ -54,6 +54,11 @@ def partial_prefix(base_prefix: str, source_id: int) -> str:
     return f"{source_prefix(base_prefix, source_id)}_partial/"
 
 
+def partial_key(s3_prefix: str, source_id: int, name: str) -> str:
+    """Return the key of the file ``name`` in a source's ``_partial/``."""
+    return f"{partial_prefix(s3_prefix, source_id)}{name}"
+
+
 def key_exists(client: Any, bucket: str, key: str) -> bool:
     """Return whether an object with exactly ``key`` exists in ``bucket``."""
     # S3 lists keys in order, so an exact match is the first key under its own prefix.

@@ -174,3 +174,9 @@ class CoralNetSession:
     def fetch_total_images(self, source_id: int) -> int | None:
         """Return the image count on the source's overview page, or None when it lists none."""
         return parse_image_status_counts(self._get_source_overview_html(source_id)).total_images
+
+
+def browse_page_url(coralnet_url: str, source_id: int, page_num: int) -> str:
+    """Return the URL of a source's browse page ``page_num``, counted from 1."""
+    base = f"{coralnet_url}/source/{source_id}/browse/images/"
+    return base if page_num == 1 else f"{base}?page={page_num}"

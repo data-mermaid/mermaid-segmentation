@@ -19,9 +19,9 @@ from coralnet_scraper import s3_io
 from coralnet_scraper.config import DEFAULT_PREFIX
 from coralnet_scraper.errors import ContentError, SessionExpired, _ExportPrepTimeout, _retrying
 from coralnet_scraper.parsers import parse_export_annotations_prep_form
-from coralnet_scraper.session import _PAGE_EXPORT_TIMEOUT, CoralNetSession
+from coralnet_scraper.session import _PAGE_EXPORT_TIMEOUT, CoralNetSession, browse_page_url
 from coralnet_scraper.verify import strip_status
-from coralnet_scraper.walker import ImageRef, _browse_page_url, _partial_key, _refs_by_page
+from coralnet_scraper.walker import ImageRef
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,14 @@ def _check_export_has_rows(df: pd.DataFrame) -> None:
     """Raise :class:`ContentError` if an export that must have rows is header-only."""
     if df.empty:
         raise ContentError("export has no rows although an image is Confirmed")
+
+
+def _refs_by_page(refs: list[ImageRef]) -> dict[int, list[ImageRef]]:
+    """Return the images of each browse page, pages ascending, images in walk order."""
+    pages: dict[int, list[ImageRef]] = {}
+    for ref in refs:
+        pages.setdefault(ref.page, []).append(ref)
+    return {page: pages[page] for page in sorted(pages)}
 
 
 def _needs_rows(refs: list[ImageRef]) -> bool:
@@ -255,7 +263,7 @@ class AnnotationExporter:
             df_annotations = self._export_validated(
                 self.auth.session,
                 source_id,
-                _browse_page_url(self.auth.CORALNET_URL, source_id, 1),
+                browse_page_url(self.auth.CORALNET_URL, source_id, 1),
                 {"image_select_type": "all", **_EXPORT_OPTIONS},
                 _export_names(refs),
                 prep_timeout=prep_timeout,
@@ -349,7 +357,7 @@ class AnnotationExporter:
             for key in keys
             if (m := _CHUNK_PAGE.search(key)) and (page := int(m.group(1))) in pages
         )
-        chunk_keys = [_partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in saved]
+        chunk_keys = [s3_io.partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in saved]
         with ThreadPoolExecutor(max_workers=self.export_workers) as executor:
             chunks = list(
                 executor.map(lambda k: self._read_saved_chunk(bucket_name, k), chunk_keys)
@@ -382,7 +390,7 @@ class AnnotationExporter:
         Raises:
             FileNotFoundError: If a page has no saved chunk.
         """
-        keys = [_partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in pages]
+        keys = [s3_io.partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in pages]
 
         def read(key: str) -> pd.DataFrame:
             chunk = s3_io.read_csv_s3(self.s3, bucket_name, key, encoding="utf-8")
@@ -460,7 +468,7 @@ class AnnotationExporter:
         ``stop`` ends the page's export retries once set (see :meth:`_export_validated`).
         """
         chunk = self._export_one_page(source_id, page_num, page_refs, stop=stop)
-        key = _partial_key(s3_prefix, source_id, f"page-{page_num}.csv")
+        key = s3_io.partial_key(s3_prefix, source_id, f"page-{page_num}.csv")
         _upload_csv(self.s3, bucket_name, key, chunk)
         return len(chunk)
 
@@ -497,7 +505,7 @@ class AnnotationExporter:
         chunk_df = self._export_validated(
             self.auth._get_export_session(),
             source_id,
-            _browse_page_url(self.auth.CORALNET_URL, source_id, page_num),
+            browse_page_url(self.auth.CORALNET_URL, source_id, page_num),
             form,
             _export_names(page_refs),
             prep_timeout=_PAGE_EXPORT_TIMEOUT,

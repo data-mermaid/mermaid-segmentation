@@ -35,7 +35,7 @@ from coralnet_scraper.parsers import (
 )
 from coralnet_scraper.session import _PAGE_GET_TIMEOUT, CoralNetSession
 from coralnet_scraper.verify import Verification, orphan_image_keys, verify_source
-from coralnet_scraper.walker import ImageRef, SourceWalker, _partial_key
+from coralnet_scraper.walker import ImageRef, SourceWalker
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +258,7 @@ class CoralNetDownloader:
             total.
         """
         state = s3_io.read_json_s3(
-            self.s3, bucket_name, _partial_key(s3_prefix, source_id, _STATE_FILE)
+            self.s3, bucket_name, s3_io.partial_key(s3_prefix, source_id, _STATE_FILE)
         )
         if state is None:
             return None
@@ -290,7 +290,7 @@ class CoralNetDownloader:
     ) -> None:
         """Stamp ``state`` with the current UTC time and write it to ``_partial/state.json``."""
         state["updated_at"] = datetime.now(UTC).isoformat()
-        key = _partial_key(s3_prefix, source_id, _STATE_FILE)
+        key = s3_io.partial_key(s3_prefix, source_id, _STATE_FILE)
         s3_io.write_json_s3(self.s3, bucket_name, key, state)
 
     def _finish_stage(
