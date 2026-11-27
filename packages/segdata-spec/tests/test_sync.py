@@ -470,6 +470,24 @@ def test_sync_result_records_the_spec_applied_per_dataset(fake_s3, resize_pin, c
     assert result.datasets["plain"].resize is None
 
 
+def test_undecodable_original_is_skipped_and_recorded_in_the_marker(fake_s3, tmp_path, cache):
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (JPEG_A, "g1"), "b": (JPEG_A[: len(JPEG_A) // 2], "g1")},
+        points=[("a", 1, 1, 5), ("b", 2, 2, 6)],
+        sizes={"a": (64, 48), "b": (64, 48)},
+    )
+
+    result = _sync_resized(fake_s3, pin, cache)
+
+    assert result.datasets["ds"].skipped == frozenset({"b"})
+    assert _decoded(_resized(cache, SPEC, "a.jpg")).size == (32, 24)
+    assert not _resized(cache, SPEC, "b.jpg").exists()
+    (marker,) = (cache / "synced" / SPEC.id / BUCKET / "ds" / VERSION).glob("*.json")
+    assert json.loads(marker.read_text())["skipped"] == ["b"]
+
+
 POOL_IMAGES = {i: (i.encode() * 4, "g1") for i in "abcde"}
 
 

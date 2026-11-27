@@ -91,11 +91,14 @@ class DatasetSyncResult:
     """What ``sync`` did for one dataset pin.
 
     ``resize`` is the spec applied to the dataset's images, or None when they were cached as is.
+    ``skipped`` holds the ids of images left out of the resized cache because Pillow could not
+    decode the original (or its mask).
     """
 
     version: str
     manifest_sha256: str
     resize: ResizeSpec | None = None
+    skipped: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -327,19 +330,27 @@ def _sync_row(
     store: ImageStore,
     spec: ResizeSpec | None,
     row: Mapping[str, Any],
-) -> None:
-    """Sync one row's image and mask, resized per ``spec`` or as is when it is None."""
+) -> str | None:
+    """Sync one row's image and mask, resized per ``spec`` or as is when it is None.
+
+    Returns the row's ``image_id`` when a resize finds an original that matches its record but
+    does not decode; the row is then left out of the resized cache. Returns None otherwise.
+    """
     objects = [(store.prefix + key, etag, size, crc) for key, etag, size, crc in _row_objects(row)]
     if spec is None:
         for key, etag, size, crc in objects:
             _sync_object(client, cache_dir, store.bucket, key, etag, size, crc)
-        return
+        return None
     expected = scaled_size(row["width"], row["height"], spec)
     transforms: list[Callable[[bytes], bytes]] = [partial(resize_image, spec=spec)]
     if row["mask_key"] is not None:
         transforms.append(partial(resize_mask, size=expected))
-    for obj, transform in zip(objects, transforms, strict=True):
-        _sync_resized_object(client, cache_dir, spec, obj, store.bucket, transform, expected)
+    try:
+        for obj, transform in zip(objects, transforms, strict=True):
+            _sync_resized_object(client, cache_dir, spec, obj, store.bucket, transform, expected)
+    except ImageUndecodable:
+        return str(row["image_id"])
+    return None
 
 
 def _row_objects(row: Mapping[str, Any]) -> list[tuple[str, str, int, str | None]]:
@@ -389,12 +400,12 @@ def _resolve_max_workers(max_workers: int | None) -> int:
 
 def _ordered_futures(
     pool: ThreadPoolExecutor,
-    work: Callable[[dict[str, Any]], None],
+    work: Callable[[dict[str, Any]], Any],
     rows: Iterable[dict[str, Any]],
     window: int,
-) -> Iterator[tuple[dict[str, Any], Future[None]]]:
+) -> Iterator[tuple[dict[str, Any], Future[Any]]]:
     """Yield ``(row, future)`` in row order, with at most ``window`` rows submitted at once."""
-    pending: deque[tuple[dict[str, Any], Future[None]]] = deque()
+    pending: deque[tuple[dict[str, Any], Future[Any]]] = deque()
     for row in rows:
         pending.append((row, pool.submit(work, row)))
         if len(pending) >= window:
@@ -403,10 +414,14 @@ def _ordered_futures(
         yield pending.popleft()
 
 
-def _collect(outcomes: Iterable[tuple[dict[str, Any], Future[None]]]) -> None:
-    """Wait on each row in order, raising the first failure."""
+def _collect(outcomes: Iterable[tuple[dict[str, Any], Future[Any]]]) -> list[Any]:
+    """Wait on each row in order, raising the first failure; return the non-None results."""
+    results = []
     for _, future in outcomes:
-        future.result()
+        result = future.result()
+        if result is not None:
+            results.append(result)
+    return results
 
 
 def _sync_images(
@@ -416,8 +431,8 @@ def _sync_images(
     images: pa.Table,
     spec: ResizeSpec | None,
     max_workers: int,
-) -> None:
-    """Sync every image and mask in ``images`` on a worker pool.
+) -> frozenset[str]:
+    """Sync every image and mask in ``images`` on a worker pool; return the skipped image ids.
 
     Results are consumed in row order, so the error raised matches a serial run.
     """
@@ -426,7 +441,7 @@ def _sync_images(
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         try:
             outcomes = _ordered_futures(pool, work, rows, _IN_FLIGHT_PER_WORKER * max_workers)
-            _collect(outcomes)
+            return frozenset(_collect(outcomes))
         except BaseException:
             pool.shutdown(cancel_futures=True)
             raise
@@ -436,8 +451,12 @@ def _images_table(table_bytes: Mapping[str, bytes]) -> pa.Table:
     return pq.read_table(io.BytesIO(table_bytes["images.parquet"]))
 
 
-def _dataset_result(pin: Pin, spec: ResizeSpec | None) -> DatasetSyncResult:
-    return DatasetSyncResult(version=pin.version, manifest_sha256=pin.manifest_sha256, resize=spec)
+def _dataset_result(
+    pin: Pin, spec: ResizeSpec | None, skipped: frozenset[str] = frozenset()
+) -> DatasetSyncResult:
+    return DatasetSyncResult(
+        version=pin.version, manifest_sha256=pin.manifest_sha256, resize=spec, skipped=skipped
+    )
 
 
 def _write_marker(
@@ -447,6 +466,7 @@ def _write_marker(
     spec: ResizeSpec | None,
     groups: Collection[str] | None,
     marker_id: str | None = None,
+    skipped: frozenset[str] = frozenset(),
 ) -> None:
     """Write this sync's own marker file; markers are never read or rewritten here.
 
@@ -454,7 +474,7 @@ def _write_marker(
     """
     namespace = marker_id or resize_id(spec)
     directory = synced_marker_dir(cache_dir, namespace, bucket, pin.name, pin.version)
-    marker = SyncMarker(spec, None if groups is None else frozenset(groups))
+    marker = SyncMarker(spec, None if groups is None else frozenset(groups), skipped)
     _write_atomic(new_marker_path(directory), dump_marker(marker))
 
 
@@ -622,11 +642,16 @@ def sync(
 
     After a dataset's images and tables verify, a new marker file in
     ``<cache_dir>/synced/<spec.id or original>/<bucket>/<dataset>/<version>/`` records the
-    spec and the synced groups (``"all"`` for no selection). Each sync adds
+    spec, the synced groups (``"all"`` for no selection) and the skipped image ids. Each sync adds
     its own file and never reads or changes the others; ``open_version`` unions them and requires
     at least one.
     A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
     ``resize``, or mapped to None, caches the original bytes.
+
+    An original (or its mask) that matches its record but that Pillow cannot decode, such as a
+    truncated JPEG, is skipped rather than failing the sync: the image gets no resized output,
+    its id goes into the marker and ``DatasetSyncResult.skipped``, and ``open_version`` leaves the
+    image and its points out. A later sync downloads it again and skips it again.
 
     Images and masks are synced on ``max_workers`` threads (default ``min(8, os.cpu_count())``),
     with results taken in row order, so the error raised matches a serial run. Configure ``client`` with ``max_pool_connections`` of at least ``max_workers``.
@@ -636,7 +661,6 @@ def sync(
         ChecksumMismatch: A table, image or mask, downloaded or cached, differs from its record,
             or a cached resized output has no sidecar or differs from it, or a resized output's
             pixel size differs from the size scaled from its row's ``width`` and ``height``.
-        ImageUndecodable: An original to resize matches its record but Pillow cannot decode it.
         ImageChanged: An image or mask no longer matches its recorded ETag.
         ImageMissing: An image or mask is absent.
         ValueError: ``max_workers`` is below 1; ``selection`` names
@@ -655,7 +679,7 @@ def sync(
     _run_check_split(images, check_split)
     results: dict[str, DatasetSyncResult] = {}
     for name, pin in pins.items():
-        _sync_images(
+        skipped = _sync_images(
             client,
             cache_dir,
             manifests[name].image_store,
@@ -663,8 +687,10 @@ def sync(
             resize.get(name),
             workers,
         )
-        _write_marker(cache_dir, bucket, pin, resize.get(name), selection.get(name))
-        results[name] = _dataset_result(pin, resize.get(name))
+        _write_marker(
+            cache_dir, bucket, pin, resize.get(name), selection.get(name), skipped=skipped
+        )
+        results[name] = _dataset_result(pin, resize.get(name), skipped)
     return SyncResult(datasets=results, taxonomy=taxonomy)
 
 
