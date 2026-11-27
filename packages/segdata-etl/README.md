@@ -101,7 +101,7 @@ Each invocation computes its own default version tag. If you run the stages one 
 | `image_list_incomplete` | An annotation row matches no `image_list.csv` row by `Name`. |
 | `label_unnamed` | A Label ID used by the source is not named by any included source's labelset. |
 
-A bucket filled by an older scraper has no markers. Run `coralnet-scrape verify-existing` first; see [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket). Otherwise every source is excluded as `not_complete` and `build-annotations` exits 1.
+A source folder without a marker is excluded as `not_complete`. To mark such sources, run `coralnet-scrape verify-existing`; see [Reuse a published raw version](../../docs/runbooks/coralnet-data.md#reuse-a-published-raw-version).
 
 Rows with a non-numeric `Row`, `Column` or `Label ID` are dropped with a warning; they do not exclude the source. A Label ID with two different names across the included sources raises `ValueError` and stops the build.
 
@@ -109,12 +109,14 @@ At the end, `build-annotations` logs a summary at error level: the number of exc
 
 `build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and `segdata build coralnet raw` drops those images. A `not_found` image is carried instead when a parent pin holds its `image_id`; see [Stage coralnet-raw](#stage-coralnet-raw).
 
+A source is pinned when its `_complete.json` marker has a `parent` key: the scraper verified it against a published `coralnet-raw` version, and some of its images are only in that version. `build-images` reads the marker of each source it builds, and logs the `not_found` images of pinned sources as one count, `not_found in pinned sources: <n>`. A marker that cannot be read (an S3 error other than not-found, malformed JSON, or JSON that is not an object) raises `RuntimeError`.
+
 Exit codes:
 
 | Stage | Exit code 1 when |
 |---|---|
 | `build-annotations` | Any source is excluded, or no annotation rows are built. |
-| `build-images` | Any image has no dimensions. |
+| `build-images` | Any image has no dimensions, except a `not_found` image in a pinned source. |
 | `all` | Any step returns 1. Every step runs. |
 
 Every stage also ends with a non-zero code on an uncaught error, such as invalid configuration or an upload refused as above. The output files are written before the exit code is set, so a run with exit code 1 still leaves its outputs.
@@ -179,6 +181,8 @@ The command reads `coralnet_annotations_<run>.parquet`, `coralnet_images_<run>.p
 
 One flag of the parent pin without the other is a usage error (exit 2) before any S3 read.
 
+The command reads the `_complete.json` marker of each source in the build run. If any marker has a `parent` key, the command raises `ParentRequired` unless you give a parent pin; the message names the pinned sources. Give the pin that the scraper used. A marker that cannot be read raises `RuntimeError`.
+
 A parent staged under `--stage-dir` is read from there and needs no S3 access. Otherwise the command syncs the parent's manifest and tables from `mermaid-ic-datasets` into `--cache-dir` and checks them against the pin, so a published parent needs S3 read access. The stage dir wins when both hold the parent. A manifest that differs from the pin raises `PinMismatch`.
 
 The version holds:
@@ -194,7 +198,7 @@ An image is kept when it has dimensions in the images parquet, has at least one 
 
 The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image except a carried one. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
 
-With a parent pin, an image the build keeps whose scrape original is gone is carried. The original is gone when the image is absent from the scrape listing, or when its `header_status` is `not_found`. It is carried when the parent holds its `image_id`. The parent's `images.parquet` row is reused unchanged, its points come from the build, and no copy is planned: the object is already published. Without a parent pin, or when the parent lacks the `image_id`, the image is dropped as `source_missing` or `no_dimensions`. Two checks refuse a carried image with a `ValueError`. Each error names at most 10 image ids.
+With a parent pin, an image the build keeps whose scrape original is gone is carried. The original is gone when the image is absent from the scrape listing, or when its `header_status` is `not_found`. It is carried when the parent holds its `image_id`. The parent's `images.parquet` row is reused unchanged, its points come from the build, and no copy is planned: the object is already published. Without a parent pin, or when the parent lacks the `image_id`, the image is dropped as `source_missing` or `no_dimensions`. In a pinned source it is not dropped: the command raises `PinnedImageLost`, which names the pinned sources and at most 10 image ids. Two checks refuse a carried image with a `ValueError`. Each error names at most 10 image ids.
 
 - A carried image that is absent from the listing, and whose build width and height differ from the parent's, fails the size check.
 - A carried `not_found` image has no build dimensions, so it gets a point-bounds check instead: a point with `row` or `col` below 0, or at or beyond the parent's `height` or `width`, fails it. The message ends "carried images have points outside the parent's size".
@@ -215,10 +219,10 @@ Run a full corpus on an EC2 host in `us-east-1`. The full reads dominate the run
 
 | Key | Unit | Counts |
 |---|---|---|
-| `no_dimensions` | images | Images whose `header_status` carries no dimensions, except carried images. |
+| `no_dimensions` | images | Images whose `header_status` carries no dimensions, except carried images. An annotated `not_found` image in a pinned source raises `PinnedImageLost` instead. |
 | `no_annotations` | images | Images with dimensions and no annotation. |
 | `annotations_without_image` | annotation rows | Annotations whose image is not in the images parquet. |
-| `source_missing` | images | Kept images whose original is not in the source's `images/` folder and that the parent does not hold. |
+| `source_missing` | images | Kept images whose original is not in the source's `images/` folder and that the parent does not hold. In a pinned source such an image raises `PinnedImageLost` instead. |
 | `carried_from_parent` | images | Images kept from the parent's row with no original. Present whenever a parent pin is given. |
 | `unsupported_format` | images | Originals that are neither JPEG nor PNG. |
 | `source_name_missing` | images | Published images with a null `source_name`. These images stay in the version. |
