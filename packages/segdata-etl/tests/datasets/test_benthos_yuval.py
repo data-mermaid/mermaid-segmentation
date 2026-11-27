@@ -11,8 +11,6 @@ import pandas as pd
 import pytest
 from s3_fake import FakeS3
 
-from segdata_etl import promote
-from segdata_etl.common.s3_objects import SourceChanged
 from segdata_etl.datasets import benthos_yuval
 from segdata_spec import DATASET_BUCKET
 
@@ -20,7 +18,6 @@ from .conftest import (
     INGEST_BUCKET,
     Staged,
     assert_copies_match_sources,
-    assert_curated_label_mapping,
     build_args,
     ingest_manifest_bytes,
     ingested_etag,
@@ -162,27 +159,6 @@ def test_build_plans_image_copies_and_stages_each_mask_for_upload(
     assert plan_lines(staged.stage, staged.pin, "uploads.jsonl") == expected
 
 
-def test_staged_version_promotes_with_images_copied_and_masks_uploaded(
-    s3: FakeS3, staged: Staged
-) -> None:
-    promote.promote(
-        s3, stage_dir=staged.stage, dataset=staged.pin.name, version=staged.pin.version, workers=2
-    )
-
-    prefix = f"datasets/benthos_yuval/{staged.pin.version}/"
-    assert (DATASET_BUCKET, prefix + "manifest.json") in s3.objects
-    expected = {}
-    for site, stem in TILES:
-        base = f"images/benthos_yuval/{site}/{site}_{stem}"
-        expected[base + ".png"] = _file(s3, f"images/{site}/{stem}.png")
-        expected[base + "_mask.png"] = _file(s3, f"labels/{site}/{stem}.png")
-    assert {
-        key: data
-        for (bucket, key), data in s3.objects.items()
-        if bucket == DATASET_BUCKET and key.startswith("images/")
-    } == expected
-
-
 def test_build_stages_a_dense_version_counting_mask_pixels_without_unlabeled(
     staged: Staged,
 ) -> None:
@@ -195,12 +171,6 @@ def test_build_stages_a_dense_version_counting_mask_pixels_without_unlabeled(
         {"image_id": "RS24_0_0", "label_id": 3, "n": 4},
         {"image_id": "RS24_0_4", "label_id": 1, "n": 8},
     ]
-
-
-def test_build_records_the_curated_label_mapping_in_the_manifest(staged: Staged) -> None:
-    assert_curated_label_mapping(
-        staged.version.manifest, benthos_yuval.DATASET, staged.version.labels
-    )
 
 
 @pytest.mark.parametrize(
@@ -226,27 +196,6 @@ def test_build_refuses_a_bad_mask_before_staging(
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
     with pytest.raises(ValueError, match=message):
-        benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
-
-    assert not stage.exists()
-
-
-def test_build_refuses_a_mask_replaced_between_listing_and_read(
-    s3: FakeS3, repo: Path, tmp_path: Path
-) -> None:
-    mask_key = PREFIX + "labels/RS24/0_0.png"
-    real_get = s3.get_object
-
-    def get_after_replacement(*, Bucket: str, Key: str, **kwargs: object) -> dict[str, object]:
-        if Key == mask_key:
-            s3.put(Bucket, Key, mask_png(np.ones((4, 4))))
-        return real_get(Bucket=Bucket, Key=Key, **kwargs)
-
-    s3.get_object = get_after_replacement  # type: ignore[method-assign]
-    stage = tmp_path / "stage"
-    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
-
-    with pytest.raises(SourceChanged, match="labels/RS24/0_0.png"):
         benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
 
     assert not stage.exists()

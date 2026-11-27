@@ -161,7 +161,7 @@ def load_concept_removal(path: str | Path, *, concepts_csv: str | Path | None = 
     With ``concepts_csv``, its sha1 must match the one in the ``.meta.yaml`` sidecar.
     """
     path = Path(path)
-    meta = read_sidecar(path, artifact="concept removal", builder="build_concept_removal")
+    meta = read_sidecar(path, artifact="concept removal")
     if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
         raise ValueError(
             f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
@@ -169,8 +169,6 @@ def load_concept_removal(path: str | Path, *, concepts_csv: str | Path | None = 
             "Rebuild it with scripts/build_concept_removal.py."
         )
     df = pd.read_csv(path, dtype={"concept": str})
-    if "concept" not in df.columns:
-        raise ValueError(f"{path} has no 'concept' column")
     return df["concept"].tolist()
 
 

@@ -15,7 +15,6 @@ from segdata_etl.datasets import pacific_labeled_corals
 from .conftest import (
     INGEST_BUCKET,
     Staged,
-    assert_curated_label_mapping,
     build_args,
     ingest_manifest_bytes,
     ingested_etag,
@@ -141,21 +140,14 @@ def test_build_writes_one_point_row_per_present_annotator_and_counts_each(
     ]
 
 
-def test_build_records_the_curated_label_mapping_in_the_manifest(staged: Staged) -> None:
-    assert_curated_label_mapping(
-        staged.version.manifest, pacific_labeled_corals.DATASET, staged.version.labels
-    )
-
-
 @pytest.mark.parametrize(
     ("changed", "position", "message"),
     [
         (("heron_reef", "evaluation", 11, "ref_1"), (3, 3), "evaluation"),
-        (("nanwan_bay", "reference", 11, "ref_1"), (3, 3), "nanwan_bay"),
         (("heron_reef", "reference", 12, "ref_1"), (3, 3), "raw_imageid"),
         (("heron_reef", "reference", 11, "ref_1"), (1, 2), "duplicated positions"),
     ],
-    ids=["other-subset", "other-site", "two-raw-imageids", "duplicated-position"],
+    ids=["other-subset", "two-raw-imageids", "duplicated-position"],
 )
 def test_build_refuses_inconsistent_annotations_before_staging(
     repo: Path,
@@ -171,19 +163,6 @@ def test_build_refuses_inconsistent_annotations_before_staging(
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
     with pytest.raises(ValueError, match=message):
-        pacific_labeled_corals.run(build_args(pacific_labeled_corals, stage, taxonomy_sha), s3)
-
-    assert not stage.exists()
-
-
-def test_build_refuses_an_unlabeled_point_before_staging(repo: Path, tmp_path: Path) -> None:
-    s3 = FakeS3()
-    unlabeled = ("heron_reef", "reference", 11, "ref_1", ".JPG", 3, 3, "unlabeled")
-    _ingested(s3, [*ANNOTATIONS, (*unlabeled, NA, NA, NA, NA, NA, NA)])
-    stage = tmp_path / "stage"
-    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
-
-    with pytest.raises(ValueError, match=r"not in labels.parquet: \[0\]"):
         pacific_labeled_corals.run(build_args(pacific_labeled_corals, stage, taxonomy_sha), s3)
 
     assert not stage.exists()

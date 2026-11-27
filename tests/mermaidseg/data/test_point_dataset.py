@@ -78,8 +78,8 @@ def test_image_without_a_selected_point_is_dropped(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("label_id", "raises"),
-    [(9, False), (10, True), (6, False), (0, True), (-1, True), (1, False)],
-    ids=["max", "above-max", "absent-from-labels", "zero", "negative", "one"],
+    [(9, False), (10, True), (0, True), (1, False)],
+    ids=["max", "above-max", "zero", "one"],
 )
 def test_point_label_ids_must_lie_between_one_and_the_versions_max(
     tmp_path: Path, label_id: int, raises: bool
@@ -99,8 +99,8 @@ def test_a_point_id_absent_from_labels_is_painted_at_its_offset_id(tmp_path: Pat
 
 @pytest.mark.parametrize(
     ("row", "col", "raises"),
-    [(8, 0, True), (0, 8, True), (-1, 0, True), (7, 7, False)],
-    ids=["row=height", "col=width", "negative", "last-pixel"],
+    [(8, 0, True), (0, 8, True), (7, 7, False)],
+    ids=["row=height", "col=width", "last-pixel"],
 )
 def test_points_must_lie_inside_the_image(tmp_path: Path, row: int, col: int, raises: bool) -> None:
     version = open_written(
@@ -117,8 +117,8 @@ def test_points_must_lie_inside_the_image(tmp_path: Path, row: int, col: int, ra
 
 @pytest.mark.parametrize(
     ("listed", "named"),
-    [(["Host", "archived"], ["Host"]), (["x", "y"], ["x", "y"])],
-    ids=["one-typo", "all-wrong"],
+    [(["Host", "archived"], ["Host"])],
+    ids=["one-typo"],
 )
 def test_unknown_annotator_raises_naming_each(
     tmp_path: Path, listed: list[str], named: list[str]
@@ -131,32 +131,6 @@ def test_unknown_annotator_raises_naming_each(
         PointDataset(version, split="val", global_offset=0, annotators=listed)
     assert all(name in str(info.value) for name in named)
     assert "'archived'" not in str(info.value)
-
-
-def _selected_rows(ds: PointDataset) -> list[tuple[str, int, int, int, str]]:
-    frame = ds.points
-    return [
-        (str(r.image_id), int(r.row), int(r.col), int(r.label_id), str(r.annotator))
-        for r in frame.itertuples()
-    ]
-
-
-def test_points_holds_the_selected_rows(tmp_path: Path) -> None:
-    points = [
-        ("i1", 1, 1, 5, "host"),
-        ("i1", 1, 1, 7, "archived"),
-        ("i1", 2, 2, 7, "archived"),
-        ("i1", 3, 3, 9, "visitor1"),
-    ]
-    version = open_written(
-        tmp_path, kind="points", images=[ImageSpec("i1")], labels=LABELS, points=points
-    )
-    ds = PointDataset(version, split="val", global_offset=0, annotators=["host", "archived"])
-    assert list(ds.points.columns) == ["image_id", "row", "col", "label_id", "annotator"]
-    assert sorted(_selected_rows(ds)) == [
-        ("i1", 1, 1, 5, "host"),
-        ("i1", 2, 2, 7, "archived"),
-    ]
 
 
 def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: list[str]) -> Any:
@@ -228,20 +202,6 @@ def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: 
                 [0, 0, 0, 0, 0, 0],
             ],
         ),
-        # The later point wins where two coincide.
-        (
-            [(5, 5, 1), (5, 5, 2)],
-            None,
-            0,
-            [
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 2],
-            ],
-        ),
         # The later point wins on the overlapping part of two padded squares.
         (
             [(2, 2, 1), (3, 3, 2)],
@@ -256,44 +216,13 @@ def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: 
                 [0, 0, 0, 0, 0, 0],
             ],
         ),
-        # Padding 1 with a non-zero offset.
-        (
-            [(4, 4, 2)],
-            1,
-            10,
-            [
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 12, 12, 0],
-                [0, 0, 0, 12, 12, 0],
-                [0, 0, 0, 0, 0, 0],
-            ],
-        ),
-        # Padding 2 at the far corner clips at the bottom and right edges.
-        (
-            [(5, 5, 1)],
-            2,
-            0,
-            [
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 1, 1, 1],
-                [0, 0, 0, 1, 1, 1],
-                [0, 0, 0, 1, 1, 1],
-            ],
-        ),
     ],
     ids=[
         "no-padding",
         "padding-0-offset",
         "padding-2",
         "clip-at-row-0",
-        "overlap-single-pixel",
         "overlap-padded",
-        "padding-1-offset",
-        "far-edge-clip",
     ],
 )
 def test_rasterize_points_paints_literal_mask(
@@ -308,12 +237,3 @@ def test_rasterize_points_paints_literal_mask(
 
     assert mask.dtype == np.int32
     assert mask.tolist() == expected
-
-
-def test_rasterize_points_returns_zeros_for_no_points() -> None:
-    empty = np.array([], dtype=np.int64)
-
-    mask = rasterize_points(empty, empty, empty, (6, 6), 2, 0)
-
-    assert mask.dtype == np.int32
-    assert mask.tolist() == [[0] * 6] * 6

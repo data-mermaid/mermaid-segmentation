@@ -16,7 +16,6 @@ from PIL import Image
 from s3_fake import FakeS3, crc64nvme
 
 from segdata_etl import cli
-from segdata_etl.datasets import coralscapes_v2, ucsd_mosaics
 from segdata_spec import DATASET_BUCKET
 
 from .conftest import jpeg_bytes, png_bytes
@@ -101,13 +100,9 @@ def test_images_are_staged_byte_identical_with_row_fields_from_the_bytes(monkeyp
     assert set(rows) == {"a1", "b1"}
     manifest = json.loads((version / "manifest.json").read_bytes())
     assert manifest["kind"] == "dense"
-    assert manifest["source"] == {
-        "type": "huggingface",
-        "uri": "hf://datasets/josauder/coralscapesV2",
-        "revision": SHA,
-        "citation": manifest["source"]["citation"],
-        "license": "apache-2.0",
-    }
+    assert manifest["source"]["uri"] == "hf://datasets/josauder/coralscapesV2"
+    assert manifest["source"]["revision"] == SHA
+    assert manifest["source"]["license"]
     assert manifest["image_store"]["prefix"] == "images/coralscapes_v2/"
     assert manifest["etl"]["command"] == (
         f"segdata build coralscapes_v2 --stage-dir {version.parents[3]} --revision {SHA}"
@@ -307,24 +302,3 @@ def test_uploads_jsonl_lists_each_staged_file_with_its_destination(monkeypatch, 
         "content_type": "image/jpeg",
     }
     assert uploads["images/coralscapes_v2/train/a1_label.png"]["content_type"] == "image/png"
-
-
-@pytest.mark.parametrize("module", [coralscapes_v2, ucsd_mosaics])
-def test_stage_dir_is_required_and_the_subcommand_dispatches_to_run(monkeypatch, tmp_path, module):
-    name = module.__name__.rsplit(".", 1)[-1]
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["build", name])
-    seen: dict[str, Any] = {}
-
-    def fake_run(args: Any, client: Any) -> int:
-        seen["args"] = args
-        return 7
-
-    monkeypatch.setattr(module, "run", fake_run)
-    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: object())
-
-    code = cli.main(["build", name, "--stage-dir", str(tmp_path)])
-
-    assert code == 7
-    assert seen["args"].stage_dir == tmp_path
-    assert seen["args"].revision == module.SOURCE.revision

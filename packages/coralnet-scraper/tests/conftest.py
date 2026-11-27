@@ -1,11 +1,13 @@
 """Shared fixtures for the CoralNet scraper tests.
 
 Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the scraper
-touches. Keeps the test suite free of network and AWS deps.
+touches. Keeps the test suite free of network and AWS deps. Also holds the scripted-CoralNet
+page builders and downloader setups that the per-component test files share.
 """
 
 from __future__ import annotations
 
+import io
 import threading
 import time
 from collections.abc import Iterator
@@ -13,11 +15,14 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+import requests
 import stamina
 from botocore.exceptions import ClientError
+from PIL import Image
 
 from coralnet_scraper import http
 from coralnet_scraper.downloader import CoralNetDownloader
+from coralnet_scraper.walker import ImageRef
 
 
 @pytest.fixture(autouse=True)
@@ -48,15 +53,13 @@ def _no_stamina_backoff() -> Iterator[None]:
 class Reply:
     """One scripted HTTP answer; ``delay_s`` stalls before the status line is sent.
 
-    A ``Content-Length`` in ``headers`` replaces the true body length. ``trickle_s`` sends
-    the body one byte at a time, sleeping that long between bytes.
+    A ``Content-Length`` in ``headers`` replaces the true body length.
     """
 
     status: int = 200
     body: bytes = b""
     headers: dict[str, str] = field(default_factory=dict)
     delay_s: float = 0.0
-    trickle_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -93,12 +96,7 @@ class ScriptedServer:
                     if "Content-Length" not in reply.headers:
                         self.send_header("Content-Length", str(len(reply.body)))
                     self.end_headers()
-                    if not reply.trickle_s:
-                        self.wfile.write(reply.body)
-                    for i in range(len(reply.body) if reply.trickle_s else 0):
-                        self.wfile.write(reply.body[i : i + 1])
-                        self.wfile.flush()
-                        time.sleep(reply.trickle_s)
+                    self.wfile.write(reply.body)
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # the client gave up waiting (read-timeout scripts)
 
@@ -337,7 +335,7 @@ def fake_s3() -> FakeS3:
 def paginated_downloader(fake_s3) -> CoralNetDownloader:
     """A :class:`CoralNetDownloader` wired for offline paginated-export tests.
 
-    - ``logged_in = True`` (skip real login)
+    - ``auth.logged_in = True`` (skip real login)
     - ``s3 = fake_s3`` (in-memory S3)
     - Export worker session creation short-circuited to return ``dl.session``
       so a single ``patch.object(dl.session, ...)`` intercepts every request.
@@ -346,12 +344,156 @@ def paginated_downloader(fake_s3) -> CoralNetDownloader:
     ``export_prep`` POST and one serve GET.
 
     Production gives each worker its own logged-in ``requests.Session`` (see
-    :meth:`CoralNetDownloader._new_logged_in_session`) to avoid the CoralNet
+    :meth:`CoralNetSession._new_logged_in_session`) to avoid the CoralNet
     server-side session race; that behaviour is exercised by
-    ``test_get_export_session_creates_independent_logged_in_session_per_thread``.
+    ``testexport_session_creates_independent_logged_in_session_per_thread``.
     """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    dl.s3 = fake_s3
-    dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
+    dl = CoralNetDownloader("u", "p", s3=fake_s3)
+    dl.auth.logged_in = True
+    dl.auth._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
     return dl
+
+
+def _jpeg_bytes() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+_JPEG = _jpeg_bytes()
+_JPEG_HEADERS = {"Content-Type": "image/jpeg"}
+_CSV_HEADERS = {"Content-Type": "text/csv"}
+
+
+def _overview_html(total: int, confirmed: int | None = None) -> str:
+    """A source overview page whose Image Status table reports ``total`` images."""
+    confirmed_row = (
+        f'<tr><td>Confirmed:</td><td><a href="#">{confirmed}</a></td></tr>'
+        if confirmed is not None
+        else ""
+    )
+    return (
+        "<html><body><h4>Image Status</h4>"
+        '<table class="detail_box_table">'
+        '<tr><td>Unclassified:</td><td><a href="#">1</a></td></tr>'
+        f"{confirmed_row}"
+        f'<tr><td>Total images:</td><td><a href="/browse/images/">{total}</a></td></tr>'
+        "</table></body></html>"
+    )
+
+
+_EXPORT_FORM = """\
+<form id="export-annotations-prep-form">
+  <input type="hidden" name="csrfmiddlewaretoken" value="{csrf}"/>
+</form>"""
+
+
+def _browse_html(
+    thumbs: list[tuple[int, str]],
+    next_href: str | None = None,
+    csrf: str = "tok",
+    *,
+    form: bool = True,
+) -> str:
+    """A browse page with one thumbnail per ``(image id, title)``.
+
+    ``form=False`` leaves out the export form, as for a logged-out visitor.
+    """
+    spans = "".join(
+        f'<span class="thumb_wrapper"><a href="/image/{i}/view/"><img title="{t}"/></a></span>'
+        for i, t in thumbs
+    )
+    next_link = f'<a title="Next page" href="{next_href}">Next</a>' if next_href else ""
+    export_form = _EXPORT_FORM.format(csrf=csrf) if form else ""
+    return f"<html>{export_form}{spans}{next_link}</html>"
+
+
+def _ann_csv(rows: list[tuple]) -> str:
+    lines = ["Name,Row,Column,Label ID"]
+    for name, row, col, label in rows:
+        lines.append(f"{name},{row},{col},{label}")
+    return "\n".join(lines) + "\n"
+
+
+def _refs(pages: dict[int, list[int]]) -> list[ImageRef]:
+    """Walk results: image ``img<id>.jpg`` for each id, on the page it is listed under."""
+    return [ImageRef(i, f"img{i}.jpg", page) for page, ids in pages.items() for i in ids]
+
+
+def _login_get_html() -> str:
+    return '<input type="hidden" name="csrfmiddlewaretoken" value="logintok"/>'
+
+
+def _http_response(
+    text: str = "", status: int = 200, url: str = "", headers: dict[str, str] | None = None
+) -> requests.Response:
+    """A real ``requests.Response`` so ``raise_for_status`` behaves as in production."""
+    resp = requests.Response()
+    resp.status_code = status
+    resp._content = text.encode()
+    resp.url = url
+    resp.headers.update(headers or {})
+    return resp
+
+
+def _downloader_on(fake_s3) -> CoralNetDownloader:
+    dl = CoralNetDownloader("u", "p", max_workers=3, s3=fake_s3)
+    dl.auth.logged_in = True
+    return dl
+
+
+_BASE = "/source/1/browse/images/"
+_PREP = "/source/1/annotation/export_prep/"
+_SERVE_T1 = "/source/1/export/serve/?session_data_timestamp=t1"
+_LOGIN_PATH = "/accounts/login/"
+_PARTIAL = "p/s1/_partial/"
+
+
+def _page_path(n: int) -> str:
+    return _BASE if n == 1 else f"{_BASE}?page={n}"
+
+
+def _script_pages(server: ScriptedServer, pages: list[list[tuple[int, str]]]) -> None:
+    """Script the browse pages, each linking to the next by ``?page=<n>``."""
+    for n, thumbs in enumerate(pages, 1):
+        next_href = f"?page={n + 1}" if n < len(pages) else None
+        server.script(_page_path(n), Reply(200, _browse_html(thumbs, next_href).encode()))
+
+
+def _view_page(server: ScriptedServer, media_path: str) -> bytes:
+    """An image view page whose original image is at ``media_path`` on ``server``."""
+    return f'<div id="original_image_container"><img src="{server.url}{media_path}"/>'.encode()
+
+
+def _site_downloader(server: ScriptedServer, fake_s3) -> CoralNetDownloader:
+    dl = CoralNetDownloader("u", "p", max_workers=2, s3=fake_s3)
+    dl.auth.logged_in = True
+    dl.auth.CORALNET_URL = server.url
+    dl.auth.LOGIN_URL = f"{server.url}{_LOGIN_PATH}"
+    dl.auth._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
+    return dl
+
+
+def _posts_to(server: ScriptedServer, path: str) -> list:
+    return [r for r in server.requests_to(path) if r.method == "POST"]
+
+
+def _script_login(server: ScriptedServer) -> None:
+    """Script a login page whose POST result shows a signed-in user."""
+    page = _login_get_html() + "<a>Sign out</a>"
+    server.script(_LOGIN_PATH, Reply(200, page.encode()))
+
+
+def _page_reply(ids: list[int], next_page: int | None = None, *, form: bool = True) -> Reply:
+    """A browse page listing images ``ids`` titled ``img<id>.jpg``, linking to ``next_page``."""
+    thumbs = [(i, f"img{i}.jpg") for i in ids]
+    next_href = f"?page={next_page}" if next_page else None
+    return Reply(200, _browse_html(thumbs, next_href, form=form).encode())
+
+
+def _script_walk(server: ScriptedServer, pages: list[list[int]]) -> None:
+    """Script the overview and browse pages of a source listing ``pages`` of image ids."""
+    total = sum(len(ids) for ids in pages)
+    server.script("/source/1/", Reply(200, _overview_html(total).encode()))
+    for n, ids in enumerate(pages, 1):
+        server.script(_page_path(n), _page_reply(ids, n + 1 if n < len(pages) else None))

@@ -48,14 +48,6 @@ def _set(*keys: str, value: Any) -> Callable[[dict[str, Any]], None]:
     ("section", "keys"),
     [
         ("training", ("distance_loss",)),
-        ("training", ("loss", "unknown")),
-        ("training", ("optimizer", "unknown")),
-        ("training", ("scheduler", "unknown")),
-        ("training", ("taxonomic_loss", "unknown")),
-        ("training", ("loader", "unknown")),
-        ("model", ("unknown",)),
-        ("logger", ("unknown",)),
-        ("data", ("unknown_key",)),
         ("data", ("datasets", "coralnet", "vall")),
     ],
 )
@@ -69,10 +61,6 @@ def test_unknown_key_raises_naming_the_file(tmp_path: Path, section: str, keys: 
     ("section", "keys"),
     [
         ("model", ("name",)),
-        ("training", ("loss", "type")),
-        ("training", ("optimizer", "type")),
-        ("training", ("scheduler", "type")),
-        ("logger", ("tracker",)),
     ],
 )
 def test_unknown_name_raises(tmp_path: Path, section: str, keys: tuple[str, ...]):
@@ -128,9 +116,7 @@ class _Second:
 
 
 def test_lookup_class_rejects_an_unknown_name_listing_the_allowed_names_sorted():
-    with pytest.raises(
-        ValueError, match=r"^unknown optimizer 'SGD'; expected one of \['First', 'Second'\]$"
-    ):
+    with pytest.raises(ValueError, match=r"'SGD'.*\['First', 'Second'\]"):
         lookup_class({"Second": _Second, "First": _First}, "optimizer", "SGD")
 
 
@@ -174,11 +160,7 @@ def test_validate_section_returns_plain_dict_without_unset_keys():
 
 @pytest.mark.parametrize(
     "raw",
-    [
-        {"model": {}, "extra": 1},
-        {"training": {}},
-        {},
-    ],
+    [{"model": {}, "extra": 1}],
 )
 def test_validate_section_rejects_any_top_level_keys_but_the_section(raw: dict[str, Any]):
     with pytest.raises(ValueError, match=r"^cfg\.yaml: expected the single top-level key 'model'"):

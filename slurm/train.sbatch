@@ -23,7 +23,7 @@
 # PIPELINE_ARGS  passed through to scripts/train.py (configs, resolution, batch size...).
 #
 # The job resumes from RUN's most recently written checkpoint (model_preempt*,
-# model_step* or model_epoch*), so resubmitting the same command continues the
+# model_step*, model_epoch* or model_final), so resubmitting the same command continues the
 # run. A clean exit means training finished and writes outputs/model_checkpoints/RUN/.done;
 # a job submitted after that exits immediately. With more than one GPU the job
 # runs DDP under torchrun; --batch-size stays the global batch.
@@ -84,7 +84,7 @@ export WANDB_RUN_GROUP="$GROUP"
 # Newest checkpoint by write time. Training only moves forward, and older
 # model_preempt* files are pruned, so the newest file is the furthest along.
 shopt -s nullglob
-ckpts=("$CKPT_DIR"/model_preempt* "$CKPT_DIR"/model_step* "$CKPT_DIR"/model_epoch*)
+ckpts=("$CKPT_DIR"/model_preempt* "$CKPT_DIR"/model_step* "$CKPT_DIR"/model_epoch* "$CKPT_DIR"/model_final*)
 shopt -u nullglob
 START_ARGS=()
 latest=""

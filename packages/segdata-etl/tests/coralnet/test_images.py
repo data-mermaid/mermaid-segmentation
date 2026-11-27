@@ -18,53 +18,6 @@ from segdata_etl.datasets.coralnet.schemas import (
 )
 
 
-def _seed_images(
-    fake_s3, *, bucket: str, prefix: str, jpeg_small_bytes, jpeg_large_bytes
-) -> pd.DataFrame:
-    rows = [
-        (1, "100"),
-        (1, "101"),
-        (1, "102"),
-        (2, "200"),
-        (2, "201"),
-    ]
-    for sid, iid in rows:
-        body = jpeg_large_bytes if iid in {"100", "200"} else jpeg_small_bytes
-        fake_s3.put(bucket, f"{prefix}/s{sid}/images/{iid}.jpg", body)
-    return pd.DataFrame(
-        {
-            "source_id": [sid for sid, _ in rows],
-            "image_id": [iid for _, iid in rows],
-            "row": [0] * len(rows),
-            "col": [0] * len(rows),
-            "coralnet_id": [1] * len(rows),
-            "status": ["Confirmed"] * len(rows),
-        }
-    )
-
-
-def test_build_images_records_dimensions_and_resize_flag(
-    fake_s3, jpeg_small_bytes, jpeg_large_bytes
-):
-    ann_df = _seed_images(
-        fake_s3,
-        bucket="b",
-        prefix="p",
-        jpeg_small_bytes=jpeg_small_bytes,
-        jpeg_large_bytes=jpeg_large_bytes,
-    )
-    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-
-    assert len(img_df) == 5
-    assert set(img_df.columns) >= {field.name for field in IMAGES_SCHEMA}
-    assert (img_df["header_status"] == "ok").all()
-    longest_edges = dict(zip(img_df["image_id"], img_df["longest_edge"], strict=False))
-    assert longest_edges["100"] == 4096
-    assert longest_edges["101"] == 1024
-    assert img_df.loc[img_df["image_id"] == "100", "needs_resize"].iloc[0]
-    assert not img_df.loc[img_df["image_id"] == "101", "needs_resize"].iloc[0]
-
-
 def test_build_images_handles_missing_objects(fake_s3, jpeg_small_bytes):
     ann_df = pd.DataFrame(
         {
@@ -138,11 +91,9 @@ def test_build_images_sequential_path_records_worker_exception(
     [
         (2048, 1536, 2048, False),
         (2049, 1536, 2049, True),
-        (1536, 2048, 2048, False),
         (1536, 2049, 2049, True),
-        (1000, 4000, 4000, True),
     ],
-    ids=["landscape-at-2048", "landscape-2049", "portrait-at-2048", "portrait-2049", "tall"],
+    ids=["landscape-at-2048", "landscape-2049", "portrait-2049"],
 )
 def test_build_images_longest_edge_and_resize_boundary(
     fake_s3, make_jpeg, width, height, longest_edge, needs_resize

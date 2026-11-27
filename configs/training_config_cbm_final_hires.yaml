@@ -14,7 +14,7 @@ training:
         ambiguity_policy: permissive
         kl_weight: 0.5
         kl_stop_grad_coarse: true
-    # Final 768px fine-tune on train+val: 50k optimizer updates from cbm_final/model_step300000
+    # Final 768px fine-tune on train+val: 50k optimizer updates from cbm_final/model_final
     # (--init-weights), 4k linear warmup, then LinearLR to 0. KL 0.5 as in the final run.
     # batch_size is the global minibatch; the launcher sets the DDP microbatch and accumulation.
     epochs: 5

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from typing import Any
 
@@ -44,9 +45,8 @@ FixedMetaFactory = Callable[..., MetaModel]
 def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
     """Factory for a MetaModel over ``FixedOutputsModel`` (one pixel row of width 2).
 
-    ``class_logits`` are the per-class logits (default zeros), ``training`` overrides the
-    config's training section, and ``distributed`` builds the model for an initialised
-    process group.
+    ``class_logits`` are the per-class logits (default zeros), and ``training`` overrides the
+    config's training section.
     """
 
     def _factory(
@@ -60,7 +60,7 @@ def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
             logits.reshape(1, -1, 1, 1).expand(1, -1, 1, 2),
             torch.zeros(1, num_concepts, 1, 2),
         )
-        cfg = minimal_config
+        cfg = copy.deepcopy(minimal_config)
         for key, value in (training or {}).items():
             if isinstance(value, dict):
                 cfg.training[key].update(value)

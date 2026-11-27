@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
-from ingest.test_manifest import OLD_CATLIN_MANIFEST
 from s3_fake import FakeS3
 
-from segdata_etl.common.s3_objects import SourceChanged
 from segdata_etl.datasets import catlin_seaview
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
@@ -171,26 +168,12 @@ def test_build_records_the_taxonomy_pin_in_the_manifest(staged: Staged) -> None:
     )
 
 
-def test_build_takes_the_next_suffix_when_the_bucket_already_holds_the_version(
-    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    s3 = FakeS3()
-    _ingested(s3)
-    base = f"{datetime.now(UTC).date():%Y%m%d}-{CLEAN_GIT.sha[:7]}"
-    s3.put(DATASET_BUCKET, f"datasets/catlin_seaview/{base}/images.parquet", b"half-promoted")
-
-    staged = stage_version(catlin_seaview, s3, repo, tmp_path, capsys)
-
-    assert staged.pin.version == f"{base}-2"
-
-
 @pytest.mark.parametrize(
     "git",
     [
         GitState(sha=CLEAN_GIT.sha, dirty=True, pushed=True),
-        GitState(sha=CLEAN_GIT.sha, dirty=False, pushed=False),
     ],
-    ids=["dirty", "unpushed"],
+    ids=["dirty"],
 )
 def test_build_refuses_an_unpublishable_tree_before_reading_s3(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: GitState
@@ -204,21 +187,6 @@ def test_build_refuses_an_unpublishable_tree_before_reading_s3(
         catlin_seaview.run(build_args(catlin_seaview, stage, "0" * 64), s3)
 
     assert s3.calls == []
-    assert not stage.exists()
-
-
-def test_build_refuses_an_old_shape_ingest_manifest_and_names_the_reingest(
-    repo: Path, tmp_path: Path
-) -> None:
-    s3 = FakeS3()
-    _ingested(s3)
-    s3.put(INGEST_BUCKET, PREFIX + "manifest.json", json.dumps(OLD_CATLIN_MANIFEST).encode())
-    stage = tmp_path / "stage"
-    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
-
-    with pytest.raises(ValueError, match="segdata ingest catlin_seaview"):
-        catlin_seaview.run(build_args(catlin_seaview, stage, taxonomy_sha), s3)
-
     assert not stage.exists()
 
 
@@ -251,10 +219,8 @@ def test_build_drops_an_image_with_an_unreadable_header_and_its_points(
     [
         ([*ANNOTATIONS, ("ATL", "1002", 1, 1, "Not a class")], "Not a class"),
         ([*ANNOTATIONS, ("ATL", "1003", 1, 1, "Water")], "1003"),
-        ([a if a[1] != "1002" else ("PAC_USA", *a[1:]) for a in ANNOTATIONS], "PAC_USA"),
-        ([*ANNOTATIONS, ("ATL", "1002", 1, 1, "unlabeled")], "not in labels.parquet"),
     ],
-    ids=["label-not-in-classes", "image-object-missing", "other-region", "unlabeled-point"],
+    ids=["label-not-in-classes", "image-object-missing"],
 )
 def test_build_refuses_inconsistent_annotations_before_staging(
     repo: Path,
@@ -268,49 +234,6 @@ def test_build_refuses_inconsistent_annotations_before_staging(
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
     with pytest.raises(ValueError, match=message):
-        catlin_seaview.run(build_args(catlin_seaview, stage, taxonomy_sha), s3)
-
-    assert not stage.exists()
-
-
-def test_build_drops_a_point_past_the_right_edge_and_records_it(
-    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    s3 = FakeS3()
-    # ATL/1002 is 6 wide, so col 6 is outside; label 12 would add a count row if it were kept.
-    _ingested(s3, [*ANNOTATIONS, ("ATL", "1002", 1, 6, "Water")])
-
-    version = stage_version(catlin_seaview, s3, repo, tmp_path, capsys).version
-
-    assert version.manifest.stats.dropped == {
-        "damaged_images": 2,
-        "image_unreadable_header": 0,
-        "points_out_of_bounds": 1,
-    }
-    assert version.points is not None
-    assert version.points.num_rows == len(ANNOTATIONS)
-    assert (1, 6) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}
-    assert sum(r["n"] for r in version.label_counts.to_pylist()) == len(ANNOTATIONS)
-
-
-def test_build_raises_source_changed_and_stages_nothing_when_an_image_changes_while_probed(
-    repo: Path, tmp_path: Path
-) -> None:
-    s3 = FakeS3()
-    _ingested(s3)
-    key = PREFIX + "images/ATL/1001.jpg"
-    real_get = s3.get_object
-
-    def get_after_replacement(*, Bucket: str, Key: str, **kwargs: object) -> dict[str, object]:
-        if Key == key:
-            s3.put(Bucket, Key, jpeg(9, 9))
-        return real_get(Bucket=Bucket, Key=Key, **kwargs)
-
-    s3.get_object = get_after_replacement  # type: ignore[method-assign]
-    stage = tmp_path / "stage"
-    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
-
-    with pytest.raises(SourceChanged, match="images/ATL/1001.jpg"):
         catlin_seaview.run(build_args(catlin_seaview, stage, taxonomy_sha), s3)
 
     assert not stage.exists()

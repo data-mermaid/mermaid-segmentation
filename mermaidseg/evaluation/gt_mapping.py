@@ -18,7 +18,6 @@ Two lookups are built per source dataset:
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -32,8 +31,6 @@ from mermaidseg.dataset_reconciliation.concepts import (
     read_class_to_concepts,
 )
 from segdata_spec.taxonomy import roll_up
-
-logger = logging.getLogger(__name__)
 
 
 class ClassLookup:
@@ -176,13 +173,6 @@ def build_concept_lookup(
 ) -> ConceptLookup:
     """Build a source-label -> concept-row lookup aligned to the model channels."""
     df = read_class_to_concepts(csv_path)
-    has_live = "live" in df.columns
-    if not has_live:
-        logger.warning(
-            "%s has no 'live' column: living points are decided by taxonomy alone "
-            "and the live-coral scope is empty.",
-            csv_path,
-        )
     df_src = df[df["source_dataset_source"] == source_name.lower()]
 
     # First row wins for duplicate (source, label) keys.
@@ -200,7 +190,6 @@ def build_concept_lookup(
         if row is None:
             continue  # -> zeros (ignored) via ConceptLookup.row
         name_to_row[key] = encode_concept_row(row, concept_names)
-        if has_live:
-            name_to_scope[key] = point_scopes(row)
+        name_to_scope[key] = point_scopes(row)
 
     return ConceptLookup(name_to_row, len(concept_names), name_to_scope)

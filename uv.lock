@@ -1937,33 +1937,60 @@ wheels = [
 name = "mermaidseg"
 version = "0.1.0"
 source = { editable = "." }
+default-groups = ["dev", "training"]
 dependencies = [
-    { name = "albumentations" },
-    { name = "boto3" },
-    { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
-    { name = "pandas" },
     { name = "peft" },
-    { name = "pillow" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "segdata-spec" },
     { name = "torch" },
-    { name = "torchmetrics" },
-    { name = "tqdm" },
     { name = "transformers" },
 ]
 
 [package.optional-dependencies]
 mlflow = [
+    { name = "albumentations" },
+    { name = "boto3" },
+    { name = "huggingface-hub" },
     { name = "mlflow" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "sagemaker-mlflow" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "segdata-spec" },
+    { name = "torchmetrics" },
+    { name = "tqdm" },
+]
+training = [
+    { name = "albumentations" },
+    { name = "boto3" },
+    { name = "huggingface-hub" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "segdata-spec" },
+    { name = "torchmetrics" },
+    { name = "tqdm" },
 ]
 wandb = [
+    { name = "albumentations" },
+    { name = "boto3" },
+    { name = "huggingface-hub" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "segdata-spec" },
+    { name = "torchmetrics" },
+    { name = "tqdm" },
     { name = "wandb" },
 ]
 
@@ -1986,32 +2013,37 @@ tests = [
     { name = "pytest-cov" },
     { name = "pytest-socket" },
 ]
+training = [
+    { name = "mermaidseg", extra = ["training"] },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "albumentations" },
-    { name = "boto3" },
-    { name = "huggingface-hub", specifier = ">=0.36.2" },
+    { name = "albumentations", marker = "extra == 'training'" },
+    { name = "boto3", marker = "extra == 'training'" },
+    { name = "huggingface-hub", marker = "extra == 'training'", specifier = ">=0.36.2" },
+    { name = "mermaidseg", extras = ["training"], marker = "extra == 'mlflow'" },
+    { name = "mermaidseg", extras = ["training"], marker = "extra == 'wandb'" },
     { name = "mlflow", marker = "extra == 'mlflow'" },
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "opencv-python-headless", specifier = ">=4.11.0.86" },
-    { name = "pandas" },
+    { name = "pandas", marker = "extra == 'training'" },
     { name = "peft", specifier = ">=0.19.1" },
-    { name = "pillow" },
-    { name = "pydantic", specifier = ">=2.13.3" },
-    { name = "pyyaml" },
+    { name = "pillow", marker = "extra == 'training'" },
+    { name = "pydantic", marker = "extra == 'training'", specifier = ">=2.13.3" },
+    { name = "pyyaml", marker = "extra == 'training'" },
     { name = "safetensors", specifier = ">=0.7.0" },
     { name = "sagemaker-mlflow", marker = "extra == 'mlflow'" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "segdata-spec", editable = "packages/segdata-spec" },
+    { name = "scikit-learn", marker = "extra == 'training'" },
+    { name = "scipy", marker = "extra == 'training'" },
+    { name = "segdata-spec", marker = "extra == 'training'", editable = "packages/segdata-spec" },
     { name = "torch", specifier = ">=2.4,<2.8" },
-    { name = "torchmetrics" },
-    { name = "tqdm" },
+    { name = "torchmetrics", marker = "extra == 'training'" },
+    { name = "tqdm", marker = "extra == 'training'" },
     { name = "transformers" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.25.0" },
 ]
-provides-extras = ["wandb", "mlflow"]
+provides-extras = ["training", "wandb", "mlflow"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2032,6 +2064,7 @@ tests = [
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "pytest-socket", specifier = ">=0.7" },
 ]
+training = [{ name = "mermaidseg", extras = ["training"] }]
 
 [[package]]
 name = "mlflow"

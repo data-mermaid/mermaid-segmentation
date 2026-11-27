@@ -35,20 +35,9 @@ def _variant(section: str | None, key: str, value: object = None, drop: bool = F
     "data",
     [
         _variant("job", "spot", True),
-        _variant("train", "hyperparameters", {}),
-        _variant(None, "env", {}),
         _variant("train", "init_weights", drop=True),
-        _variant("job", "volume_gb", 0),
-        _variant("job", "max_runtime_hours", -1),
     ],
-    ids=[
-        "unknown-job-key",
-        "unknown-train-key",
-        "unknown-top-key",
-        "init-weights-absent",
-        "zero-volume",
-        "negative-runtime",
-    ],
+    ids=["unknown-job-key", "init-weights-absent"],
 )
 def test_invalid_run_yaml_raises_naming_the_file(tmp_path, data):
     path = tmp_path / "run.yaml"

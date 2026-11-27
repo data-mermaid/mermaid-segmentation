@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import io
-import shutil
 import subprocess
-import tempfile
-import time
+from collections.abc import Callable
 from pathlib import Path
-from queue import Empty
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as torch_mp
 from botocore.exceptions import ClientError
 
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
@@ -168,56 +164,123 @@ def bundle_dir(
     return export_ckpt(checkpoint, tmp_path_factory.mktemp("out") / "bundle", repo_dir=repo)
 
 
-def init_gloo(rank: int, world_size: int, init_method: str) -> None:
-    dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
+# One collective as a rank called it: its kind, op or source rank, shape, and dtype.
+_Signature = tuple[str, str, tuple[int, ...], str]
+_Call = tuple[_Signature, torch.Tensor | None]
 
 
-# Each spawned worker re-imports torch before it reports, which takes over a minute on a slow CI
-# runner. The deadline only bounds a real hang; a crashed worker fails the wait at once.
-_GLOO_RESULT_TIMEOUT_S = 300
+def _same_calls(a: list[list[_Call]], b: list[list[_Call]]) -> bool:
+    for calls_a, calls_b in zip(a, b, strict=True):
+        if [sig for sig, _ in calls_a] != [sig for sig, _ in calls_b]:
+            return False
+        for (_, x), (_, y) in zip(calls_a, calls_b, strict=True):
+            if x is not None and y is not None and not torch.equal(x.nan_to_num(), y.nan_to_num()):
+                return False
+    return True
 
 
-def spawn_gloo(worker, world_size: int, extra: tuple = ()) -> list:
-    ctx = torch_mp.get_context("spawn")
-    queue = ctx.Queue()
-    rendezvous_dir = tempfile.mkdtemp()
-    init_method = f"file://{rendezvous_dir}/rendezvous"
-    processes = [
-        ctx.Process(target=worker, args=(rank, world_size, init_method, queue, *extra))
-        for rank in range(world_size)
-    ]
-    try:
-        for process in processes:
-            process.start()
-        results: list[tuple[int, object]] = []
-        deadline = time.monotonic() + _GLOO_RESULT_TIMEOUT_S
-        while len(results) < world_size:
-            try:
-                results.append(queue.get(timeout=1))
-            except Empty:
-                for rank, process in enumerate(processes):
-                    if process.exitcode not in (None, 0):
-                        raise RuntimeError(
-                            f"gloo worker {rank} exited with {process.exitcode} before reporting"
-                        ) from None
-                if time.monotonic() > deadline:
-                    raise TimeoutError(
-                        f"{len(results)} of {world_size} gloo workers reported within "
-                        f"{_GLOO_RESULT_TIMEOUT_S} s"
-                    ) from None
-        for process in processes:
-            process.join(timeout=30)
-        for process in processes:
-            if process.exitcode != 0:
-                raise RuntimeError(f"gloo worker exited with {process.exitcode}")
-    finally:
-        for process in processes:
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=5)
-        shutil.rmtree(rendezvous_dir, ignore_errors=True)
-    results.sort(key=lambda item: item[0])
-    return [payload for _, payload in results]
+class LockstepRanks:
+    """Runs a function once per rank, serially, under faked ``torch.distributed`` collectives.
+
+    No process group is started. Each pass runs every rank in turn and records each rank's
+    collective calls. In the next pass, collective ``i`` returns the combination of every
+    rank's input to its collective ``i`` from the previous pass, where all ranks called the
+    same collective there; elsewhere it leaves the tensor unchanged. The first pass therefore
+    sees only this rank's own values. Passes repeat until no rank's calls or inputs change,
+    so ``fn`` runs several times per rank and must not depend on state from earlier runs.
+
+    At that fixed point the ranks must have called the same collectives (kind, op or source,
+    shape, and dtype; barriers included) in the same order, or ``run`` raises
+    ``AssertionError``: a real job would hang or mix up values there. A rank that raises out
+    of a collective (as ``reduce_components`` does on a key mismatch) stops there, as it
+    would in a real job.
+    """
+
+    max_passes = 20
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, world_size: int) -> None:
+        self.monkeypatch = monkeypatch
+        self.world_size = world_size
+        self.barriers: list[int] = []
+
+    def run(self, fn: Callable[[int], Any]) -> list[Any]:
+        """Return ``fn(rank)`` for each rank, from the pass at which the collectives settle."""
+        previous: list[list[_Call]] | None = None
+        for _ in range(self.max_passes):
+            self.barriers = [0] * self.world_size
+            outcomes = [self._pass(rank, fn, previous) for rank in range(self.world_size)]
+            calls = [rank_calls for _, rank_calls in outcomes]
+            if previous is not None and _same_calls(calls, previous):
+                self._check_lockstep(calls)
+                return [result for result, _ in outcomes]
+            previous = calls
+        raise AssertionError(f"collectives did not settle within {self.max_passes} passes")
+
+    def _check_lockstep(self, calls: list[list[_Call]]) -> None:
+        counts = [len(rank_calls) for rank_calls in calls]
+        for index in range(max(counts)):
+            signatures = [
+                rank_calls[index][0] if index < len(rank_calls) else "no collective"
+                for rank_calls in calls
+            ]
+            if len(set(signatures)) > 1:
+                raise AssertionError(f"ranks disagree at collective {index}: {signatures}")
+
+    def _pass(
+        self, rank: int, fn: Callable[[int], Any], previous: list[list[_Call]] | None
+    ) -> tuple[Any, list[_Call]]:
+        seen: list[_Call] = []
+
+        def collective(
+            kind: str,
+            detail: str,
+            tensor: torch.Tensor | None,
+            combine: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        ) -> None:
+            index = len(seen)
+            shape = () if tensor is None else tuple(tensor.shape)
+            dtype = "" if tensor is None else str(tensor.dtype)
+            signature: _Signature = (kind, detail, shape, dtype)
+            seen.append((signature, None if tensor is None else tensor.detach().clone()))
+            if tensor is None or combine is None or previous is None:
+                return
+            if all(index < len(c) and c[index][0] == signature for c in previous):
+                peers = [cast(torch.Tensor, c[index][1]) for c in previous]
+                tensor.copy_(combine(torch.stack(peers)))
+
+        def all_reduce(tensor: torch.Tensor, op: Any = dist.ReduceOp.SUM, **_: Any) -> None:
+            if op == dist.ReduceOp.SUM:
+                collective("all_reduce", "sum", tensor, lambda peers: peers.sum(dim=0))
+            elif op == dist.ReduceOp.MAX:
+                collective("all_reduce", "max", tensor, lambda peers: peers.amax(dim=0))
+            elif op == dist.ReduceOp.MIN:
+                collective("all_reduce", "min", tensor, lambda peers: peers.amin(dim=0))
+            else:
+                raise NotImplementedError(f"LockstepRanks has no all_reduce op {op}")
+
+        def broadcast(tensor: torch.Tensor, src: int, **_: Any) -> None:
+            collective("broadcast", f"src={src}", tensor, lambda peers: peers[src])
+
+        def barrier(**_: Any) -> None:
+            collective("barrier", "", None)
+            self.barriers[rank] += 1
+
+        with self.monkeypatch.context() as patched:
+            patched.setattr(dist, "is_available", lambda: True)
+            patched.setattr(dist, "is_initialized", lambda: True)
+            patched.setattr(dist, "get_rank", lambda *_, **__: rank)
+            patched.setattr(dist, "get_world_size", lambda *_, **__: self.world_size)
+            patched.setattr(dist, "get_backend", lambda *_, **__: "gloo")
+            patched.setattr(dist, "all_reduce", all_reduce)
+            patched.setattr(dist, "broadcast", broadcast)
+            patched.setattr(dist, "barrier", barrier)
+            return fn(rank), seen
+
+
+@pytest.fixture()
+def lockstep_ranks(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], LockstepRanks]:
+    """Factory for a ``LockstepRanks`` of the given world size."""
+    return lambda world_size: LockstepRanks(monkeypatch, world_size)
 
 
 def concept_table() -> pd.DataFrame:

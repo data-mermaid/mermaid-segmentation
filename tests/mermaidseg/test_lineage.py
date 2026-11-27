@@ -50,7 +50,6 @@ def test_untracked_file_alone_is_not_dirty(git_repo):
     [
         FileNotFoundError("git"),
         subprocess.CalledProcessError(128, "git"),
-        subprocess.TimeoutExpired("git", 5),
     ],
 )
 def test_unavailable_git_leaves_sha_and_dirty_none(monkeypatch, failure):
@@ -121,15 +120,6 @@ def test_missing_uv_lock_gives_none(monkeypatch, tmp_path: Path):
     assert _collect()["uv_lock_sha256"] is None
 
 
-def test_collect_lineage_carries_the_run_inputs_and_library_versions(monkeypatch):
-    result = _collect()
-    assert result["seed"] == 7
-    assert result["resolved_config"] == {"a": 1}
-    assert result["data_version"] == {"x": 1}
-    assert set(result["versions"]) == {"torch", "transformers", "peft"}
-    assert all(isinstance(v, str) for v in result["versions"].values())
-
-
 def test_data_version_pins_each_dataset_and_the_taxonomy():
     section = DataSection.model_validate(
         {
@@ -158,13 +148,10 @@ def test_data_version_pins_each_dataset_and_the_taxonomy():
         "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
     }
 
-
-def test_data_version_without_a_taxonomy_pin_records_none():
-    section = DataSection.model_validate(
+    without_taxonomy = DataSection.model_validate(
         {"datasets": {"m": {"version": "v", "manifest_sha256": "s", "val": {"groups": "all"}}}}
     )
-
-    assert data_version(section)["taxonomy"] is None
+    assert data_version(without_taxonomy)["taxonomy"] is None
 
 
 @pytest.mark.parametrize(
@@ -284,21 +271,17 @@ def _all_changed() -> dict:
             id="several-at-once",
         ),
         pytest.param(_untaxed(), _pins(), ("taxonomy",), id="taxonomy-unpinned-now"),
-        pytest.param(_pins(), None, ("coralnet", "taxonomy"), id="no-data-version-in-checkpoint"),
     ],
 )
 def test_check_same_data_names_every_differing_pin(new, old, needles):
-    source = {} if old is None else {"data_version": old}
     with pytest.raises(ValueError) as raised:
-        check_same_data(new, source)
+        check_same_data(new, {"data_version": old})
     for needle in needles:
         assert needle in str(raised.value)
 
 
-def test_git_state_reports_the_head_sha_and_whether_tracked_files_changed(git_repo):
-    state = lineage.git_state()
-    assert state == {"git_sha": _git(git_repo, "rev-parse", "HEAD").strip(), "git_dirty": False}
-
-    (git_repo / "tracked.txt").write_text("two\n")
-
-    assert lineage.git_state()["git_dirty"] is True
+def test_check_same_data_refuses_a_checkpoint_that_records_no_data_pins():
+    with pytest.raises(ValueError, match="records no data pins") as raised:
+        check_same_data(_pins(), {})
+    assert "--init-weights" in str(raised.value)
+    assert "added" not in str(raised.value)

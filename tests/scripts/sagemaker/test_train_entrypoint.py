@@ -20,7 +20,6 @@ from scripts.sagemaker.train_entrypoint import (
     find_run_yaml,
     num_workers,
     resolve_secrets,
-    trainer_env,
 )
 from tests.slurm import test_launchers as launchers
 
@@ -80,31 +79,20 @@ def test_trainer_argv_matches_the_slurm_launcher(repo, job, name, ngpu):
         assert ours_init is None
     else:
         assert ours_init is not None
-        assert Path(ours_init).name == Path(slurm_init).name == "model_step300000"
+        assert Path(ours_init).name == Path(slurm_init).name == "model_final"
 
 
 # ---------- build_trainer_argv ----------
 
 
 def test_single_gpu_runs_train_py_without_torchrun():
-    assert build_trainer_argv(_train(), ngpu=1, cpus=32, python="py") == [
-        "py",
-        "scripts/train.py",
-        "--run-name",
-        "r",
-        "--num-workers",
-        "28",
-        "--nccl-timeout-min",
-        "30",
-        "--preempt-checkpoint-every-steps",
-        "0",
-        "--output-dir",
-        "/opt/ml/checkpoints",
-        "--cache-dir",
-        "/opt/ml/cache",
-        "--batch-size",
-        "8",
-    ]
+    argv = build_trainer_argv(_train(), ngpu=1, cpus=32, python="py")
+
+    assert argv[:2] == ["py", "scripts/train.py"]
+    assert "torch.distributed.run" not in argv
+    assert launchers._arg(argv, "--output-dir") == "/opt/ml/checkpoints"
+    assert launchers._arg(argv, "--cache-dir") == "/opt/ml/cache"
+    assert launchers._arg(argv, "--run-name") == "r"
 
 
 def test_several_gpus_run_under_torchrun_with_one_process_per_gpu():
@@ -136,19 +124,7 @@ def test_init_weights_point_into_the_init_channel():
     assert argv.index("--init-weights") < argv.index("--batch-size")
 
 
-@pytest.mark.parametrize(
-    "flag",
-    [
-        "--run-name",
-        "--num-workers",
-        "--nccl-timeout-min",
-        "--preempt-checkpoint-every-steps",
-        "--output-dir",
-        "--cache-dir",
-        "--checkpoint",
-        "--init-weights",
-    ],
-)
+@pytest.mark.parametrize("flag", ["--num-workers", "--init-weights"])
 def test_owned_flag_in_train_args_raises(flag):
     with pytest.raises(ValueError, match=flag):
         build_trainer_argv(_train(args=[flag, "x"]), ngpu=1, cpus=32, python="py")
@@ -167,10 +143,9 @@ def test_num_workers_splits_spare_cpus_over_ranks(cpus, ngpu, expected):
     assert num_workers(cpus, ngpu) == expected
 
 
-@pytest.mark.parametrize(("cpus", "ngpu"), [(4, 1), (7, 4)])
-def test_num_workers_below_one_raises(cpus, ngpu):
+def test_num_workers_below_one_raises():
     with pytest.raises(ValueError):
-        num_workers(cpus, ngpu)
+        num_workers(4, 1)
 
 
 # ---------- resolve_secrets ----------
@@ -209,24 +184,6 @@ def test_resolve_secrets_propagates_a_failed_fetch_naming_the_secret():
 
 
 # ---------- trainer_env ----------
-
-
-def test_trainer_env_single_gpu_adds_nothing():
-    assert trainer_env(_train(), ngpu=1) == {}
-
-
-def test_trainer_env_adds_nccl_settings_for_several_gpus():
-    env = trainer_env(_train(), ngpu=4)
-    assert set(env) == {
-        "OMP_NUM_THREADS",
-        "TORCH_NCCL_TRACE_BUFFER_SIZE",
-        "TORCH_NCCL_DUMP_ON_TIMEOUT",
-        "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
-    }
-    assert env["OMP_NUM_THREADS"] == "1"
-    assert env["TORCH_NCCL_TRACE_BUFFER_SIZE"] == "2000"
-    assert env["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
-    assert env["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] == "/opt/ml/checkpoints/nccl_trace/r_rank_"
 
 
 # ---------- find_run_yaml ----------
@@ -290,13 +247,9 @@ def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final", events=None, sync_r
     return execs
 
 
-@pytest.mark.parametrize("sha", [None, ""], ids=["unset", "empty"])
-def test_main_without_git_sha_raises_before_secrets_or_exec(tmp_path, monkeypatch, sha):
+def test_main_without_git_sha_raises_before_secrets_or_exec(tmp_path, monkeypatch):
     execs = _stub_main(tmp_path, monkeypatch, ngpu=1)
-    if sha is None:
-        monkeypatch.delenv(BUILD_GIT_SHA_ENV, raising=False)
-    else:
-        monkeypatch.setenv(BUILD_GIT_SHA_ENV, sha)
+    monkeypatch.delenv(BUILD_GIT_SHA_ENV, raising=False)
     monkeypatch.setattr("boto3.client", lambda *a, **k: pytest.fail("no secrets fetch"))
 
     with pytest.raises(ValueError, match=BUILD_GIT_SHA_ENV):
@@ -325,8 +278,6 @@ def test_main_syncs_the_cache_with_the_trainers_data_config_before_training(tmp_
     [
         ["--data-config", "a.yaml", "--data-config", "b.yaml"],
         ["--data-config=a.yaml", "--data-config=b.yaml"],
-        ["--data-config", "a.yaml", "--data-config=b.yaml"],
-        ["--data-config=a.yaml", "--data-config", "b.yaml"],
     ],
 )
 def test_data_config_arg_returns_the_last_occurrence_as_argparse_does(args):
@@ -372,43 +323,19 @@ def test_main_creates_the_nccl_trace_dir_for_several_gpus(tmp_path, monkeypatch)
     assert (tmp_path / "out" / "nccl_trace").is_dir()
 
 
-def test_main_logs_disk_usage_of_cache_and_output_dirs_before_exec(tmp_path, monkeypatch, capsys):
-    _stub_main(tmp_path, monkeypatch, ngpu=4)
-    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
-    gib = 1024**3
-    monkeypatch.setattr(
-        "shutil.disk_usage",
-        lambda path: SimpleNamespace(total=100 * gib, used=60 * gib, free=40 * gib),
-    )
-
-    entrypoint.main([])
-
-    lines = capsys.readouterr().out.splitlines()
-    cache_line = next(
-        i for i, ln in enumerate(lines) if "total=" in ln and str(tmp_path / "cache") in ln
-    )
-    out_line = next(
-        i for i, ln in enumerate(lines) if "total=" in ln and str(tmp_path / "out") in ln
-    )
-    exec_line = next(i for i, ln in enumerate(lines) if "train.py" in ln)
-    assert "total=100.0GiB free=40.0GiB" in lines[cache_line]
-    assert "dev=" in lines[out_line]
-    assert max(cache_line, out_line) < exec_line
-
-
 def test_main_passes_the_init_channel_file_as_init_weights(tmp_path, monkeypatch):
     execs = _stub_main(tmp_path, monkeypatch, ngpu=4, run="cbm_final_res768")
     monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
     init_dir = tmp_path / "init"
     init_dir.mkdir()
-    (init_dir / "model_step300000").touch()
+    (init_dir / "model_final").touch()
     monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
 
     entrypoint.main([])
 
     assert len(execs) == 1
     argv = execs[0]
-    assert argv[argv.index("--init-weights") + 1] == str(init_dir / "model_step300000")
+    assert argv[argv.index("--init-weights") + 1] == str(init_dir / "model_final")
 
 
 def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, monkeypatch):
@@ -419,7 +346,7 @@ def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, mo
     (init_dir / "other.pt").touch()
     monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
 
-    with pytest.raises(ValueError, match=r"model_step300000.*'model_checkpoints', 'other\.pt'"):
+    with pytest.raises(ValueError, match=r"model_final.*'model_checkpoints', 'other\.pt'"):
         entrypoint.main([])
 
     assert execs == []

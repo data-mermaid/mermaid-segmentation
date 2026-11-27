@@ -149,10 +149,16 @@ def check_same_data(data_version: dict, source: dict) -> None:
         source: Lineage stored in the checkpoint; its ``data_version`` is the reference.
 
     Raises:
-        ValueError: Naming every dataset or taxonomy pin (version, manifest_sha256, resize) that
-            differs, and every dataset added or removed.
+        ValueError: If ``source`` records no data pins (written before data pinning), so the
+            checkpoint cannot be resumed. Otherwise, naming every dataset or taxonomy pin
+            (version, manifest_sha256, resize) that differs, and every dataset added or removed.
     """
-    differences = _data_differences(data_version, source.get("data_version") or {})
+    if "data_version" not in source:
+        raise ValueError(
+            "The checkpoint records no data pins, so it cannot be resumed. "
+            "Use --init-weights to start a new run from its weights."
+        )
+    differences = _data_differences(data_version, source["data_version"])
     if differences:
         raise ValueError(
             "Resuming a run cannot change its data; the pins differ from the checkpoint's:\n"

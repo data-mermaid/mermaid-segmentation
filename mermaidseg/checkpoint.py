@@ -72,7 +72,8 @@ def write_checkpoint(
 
     ``atomic=True`` writes ``<path>.partial`` and renames it into place, so a kill during
     ``torch.save`` does not leave a truncated file at ``path``. The rolling preempt
-    checkpoints use this. Interval checkpoints keep the direct write.
+    checkpoints and the end-of-run ``model_final`` checkpoint use this. Interval
+    checkpoints keep the direct write.
 
     The live module stays on its device. A detached CPU copy of the state dict is saved
     so a DDP reducer keeps the parameter storage it was built with.

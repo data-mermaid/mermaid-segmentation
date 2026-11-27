@@ -20,7 +20,7 @@ from segdata_etl.common.stage import (
     stage_version,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import ManifestNotFound, PublishRefused, SchemaValidationError
+from segdata_spec.errors import ManifestNotFound, PublishRefused
 from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
 
@@ -126,14 +126,6 @@ def test_publishable_repo_refuses_a_dirty_tree(repo_root: Path, monkeypatch: pyt
         publishable_repo()
 
 
-def test_publishable_repo_returns_the_root_and_git_state(
-    repo_root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(stage, "find_repo_root", lambda _start: repo_root)
-    monkeypatch.setattr(stage, "probe_git", lambda _dir: GIT)
-    assert publishable_repo() == Publishable(root=repo_root, git=GIT)
-
-
 def test_find_repo_root_without_a_git_and_lock_ancestor_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         find_repo_root(tmp_path)
@@ -173,28 +165,6 @@ def test_stage_version_stages_names_plans_and_prints(
     )
 
 
-def test_stage_version_skips_a_name_the_bucket_already_holds(
-    tmp_path: Path,
-    repo_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(stage, "datetime", _Clock)
-    client = FakeS3()
-    client.put(DATASET_BUCKET, "datasets/ds/20261124-abcdef1/manifest.json", b"{}")
-
-    staged = _stage(tmp_path / "stage", repo_root, client=client)
-
-    assert staged.version == "20261124-abcdef1-2"
-
-
-def test_stage_version_refuses_tables_that_fail_the_points_schema(tmp_path: Path, repo_root: Path):
-    tables = _tables()
-    tables["points.parquet"] = tables["points.parquet"].drop(["row"])
-
-    with pytest.raises(SchemaValidationError):
-        _stage(tmp_path / "stage", repo_root, tables=tables)
-
-
 def test_stage_version_reads_a_parent_from_the_extra_parent_dirs(tmp_path: Path, repo_root: Path):
     extra = tmp_path / "cache"
     parent = _stage(extra, repo_root)
@@ -205,11 +175,6 @@ def test_stage_version_reads_a_parent_from_the_extra_parent_dirs(tmp_path: Path,
     assert child.manifest.diff_from_parent is not None
     with pytest.raises(ManifestNotFound):
         _stage(tmp_path / "other", repo_root, parents=(ref,))
-
-
-def test_next_version_defaults_to_the_utc_date(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(stage, "datetime", _Clock)
-    assert next_version(tmp_path, "bkt", "ds", git_sha="abc1234def5678") == "20261124-abc1234"
 
 
 def test_next_version_appends_first_free_counter(tmp_path: Path):

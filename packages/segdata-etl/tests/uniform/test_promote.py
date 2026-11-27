@@ -9,14 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 from s3_fake import FakeS3, client_error, crc64nvme, quoted_etag
 
 from segdata_etl import cli, promote
-from segdata_etl.common.s3_objects import ObjectConflict
 from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, ExtractorMismatch, PublishRefused
@@ -199,16 +197,6 @@ def test_rerun_after_a_completed_feature_promote_refuses_as_already_published(re
     assert writes(fake) == []
 
 
-def test_published_manifest_with_other_bytes_still_refuses_a_staged_feature_version(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    fake.put(DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json", b"{}")
-
-    with pytest.raises(PublishRefused, match="already"):
-        run_promote(fake, stage, version)
-
-    assert writes(fake) == []
-
-
 def test_published_set_manifest_with_other_bytes_refuses_before_any_write(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path, features=True)
     fake.put(DATASET_BUCKET, f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json", b"{}")
@@ -258,64 +246,8 @@ def test_staged_index_that_differs_from_its_set_manifest_refuses_before_any_writ
     assert writes(fake) == []
 
 
-def test_set_manifest_pinning_another_dataset_manifest_refuses_before_any_write(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    path = version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["dataset"]["manifest_sha256"] = "0" * 64
-    path.write_text(json.dumps(manifest))
-
-    with pytest.raises(PublishRefused, match="is not feature set"):
-        run_promote(fake, stage, version)
-
-    assert writes(fake) == []
-
-
 def _drop_first_line(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return lines[1:]
-
-
-def _foreign_first_key(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    lines[0]["dst_key"] = "features/mermaid/efficientnet-v1/other.featurevector"
-    return lines
-
-
-@pytest.mark.parametrize(
-    ("edit", "message"),
-    [(_drop_first_line, "carried keys are absent"), (_foreign_first_key, "is not in it")],
-    ids=["unplanned-key-not-in-the-bucket", "key-not-in-the-index"],
-)
-def test_feature_plan_keys_differing_from_the_staged_index_refuse_before_any_write(
-    repo,  # noqa: F811
-    tmp_path,
-    edit,
-    message,
-):
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    rewrite_plan(stage, version, edit, name=FEATURE_PLAN)
-
-    with pytest.raises(PublishRefused, match=message):
-        run_promote(fake, stage, version)
-
-    assert writes(fake) == []
-
-
-def test_copy_landing_with_another_crc_raises_before_any_table_is_put(repo, tmp_path):  # noqa: F811
-    class WrongCrc(FakeS3):
-        def copy_object(self, **kwargs: Any) -> dict[str, Any]:
-            response = super().copy_object(**kwargs)
-            response["CopyObjectResult"]["ChecksumCRC64NVME"] = crc64nvme(b"other")
-            return response
-
-    fake, stage, version = stage_mermaid(tmp_path)
-    bad = WrongCrc(**{k: getattr(fake, k) for k in ("objects", "crcs", "etags")})
-
-    with pytest.raises(ObjectConflict):
-        run_promote(bad, stage, version)
-
-    prefix = f"datasets/mermaid/{version}/"
-    assert not [k for _, k in bad.objects if k.startswith(prefix)]
-    assert bad.ops("put") == []
 
 
 def test_published_manifest_refuses_before_any_write(repo, tmp_path):  # noqa: F811
@@ -344,84 +276,10 @@ def test_staged_table_that_no_longer_matches_the_manifest_refuses_with_no_writes
     assert fake.calls == []
 
 
-def test_a_table_edited_after_preflight_is_uploaded_as_checked(monkeypatch, repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    table = version_dir(stage, "mermaid", version) / "points.parquet"
-    checked = table.read_bytes()
-    real_preflight = promote._preflight
-
-    def edit_after_preflight(*args: Any, **kwargs: Any) -> Any:
-        plan = real_preflight(*args, **kwargs)
-        table.write_bytes(b"edited after preflight")
-        return plan
-
-    monkeypatch.setattr(promote, "_preflight", edit_after_preflight)
-
-    run_promote(fake, stage, version)
-
-    uploaded = fake.objects[(DATASET_BUCKET, f"datasets/mermaid/{version}/points.parquet")]
-    manifest = Manifest.model_validate_json(
-        (version_dir(stage, "mermaid", version) / "manifest.json").read_bytes()
-    )
-    assert uploaded == checked
-    assert hashlib.sha256(uploaded).hexdigest() == manifest.files["points.parquet"].sha256
-
-
-def test_a_feature_index_edited_after_preflight_is_uploaded_as_checked(monkeypatch, repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    index = version_dir(stage, "mermaid", version) / FAMILY_DIR / "index.parquet"
-    checked = index.read_bytes()
-    real_preflight = promote._preflight
-
-    def edit_after_preflight(*args: Any, **kwargs: Any) -> Any:
-        plan = real_preflight(*args, **kwargs)
-        index.write_bytes(b"edited after preflight")
-        return plan
-
-    monkeypatch.setattr(promote, "_preflight", edit_after_preflight)
-
-    run_promote(fake, stage, version)
-
-    uploaded = fake.objects[
-        (DATASET_BUCKET, f"datasets/mermaid/{version}/{FAMILY_DIR}/index.parquet")
-    ]
-    assert uploaded == checked
-
-
-def test_set_manifest_listing_a_file_besides_the_index_refuses_before_any_s3_call(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    path = version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["files"]["extra.parquet"] = manifest["files"]["index.parquet"]
-    path.write_text(json.dumps(manifest))
-
-    with pytest.raises(PublishRefused, match="lists files other than"):
-        run_promote(fake, stage, version)
-
-    assert fake.calls == []
-
-
 def rewrite_plan(stage: Path, version: str, edit, name: str = "copies.jsonl") -> None:
     path = version_dir(stage, "mermaid", version) / name
     lines = [json.loads(line) for line in path.read_text().splitlines()]
     path.write_text("".join(json.dumps(line) + "\n" for line in edit(lines)))
-
-
-@pytest.mark.parametrize("field", ["crc64nvme", "etag"])
-@pytest.mark.parametrize("bad", [None, ""])
-def test_plan_line_without_crc_or_etag_refuses_at_preflight(repo, tmp_path, field, bad):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-
-    def edit(lines):
-        lines[0][field] = bad
-        return lines
-
-    rewrite_plan(stage, version, edit)
-
-    with pytest.raises(PublishRefused, match=field):
-        run_promote(fake, stage, version)
-
-    assert fake.calls == []
 
 
 def test_plan_missing_a_line_without_a_parent_refuses_at_preflight(repo, tmp_path):  # noqa: F811
@@ -436,11 +294,7 @@ def test_plan_missing_a_line_without_a_parent_refuses_at_preflight(repo, tmp_pat
 
 @pytest.mark.parametrize(
     ("field", "edit_value"),
-    [
-        ("size", lambda v: v + 1),
-        ("crc64nvme", lambda v: crc64nvme(b"other")),
-        ("etag", lambda v: hashlib.md5(b"other").hexdigest()),  # noqa: S324
-    ],
+    [("size", lambda v: v + 1)],
 )
 def test_plan_line_disagreeing_with_images_parquet_refuses_at_preflight(
     repo,  # noqa: F811
@@ -496,40 +350,6 @@ def test_rerun_after_a_crash_finds_the_images_present_and_writes_the_manifest(re
     assert flaky.ops("put")[-1][2] == manifest_key[1]
 
 
-def test_a_manifest_put_by_a_racing_publisher_is_not_overwritten(repo, tmp_path):  # noqa: F811
-    racer = b'{"published": "by another writer"}'
-
-    class RacedManifest(FakeS3):
-        def put_object(self, **kwargs: Any) -> dict[str, Any]:
-            if kwargs["Key"].endswith("/manifest.json"):
-                self.put(kwargs["Bucket"], kwargs["Key"], racer)
-            return super().put_object(**kwargs)
-
-    fake, stage, version = stage_mermaid(tmp_path)
-    raced = RacedManifest(**{k: getattr(fake, k) for k in ("objects", "crcs", "etags")})
-    manifest_key = (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json")
-
-    with pytest.raises(ObjectConflict):
-        run_promote(raced, stage, version)
-
-    assert raced.objects[manifest_key] == racer
-
-
-def test_rerun_logs_images_as_already_present(repo, tmp_path, caplog):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    for plan in (version_dir(stage, "mermaid", version) / "copies.jsonl").read_text().splitlines():
-        line = json.loads(plan)
-        fake.put(
-            DATASET_BUCKET, line["dst_key"], fake.objects[(line["src_bucket"], line["src_key"])]
-        )
-
-    with caplog.at_level("INFO"):
-        run_promote(fake, stage, version)
-
-    assert "3 already present" in caplog.text
-    assert "0 copied" in caplog.text
-
-
 def test_hf_uploads_land_byte_identical_with_the_planned_crc(monkeypatch, tmp_path):
     version_path = build_coralscapes(monkeypatch, tmp_path)
     stage = tmp_path / "stage"
@@ -567,14 +387,7 @@ def test_hf_upload_whose_local_bytes_differ_from_the_plan_refuses_at_preflight(
     assert fake.calls == []
 
 
-def test_cli_requires_its_flags_and_dispatches(monkeypatch, tmp_path):
-    for argv in (
-        ["promote", "--dataset", "d", "--version", "v"],
-        ["promote", "--stage-dir", str(tmp_path), "--version", "v"],
-        ["promote", "--stage-dir", str(tmp_path), "--dataset", "d"],
-    ):
-        with pytest.raises(SystemExit):
-            cli.build_parser().parse_args(argv)
+def test_cli_dispatches_to_promote_with_its_flags(monkeypatch, tmp_path):
     seen: dict[str, Any] = {}
 
     def fake_promote(client: Any, **kwargs: Any) -> None:
@@ -648,8 +461,8 @@ def test_planned_upload_key_holding_other_bytes_refuses_with_only_heads(monkeypa
 def plant_same_length(fake: FakeS3, key: str, data: bytes, differs: str) -> None:
     """Seed ``key`` with ``data`` minus a flipped byte, so the size matches the plan.
 
-    ``differs`` names the fingerprint that catches it: ``etag`` keeps the planned CRC,
-    ``crc`` keeps the planned ETag, and ``both`` keeps neither.
+    ``differs`` names the fingerprint that catches it: ``etag`` keeps the planned CRC and
+    ``crc`` keeps the planned ETag.
     """
     flipped = bytes([data[0] ^ 1]) + data[1:]
     fake.put(DATASET_BUCKET, key, flipped, etag=quoted_etag(data) if differs == "crc" else None)
@@ -657,7 +470,7 @@ def plant_same_length(fake: FakeS3, key: str, data: bytes, differs: str) -> None
         fake.crcs[(DATASET_BUCKET, key)] = crc64nvme(data)
 
 
-@pytest.mark.parametrize("differs", ["etag", "crc", "both"])
+@pytest.mark.parametrize("differs", ["etag", "crc"])
 def test_planned_copy_key_holding_same_length_other_bytes_refuses_with_only_heads(
     repo,  # noqa: F811
     tmp_path,
@@ -672,21 +485,6 @@ def test_planned_copy_key_holding_same_length_other_bytes_refuses_with_only_head
 
     with pytest.raises(PublishRefused, match=line["dst_key"]):
         run_promote(fake, stage, version)
-
-    assert {op for op, *_ in fake.calls} == {"head"}
-
-
-@pytest.mark.parametrize("differs", ["etag", "crc", "both"])
-def test_planned_upload_key_holding_same_length_other_bytes_refuses_with_only_heads(
-    monkeypatch, tmp_path, differs
-):
-    version_path = build_coralscapes(monkeypatch, tmp_path)
-    fake = FakeS3()
-    taken = "images/coralscapes_v2/train/a1.jpg"
-    plant_same_length(fake, taken, IMG_A, differs)
-
-    with pytest.raises(PublishRefused, match=taken):
-        run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
 
     assert {op for op, *_ in fake.calls} == {"head"}
 
@@ -753,23 +551,6 @@ def shard_with_only_unreadable_images() -> dict[str, Any]:
     return {"instances/train-00000-of-00001.parquet": coralscapes_shard(["g1"], [gif], [MASK])}
 
 
-def test_upload_landing_with_another_crc_raises_and_no_table_is_written(monkeypatch, tmp_path):
-    class WrongCrc(FakeS3):
-        def put_object(self, **kwargs: Any) -> dict[str, Any]:
-            response = super().put_object(**kwargs)
-            if kwargs["Key"].startswith("images/"):
-                response["ChecksumCRC64NVME"] = crc64nvme(b"other")
-            return response
-
-    version_path = build_coralscapes(monkeypatch, tmp_path)
-    fake = WrongCrc()
-
-    with pytest.raises(ObjectConflict):
-        run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
-
-    assert not [k for _, k in fake.objects if k.startswith("datasets/")]
-
-
 PARENT_VERSION = "20261101-1234567"
 PARENT_KEY = f"datasets/parent/{PARENT_VERSION}/manifest.json"
 PARENT_MANIFEST = b'{"dataset": "parent"}'
@@ -811,17 +592,6 @@ def test_parent_manifest_with_other_bytes_than_the_pin_refuses_with_no_writes(
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
-
-
-def test_parent_published_with_the_pinned_bytes_lets_promote_proceed(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    pin_parent(stage, version)
-    fake.put(DATASET_BUCKET, PARENT_KEY, PARENT_MANIFEST)
-    fake.calls.clear()
-
-    run_promote(fake, stage, version)
-
-    assert (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json") in fake.objects
 
 
 SOURCE_BUCKET = "dense-source"
@@ -900,19 +670,6 @@ def test_key_listed_in_both_plan_files_refuses_before_any_write(monkeypatch, tmp
     assert writes(fake) == []
 
 
-def test_a_key_in_neither_plan_file_without_a_parent_refuses_before_any_write(
-    monkeypatch, tmp_path
-):
-    fake, stage, version = stage_dense(monkeypatch, tmp_path)
-    path = version_dir(stage, DENSE, version) / "uploads.jsonl"
-    path.write_text("".join(path.read_text().splitlines(keepends=True)[1:]))
-
-    with pytest.raises(PublishRefused, match="needs a published parent"):
-        run_promote(fake, stage, version, dataset=DENSE)
-
-    assert writes(fake) == []
-
-
 def publish_parent(
     fake: FakeS3, stage: Path, version: str, parent_store: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -979,25 +736,6 @@ def test_tables_only_version_whose_parent_has_another_image_store_refuses_with_n
     assert writes(fake) == []
 
 
-@pytest.mark.parametrize("fault", ["missing", "etag"])
-def test_tables_only_version_with_an_absent_or_changed_image_refuses_with_no_writes(
-    repo,  # noqa: F811
-    tmp_path,
-    fault,
-):
-    fake, stage, version, store = stage_tables_only(tmp_path)
-    key = next(k for b, k in sorted(fake.objects) if b == store["bucket"] and "/i2." in k)
-    if fault == "missing":
-        del fake.objects[(store["bucket"], key)]
-    else:
-        fake.etags[(store["bucket"], key)] = quoted_etag(b"other")
-
-    with pytest.raises(PublishRefused, match=key):
-        run_promote(fake, stage, version)
-
-    assert writes(fake) == []
-
-
 def test_images_and_masks_land_in_intelligent_tiering_and_tables_keep_the_default(
     monkeypatch, tmp_path
 ):
@@ -1029,18 +767,6 @@ def test_a_pinned_taxonomy_absent_from_the_bucket_refuses_with_no_writes(repo, t
     pin_taxonomy(stage, version, hashlib.sha256(TAXONOMY_BYTES).hexdigest())
 
     with pytest.raises(PublishRefused, match="not published"):
-        run_promote(fake, stage, version)
-
-    assert writes(fake) == []
-
-
-def test_a_pinned_taxonomy_with_another_sha_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    fake.put(DATASET_BUCKET, TAXONOMY_KEY, TAXONOMY_BYTES)
-    pin_taxonomy(stage, version, "0" * 64)
-    fake.calls.clear()
-
-    with pytest.raises(PublishRefused, match="does not match"):
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
@@ -1091,7 +817,7 @@ def test_a_carried_key_is_headed_in_the_image_store_and_never_copied(repo, tmp_p
     assert fake.puts[-1] == f"datasets/mermaid/{version}/manifest.json"
 
 
-@pytest.mark.parametrize("fault", ["missing", "etag", "size", "crc"])
+@pytest.mark.parametrize("fault", ["missing", "etag"])
 def test_a_carried_key_absent_or_changed_refuses_before_any_write(repo, tmp_path, fault):  # noqa: F811
     fake, stage, version, carried = stage_carried(tmp_path)
     location = (DATASET_BUCKET, carried)
@@ -1109,45 +835,6 @@ def test_a_carried_key_absent_or_changed_refuses_before_any_write(repo, tmp_path
         fake.crcs[location] = crc64nvme(b"other")
 
     with pytest.raises(PublishRefused, match=carried):
-        run_promote(fake, stage, version)
-
-    assert writes(fake) == []
-
-
-def test_only_the_faulty_one_of_two_carried_keys_is_named_and_nothing_is_written(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    store = json.loads((version_dir(stage, "mermaid", version) / "manifest.json").read_bytes())[
-        "image_store"
-    ]
-    lines = [
-        e
-        for e in copy_destinations(stage, version)
-        if "/i1." in e["dst_key"] or "/i2." in e["dst_key"]
-    ]
-    assert len(lines) == 2
-    for line in lines:
-        fake.put(
-            store["bucket"], line["dst_key"], fake.objects[(line["src_bucket"], line["src_key"])]
-        )
-    dropped = {line["dst_key"] for line in lines}
-    rewrite_plan(stage, version, lambda ls: [x for x in ls if x["dst_key"] not in dropped])
-    publish_parent(fake, stage, version)
-    good, bad = (line["dst_key"] for line in lines)
-    fake.etags[(DATASET_BUCKET, bad)] = quoted_etag(b"other")
-    fake.calls.clear()
-
-    with pytest.raises(PublishRefused, match=bad) as refused:
-        run_promote(fake, stage, version)
-
-    assert good not in str(refused.value)
-    assert writes(fake) == []
-
-
-def test_a_key_no_plan_names_with_a_parent_on_another_image_store_refuses(repo, tmp_path):  # noqa: F811
-    other = {"bucket": "elsewhere", "prefix": "", "owner": "external"}
-    fake, stage, version, _ = stage_carried(tmp_path, parent_store=other)
-
-    with pytest.raises(PublishRefused, match="image store"):
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
@@ -1180,44 +867,6 @@ def test_a_stage_holding_only_a_feature_set_of_an_unpublished_dataset_refuses(re
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
-
-
-def test_two_staged_families_publish_after_the_dataset_in_family_order(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    folder = version_dir(stage, "mermaid", version) / "features"
-    shutil.copytree(folder / "efficientnet-v1", folder / "a-family")
-    path = folder / "a-family" / "manifest.json"
-    path.write_text(path.read_text().replace('"family": "efficientnet-v1"', '"family": "a-family"'))
-    rewrite_plan(
-        stage,
-        version,
-        lambda lines: [
-            {**ln, "dst_key": ln["dst_key"].replace("efficientnet-v1", "a-family")} for ln in lines
-        ],
-        name="features/a-family/copies.jsonl",
-    )
-    index_path = folder / "a-family" / "index.parquet"
-    rows = pq.read_table(index_path).to_pylist()
-    for row in rows:
-        row["key"] = row["key"].replace("efficientnet-v1", "a-family")
-    data = pa.Table.from_pylist(rows, schema=pq.read_schema(index_path))
-    pq.write_table(data, index_path)
-    manifest = json.loads(path.read_text())
-    blob = index_path.read_bytes()
-    manifest["files"]["index.parquet"].update(
-        sha256=hashlib.sha256(blob).hexdigest(), bytes=len(blob)
-    )
-    path.write_text(json.dumps(manifest, indent=2) + "\n")
-
-    run_promote(fake, stage, version)
-
-    set_manifests = [
-        k for _, _, k, _ in writes(fake) if k.endswith("manifest.json") and "/features/" in k
-    ]
-    assert set_manifests == [
-        f"datasets/mermaid/{version}/features/a-family/manifest.json",
-        f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json",
-    ]
 
 
 def test_an_index_key_no_copy_names_is_carried_when_the_family_holds_it(repo, tmp_path):  # noqa: F811

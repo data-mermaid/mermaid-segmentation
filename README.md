@@ -28,6 +28,20 @@ You also need AWS credentials for S3 and a Hugging Face token for the gated DINO
 
 Python code does not read `.env`. Load it into the shell with `set -a; source .env; set +a`, or use direnv.
 
+#### Inference only
+
+`uv sync --locked --no-default-groups` installs just what loading an exported bundle and predicting needs. An env made this way cannot train or export; add `--extra training` (or `--extra wandb` / `--extra mlflow`, which include it) to get that stack. A plain `uv sync` already includes it. `uv run` syncs the default groups too, so in this env run code with `uv run --no-default-groups ...` (or set `UV_NO_DEFAULT_GROUPS=1`); a plain `uv run` puts the training stack back.
+
+```python
+from mermaidseg.inference.bundle import load_bundle
+from mermaidseg.inference.predictor import CBMPredictor
+
+bundle = load_bundle("<bundle dir>", "cpu")
+predictor = CBMPredictor.from_bundle(bundle, amp_dtype=None)
+# image_rgb: HxWx3 uint8 RGB array; points are (row, col) in source pixels
+class_probs, concept_probs = predictor.predict_points(image_rgb, [[row, col], ...])
+```
+
 ### Architecture overview
 
 ```text
@@ -38,7 +52,7 @@ scripts/train.py
        labels and concepts from mermaidseg/dataset_reconciliation/
        MetaModel (mermaidseg/model/meta.py), Logger over a wandb or MLflow tracker (mermaidseg/logger.py)
   -> outputs/model_checkpoints/<run>/
-       model_step* checkpoints (with lineage; model_preempt* on Slurm), config.yaml, model.json
+       model_step* checkpoints (with lineage; model_preempt* on Slurm; model_final at the end of a run), config.yaml, model.json
   -> scripts/export.py (mermaidseg/export.py)
   -> bundle: weights.safetensors + model.json
   -> mermaidseg/inference/

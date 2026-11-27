@@ -600,9 +600,6 @@ def concept_block_from_binary(binary: dict, concept: str, threshold: float = 0.5
         "n_not_given",
         "n_unannotated",
     )
-    missing = [key for key in required if key not in stats]
-    if missing:
-        raise RuntimeError(f"{concept} stats are missing fields: {missing}")
     block = {key: stats[key] for key in required}
     block["threshold"] = float(threshold)
     return block

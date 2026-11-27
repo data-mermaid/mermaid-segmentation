@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 from botocore.exceptions import ClientError
 
-_MISSING_KEY_CODES = ("404", "NoSuchKey")
+_MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 _DELETE_BATCH_SIZE = 1000  # the DeleteObjects API limit
 
 
@@ -52,6 +52,11 @@ def object_key_complete_marker(base_prefix: str, source_id: int) -> str:
 def partial_prefix(base_prefix: str, source_id: int) -> str:
     """Return the key prefix ``<source prefix>_partial/`` of a source's unfinished work."""
     return f"{source_prefix(base_prefix, source_id)}_partial/"
+
+
+def partial_key(s3_prefix: str, source_id: int, name: str) -> str:
+    """Return the key of the file ``name`` in a source's ``_partial/``."""
+    return f"{partial_prefix(s3_prefix, source_id)}{name}"
 
 
 def key_exists(client: Any, bucket: str, key: str) -> bool:

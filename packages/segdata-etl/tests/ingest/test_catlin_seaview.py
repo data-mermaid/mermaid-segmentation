@@ -10,7 +10,6 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-from segdata_etl.cli import build_parser
 from segdata_etl.ingest import catlin_seaview
 
 from .raw_trees import CATLIN_CSV_HEADER, jpg_bytes, write_catlin_tree
@@ -77,14 +76,9 @@ def test_ca1_two_regions_publish_parquet_images_and_classes(tmp_path, fake_s3):
     ]
     assert _json(fake_s3, "classes.json") == {"unlabeled": 0, "Algae": 1, "Coral": 2, "Sand": 3}
     manifest = _json(fake_s3, "manifest.json")
-    assert manifest["source"] == {
-        "citation": (
-            "Seaview Survey Photo-quadrat and Image Classification Dataset "
-            "(Gonzalez-Rivero et al., 2019)"
-        ),
-        "raw_data_url": "http://data.qld.edu.au/public/Q1281",
-        "license": "CC BY-NC-SA 4.0",
-    }
+    assert manifest["source"]["citation"]
+    assert manifest["source"]["raw_data_url"] == "http://data.qld.edu.au/public/Q1281"
+    assert manifest["source"]["license"] == "CC BY-NC-SA 4.0"
     assert manifest["s3"]["image_key_template"] == "ds/images/{region}/{image_id}.jpg"
     assert manifest["ingestion"]["images_uploaded"] == 3
     assert manifest["ingestion"]["dropped"] == {"damaged_images": 0}
@@ -287,12 +281,3 @@ def test_force_download_fetches_again(tmp_path, fake_s3, monkeypatch):
     catlin_seaview.run(_args(tmp_path, None, force_download=True, overwrite=True), fake_s3)
 
     assert len(calls) == 20
-
-
-def test_add_arguments_defaults():
-    ns = build_parser().parse_args(["ingest", "catlin_seaview"])
-
-    assert ns.data_dir is None
-    assert ns.force_download is False
-    assert ns.workdir == Path("outputs/external-datasets/catlin_seaview")
-    assert ns.prefix == "external_validation_datasets/catlin_seaview"

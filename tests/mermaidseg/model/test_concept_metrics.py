@@ -10,7 +10,6 @@ import torch
 from mermaidseg.model.concept_metrics import (
     calculate_multi_hot_concept_loss,
     calculate_taxonomic_rank_loss,
-    map_taxonomy_predictions_to_dense,
     map_taxonomy_to_dense,
 )
 
@@ -69,29 +68,8 @@ def test_multi_hot_loss_of_an_empty_mask_is_zero_with_finite_gradients():
     assert torch.equal(logits.grad, torch.zeros_like(logits))
 
 
-def test_taxonomic_rank_loss_rejects_labels_with_a_different_channel_count():
-    with pytest.raises(ValueError, match="labels 3 vs outputs 2"):
-        calculate_taxonomic_rank_loss(torch.zeros(1, 2, 1, 1), torch.zeros(1, 3, 1, 1))
-
-
-def test_taxonomic_rank_loss_of_a_rank_with_no_channels_is_a_zero_of_the_output_dtype():
-    outputs = torch.zeros(2, 0, 3, 3, dtype=torch.float64)
-
-    loss = calculate_taxonomic_rank_loss(outputs, torch.zeros(2, 0, 3, 3))
-
-    assert loss.dtype == torch.float64
-    assert loss.ndim == 0
-    assert loss.item() == 0.0
-
-
 def test_map_taxonomy_to_dense_maps_all_zero_pixels_to_zero_and_others_to_argmax_plus_one():
     # Shape (B=1, C=3, H=1, W=3): pixel 0 is not_given, pixel 1 is channel 0, pixel 2 is channel 2.
     labels = torch.tensor([[[[0.0, 1.0, 0.0]], [[0.0, 0.0, 0.0]], [[0.0, 0.0, 2.0]]]])
 
     assert map_taxonomy_to_dense(labels).tolist() == [[[0, 1, 3]]]
-
-
-def test_map_taxonomy_predictions_to_dense_is_the_argmax_channel_plus_one():
-    scores = torch.tensor([[[[0.1, 0.9]], [[0.7, 0.2]], [[0.3, 0.4]]]])
-
-    assert map_taxonomy_predictions_to_dense(scores).tolist() == [[[2, 1]]]

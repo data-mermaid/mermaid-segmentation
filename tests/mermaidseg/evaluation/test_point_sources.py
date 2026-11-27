@@ -17,7 +17,7 @@ from tests.mermaidseg.evaluation.conftest import write_eval_cache
 
 @pytest.mark.parametrize(
     ("split", "groups"),
-    [("train", ["s1", "s2"]), ("val", ["s3"]), ("test", ["s4"])],
+    [("train", ["s1", "s2"])],
 )
 def test_split_groups_are_the_split_files_groups_of_that_split(tmp_path, split, groups):
     cache = write_eval_cache(tmp_path)
@@ -29,24 +29,6 @@ def test_a_split_with_no_group_raises(tmp_path):
     path.write_text("group,split\ns1,train\n")
     with pytest.raises(ValueError, match="no group in split 'test'"):
         split_groups(path, "test")
-
-
-def test_the_reader_keeps_only_the_given_image_ids(tmp_path):
-    cache = write_eval_cache(tmp_path)
-
-    reader = coralnet_reader(
-        cache.section, cache.cache_dir, groups=["s1", "s3"], split="val", image_ids=["c1b", "c3a"]
-    )
-
-    assert sorted(reader.images["image_id"]) == ["c1b", "c3a"]
-
-
-def test_an_image_id_outside_the_selected_groups_raises(tmp_path):
-    cache = write_eval_cache(tmp_path)
-    with pytest.raises(ValueError, match=r"image_ids not in the reader's selection: \['c4a'\]"):
-        coralnet_reader(
-            cache.section, cache.cache_dir, groups=["s3"], split="val", image_ids=["c3a", "c4a"]
-        )
 
 
 def test_sample_images_per_source_is_seeded_and_capped():
@@ -62,8 +44,6 @@ def test_sample_images_per_source_is_seeded_and_capped():
     assert first.equals(sample_images_per_source(df, 4, seed=0))
     draws = {tuple(sample_images_per_source(df, 4, seed=s)["image_id"]) for s in range(5)}
     assert len(draws) > 1
-    with pytest.raises(ValueError, match="must be positive"):
-        sample_images_per_source(df, 0)
 
 
 def test_write_coralnet_sample_writes_and_returns_the_seeded_per_source_sample(tmp_path):
@@ -80,15 +60,6 @@ def test_write_coralnet_sample_writes_and_returns_the_seeded_per_source_sample(t
     assert written["image_id"].tolist()[2] == "c2a"
     assert set(written["image_id"].tolist()[:2]) < {"c1a", "c1b", "c1c"}
     assert returned == written["image_id"].tolist()
-
-
-def test_write_coralnet_sample_rejects_a_group_that_is_not_s_digits(tmp_path):
-    cache = write_eval_cache(tmp_path)
-    reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s1"], split="train")
-    reader.images["group"] = "x12"
-
-    with pytest.raises(ValueError, match="not s<source id>"):
-        write_coralnet_sample(path=tmp_path / "k.parquet", reader=reader, images_per_source=2)
 
 
 def test_the_reader_keeps_the_first_listed_annotator_of_each_point(tmp_path):

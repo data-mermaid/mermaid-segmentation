@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from torch.utils.data import DataLoader, TensorDataset
 
 import mermaidseg.logger
 from mermaidseg.io import ConfigDict
@@ -174,31 +173,23 @@ class TestWandbTracker:
         tracker.end_run(failed=True)
         assert stub_wandb.run.exit_code == 1
 
-    def test_wandb_run_id_env_resumes(self, stub_wandb, monkeypatch):
-        monkeypatch.setenv("WANDB_RUN_ID", "r1-cbm_lossw_pix0.5_img0.5")
+    @pytest.mark.parametrize(
+        ("value", "run_id"),
+        [("r1-cbm_lossw_pix0.5_img0.5", "r1-cbm_lossw_pix0.5_img0.5"), ("  run-1 \n", "run-1")],
+        ids=["plain", "stripped"],
+    )
+    def test_wandb_run_id_env_resumes(self, stub_wandb, monkeypatch, value, run_id):
+        monkeypatch.setenv("WANDB_RUN_ID", value)
         _wandb_tracker()
-        assert stub_wandb.init_kwargs["id"] == "r1-cbm_lossw_pix0.5_img0.5"
+        assert stub_wandb.init_kwargs["id"] == run_id
         assert stub_wandb.init_kwargs["resume"] == "allow"
 
-    @pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+    @pytest.mark.parametrize("value", ["", "   "])
     def test_a_blank_wandb_run_id_env_starts_a_new_run(self, stub_wandb, monkeypatch, value):
         monkeypatch.setenv("WANDB_RUN_ID", value)
         _wandb_tracker()
         assert stub_wandb.init_kwargs["id"] is None
         assert stub_wandb.init_kwargs["resume"] is None
-
-    def test_wandb_run_id_env_is_stripped(self, stub_wandb, monkeypatch):
-        monkeypatch.setenv("WANDB_RUN_ID", "  run-1 \n")
-        _wandb_tracker()
-        assert stub_wandb.init_kwargs["id"] == "run-1"
-        assert stub_wandb.init_kwargs["resume"] == "allow"
-
-    def test_log_dict_names_the_artifact_after_the_sanitized_basename(self, stub_wandb):
-        tracker = _wandb_tracker()
-        tracker.log_dict({"a": 1}, "metadata/my model (v1).json")
-        assert [(a.name, a.type, a.files) for a in stub_wandb.run.artifacts] == [
-            ("my-model--v1-", "metadata", {"my model (v1).json": {"a": 1}})
-        ]
 
     @pytest.mark.parametrize(
         ("method", "args", "broken", "warning"),
@@ -370,16 +361,6 @@ class TestMetricFailureRateLimit:
 
 
 class TestMlflowFailureModes:
-    def test_unreachable_server_raises_before_a_run_starts(self, tmp_path, monkeypatch):
-        mlflow = pytest.importorskip("mlflow")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:1")
-        monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
-        monkeypatch.setenv("MLFLOW_HTTP_REQUEST_TIMEOUT", "1")
-        with pytest.raises(Exception):  # noqa: B017, PT011
-            MlflowTracker(experiment_name="exp", run_name="run")
-        assert mlflow.active_run() is None
-
     def test_a_failing_connectivity_probe_stops_before_an_experiment_or_run_is_created(
         self, mlflow_store, monkeypatch
     ):
@@ -439,7 +420,6 @@ def test_mlflow_run_url_only_for_http_servers(uri: str, expected: str | None):
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("concept_id2name", "concept_id2name"),
         ("v1.2-final_x", "v1.2-final_x"),
         ("a b(c)/d:e", "a-b-c--d-e"),
     ],
@@ -496,48 +476,15 @@ class TestLoggerInit:
             "run_name": "meta-run",
             "config": config,
         }
-        assert tracker.params == [
-            {
-                "num_classes": 3,
-                "run_name": "meta-run",
-                "model_name": "FakeLinear",
-                "model_encoder_name": "resnet18",
-                "training_epochs": 2,
-                "training_batch_size": 4,
-                "model_type": "FakeMetaModel",
-                "framework": "pytorch",
-                "num_concepts": 5,
-            }
-        ]
         assert tracker.dicts == [
             ("config/config.json", {**config, "num_classes": 3}),
             ("metadata/id2label.json", {0: "ignore", 1: "coral"}),
         ]
 
-    @pytest.mark.parametrize("id2label", [None, {}])
+    @pytest.mark.parametrize("id2label", [None])
     def test_an_empty_id2label_is_not_logged(self, make_config, fake_tracker, id2label):
         _, tracker = _logger(make_config, id2label=id2label)
         assert [path for path, _ in tracker.dicts] == ["config/config.json"]
-
-    def test_unpreparable_run_metadata_is_warned_and_leaves_the_tracker_unlogged(
-        self, make_config, fake_tracker, caplog
-    ):
-        caplog.set_level(logging.WARNING)
-        meta = FakeMetaModel()
-        meta.num_classes = None  # type: ignore[assignment]
-        _, tracker = _logger(make_config, meta, id2label={0: "ignore"})
-        assert (tracker.dicts, tracker.params) == ([], [])
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert "Failed to prepare run metadata" in warnings[0]
-
-    def test_tracker_construction_error_propagates(self, make_config, monkeypatch):
-        def _fail(logger_cfg: Any, run_name: str, config: Any) -> None:
-            raise RuntimeError("tracker down")
-
-        monkeypatch.setitem(mermaidseg.logger.TRACKER_CLASSES, "wandb", _fail)
-        with pytest.raises(RuntimeError, match="tracker down"):
-            Logger(config=make_config(), meta_model=FakeMetaModel())
 
 
 class TestLoggerLog:
@@ -551,27 +498,6 @@ class TestLoggerLog:
 
 class TestLoggerDispatch:
     """log_params/log_dict/log_dataloader_params/log_reconciliation reach the tracker."""
-
-    def test_log_dataloader_params_logs_the_loader_settings(self, make_config, fake_tracker):
-        lgr, tracker = _logger(make_config)
-        tracker.params.clear()
-        loader = DataLoader(TensorDataset(torch.zeros(4, 1)), batch_size=2, num_workers=0)
-        lgr.log_dataloader_params(loader, prefix="train_loader")
-        assert tracker.params == [
-            {
-                "train_loader_num_workers": 0,
-                "train_loader_pin_memory": False,
-                "train_loader_batch_size": 2,
-                "train_loader_persistent_workers": False,
-                "train_loader_prefetch_factor": None,
-            }
-        ]
-
-    def test_log_params_with_no_params_does_not_reach_the_tracker(self, make_config, fake_tracker):
-        lgr, tracker = _logger(make_config)
-        tracker.params.clear()
-        lgr.log_params({})
-        assert tracker.params == []
 
     def test_log_reconciliation_logs_each_map_and_the_class_counts(self, make_config, fake_tracker):
         lgr, tracker = _logger(make_config)

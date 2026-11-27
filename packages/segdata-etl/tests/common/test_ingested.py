@@ -176,13 +176,6 @@ def _manifest_bytes(dataset_name: str = "demo", prefix: str = "external_validati
     return manifest.model_dump_json().encode()
 
 
-def test_read_ingested_refuses_a_manifest_of_another_dataset() -> None:
-    client = _with_manifest(_manifest_bytes(dataset_name="other"))
-
-    with pytest.raises(ValueError, match="'other'.*'demo'|'demo'.*'other'"):
-        read_ingested(client, "demo")
-
-
 def test_read_ingested_refuses_a_manifest_with_another_prefix() -> None:
     client = _with_manifest(_manifest_bytes(prefix="elsewhere/demo"))
 

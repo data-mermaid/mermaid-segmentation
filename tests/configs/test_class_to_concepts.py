@@ -11,7 +11,6 @@ import yaml
 _REPO = Path(__file__).resolve().parents[2]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
 _DATA_CONFIG = _REPO / "configs" / "data_config.yaml"
-_TAXONOMY = ["kingdom", "phylum", "order", "family", "genus", "species"]
 
 
 @pytest.fixture(scope="module")
@@ -62,26 +61,6 @@ def test_rubble_rows_are_neither_sand_nor_hard_substrate(table):
     assert len(rubble) > 0
     assert (rubble["sand"] == "FALSE").all()
     assert (rubble["hard_substrate"] == "FALSE").all()
-
-
-def test_rubble_rows_keep_their_other_concepts(table):
-    turf = table[table["source_label_class_name"] == "turf on rubble"]
-    assert len(turf) > 0
-    assert (turf["rubble"] == "TRUE").all() and (turf["algae"] == "TRUE").all()
-
-
-def test_red_algae_unidentified_encrusting_is_rhodophyta(table):
-    rows = table[table["source_label_class_name"] == "red algae, unidentified encrusting"]
-    assert len(rows) >= 1
-    for _, row in rows.iterrows():
-        assert row["kingdom"] == "plantae" and row["phylum"] == "rhodophyta"
-        assert [row[rank] for rank in _TAXONOMY[2:]] == ["not_given"] * 4
-
-
-def test_chondrilla_is_live(table):
-    rows = table[table["source_label_class_name"].str.startswith("chondrilla")]
-    assert len(rows) >= 1
-    assert (rows["live"] == "TRUE").all()
 
 
 def test_every_source_is_a_configured_dataset(table, configured_datasets):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import pandas as pd
@@ -93,14 +93,11 @@ def concept_sidecar_meta(
     }
 
 
-def read_sidecar(
-    csv_path: str | Path, *, artifact: str, builder: str, required: Iterable[str] = ()
-) -> dict:
+def read_sidecar(csv_path: str | Path, *, artifact: str) -> dict:
     """Load the ``.meta.yaml`` sidecar of ``csv_path``; an empty or non-mapping file reads as ``{}``.
 
     Raises:
         FileNotFoundError: The sidecar does not exist.
-        ValueError: The sidecar lacks a key in ``required``.
     """
     meta_file = meta_path(csv_path)
     if not meta_file.is_file():
@@ -108,7 +105,4 @@ def read_sidecar(
     meta = yaml.safe_load(meta_file.read_text())
     if not isinstance(meta, dict):
         meta = {}
-    missing = sorted(set(required) - set(meta))
-    if missing:
-        raise ValueError(f"{meta_file} is missing {missing}. Rebuild it with scripts/{builder}.py.")
     return meta
