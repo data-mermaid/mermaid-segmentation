@@ -30,7 +30,7 @@ Python code does not read `.env`. Load it into the shell with `set -a; source .e
 
 #### Inference only
 
-`uv sync --locked --no-default-groups` installs just what loading an exported bundle and predicting needs. An env made this way cannot train or export; add `--extra training` (or `--extra wandb` / `--extra mlflow`, which include it) to get that stack. A plain `uv sync` already includes it.
+`uv sync --locked --no-default-groups` installs just what loading an exported bundle and predicting needs. An env made this way cannot train or export; add `--extra training` (or `--extra wandb` / `--extra mlflow`, which include it) to get that stack. A plain `uv sync` already includes it. `uv run` syncs the default groups too, so in this env run code with `uv run --no-default-groups ...` (or set `UV_NO_DEFAULT_GROUPS=1`); a plain `uv run` puts the training stack back.
 
 ```python
 from mermaidseg.inference.bundle import load_bundle

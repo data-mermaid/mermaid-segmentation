@@ -54,7 +54,7 @@ You need:
    uv sync --locked --extra wandb
    ```
 
-A plain `uv sync` installs the default groups, `dev` and `training`. `--no-dev` drops only `dev` and keeps `training`; `--no-default-groups` drops both. `--no-default-groups` gives the inference-only install (`uv sync --locked --no-default-groups`), which can load an exported bundle and predict, but cannot train or export. The `wandb` and `mlflow` extras include `training`, so an install that skips default groups still gets the training stack from either of them.
+A plain `uv sync` installs the default groups, `dev` and `training`. `--no-dev` drops only `dev` and keeps `training`; `--no-default-groups` drops both. `--no-default-groups` gives the inference-only install (`uv sync --locked --no-default-groups`), which can load an exported bundle and predict, but cannot train or export. Run code in that env with `uv run --no-default-groups ...` or set `UV_NO_DEFAULT_GROUPS=1`; a plain `uv run` syncs the default groups and reinstalls `training`. The `wandb` and `mlflow` extras include `training`, so an install that skips default groups still gets the training stack from either of them.
 
 | Group | Contents |
 |---|---|
