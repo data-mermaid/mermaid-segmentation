@@ -106,6 +106,47 @@ def test_build_images_exits_1_on_missing_object_and_still_writes(
     assert images["image_id"].tolist() == ["10", "11"]
 
 
+def _pin_source_1(fake_s3) -> None:
+    pin = {"dataset": "coralnet-raw", "version": "v", "manifest_sha256": "sha"}
+    fake_s3.put(_BUCKET, f"{_PREFIX}/s1/_complete.json", json.dumps({"parent": pin}).encode())
+
+
+def _build_images_rc(tmp_path: Path, ann_path: Path) -> int:
+    argv = ["build", "coralnet", "build-images", "--annotations", str(ann_path)]
+    return cli.main([*argv, *_common(tmp_path)])
+
+
+def test_build_images_exits_0_when_only_a_pinned_source_lacks_objects(
+    monkeypatch, fake_s3, make_jpeg, tmp_path, caplog
+):
+    ann_path = tmp_path / "ann.parquet"
+    _write_annotations(ann_path, ["10", "11"])
+    fake_s3.put(_BUCKET, f"{_PREFIX}/s1/images/10.jpg", make_jpeg(800, 600))
+    _pin_source_1(fake_s3)
+    _patch_to_fake_s3(monkeypatch, fake_s3)
+    caplog.set_level("INFO", logger="segdata_etl.datasets.coralnet")
+
+    rc = _build_images_rc(tmp_path, ann_path)
+
+    assert rc == 0
+    assert "not_found in pinned sources: 1" in caplog.text
+    images = pd.read_parquet(tmp_path / "v1" / "coralnet_images_v1.parquet")
+    assert images["header_status"].tolist() == ["ok", "not_found"]
+
+
+def test_build_images_exits_1_on_a_corrupt_image_in_a_pinned_source(
+    monkeypatch, fake_s3, make_jpeg, tmp_path
+):
+    ann_path = tmp_path / "ann.parquet"
+    _write_annotations(ann_path, ["10", "11"])
+    fake_s3.put(_BUCKET, f"{_PREFIX}/s1/images/10.jpg", make_jpeg(800, 600))
+    fake_s3.put(_BUCKET, f"{_PREFIX}/s1/images/11.jpg", b"not an image at all")
+    _pin_source_1(fake_s3)
+    _patch_to_fake_s3(monkeypatch, fake_s3)
+
+    assert _build_images_rc(tmp_path, ann_path) == 1
+
+
 def test_cli_all_pipeline_end_to_end(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path):
     populate(
         fake_s3,
