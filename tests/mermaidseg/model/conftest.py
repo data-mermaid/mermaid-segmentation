@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from typing import Any
 
@@ -59,7 +60,7 @@ def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
             logits.reshape(1, -1, 1, 1).expand(1, -1, 1, 2),
             torch.zeros(1, num_concepts, 1, 2),
         )
-        cfg = minimal_config
+        cfg = copy.deepcopy(minimal_config)
         for key, value in (training or {}).items():
             if isinstance(value, dict):
                 cfg.training[key].update(value)

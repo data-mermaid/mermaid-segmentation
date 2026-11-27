@@ -7,7 +7,7 @@ import io
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -164,15 +164,39 @@ def bundle_dir(
     return export_ckpt(checkpoint, tmp_path_factory.mktemp("out") / "bundle", repo_dir=repo)
 
 
+# One collective as a rank called it: its kind, op or source rank, shape, and dtype.
+_Signature = tuple[str, str, tuple[int, ...], str]
+_Call = tuple[_Signature, torch.Tensor | None]
+
+
+def _same_calls(a: list[list[_Call]], b: list[list[_Call]]) -> bool:
+    for calls_a, calls_b in zip(a, b, strict=True):
+        if [sig for sig, _ in calls_a] != [sig for sig, _ in calls_b]:
+            return False
+        for (_, x), (_, y) in zip(calls_a, calls_b, strict=True):
+            if x is not None and y is not None and not torch.equal(x.nan_to_num(), y.nan_to_num()):
+                return False
+    return True
+
+
 class LockstepRanks:
     """Runs a function once per rank, serially, under faked ``torch.distributed`` collectives.
 
-    No process group is started. The first pass runs each rank with collectives that leave
-    their tensors unchanged and records each rank's inputs. The second pass runs each rank
-    again; there collective ``i`` returns the result of combining every rank's input to its
-    collective ``i``. This holds only for code whose sequence of collectives does not depend
-    on their results, which is true of the helpers in ``mermaidseg.model.distributed``.
+    No process group is started. Each pass runs every rank in turn and records each rank's
+    collective calls. In the next pass, collective ``i`` returns the combination of every
+    rank's input to its collective ``i`` from the previous pass, where all ranks called the
+    same collective there; elsewhere it leaves the tensor unchanged. The first pass therefore
+    sees only this rank's own values. Passes repeat until no rank's calls or inputs change,
+    so ``fn`` runs several times per rank and must not depend on state from earlier runs.
+
+    At that fixed point the ranks must have called the same collectives (kind, op or source,
+    shape, and dtype; barriers included) in the same order, or ``run`` raises
+    ``AssertionError``: a real job would hang or mix up values there. A rank that raises out
+    of a collective (as ``reduce_components`` does on a key mismatch) stops there, as it
+    would in a real job.
     """
+
+    max_passes = 20
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, world_size: int) -> None:
         self.monkeypatch = monkeypatch
@@ -180,38 +204,66 @@ class LockstepRanks:
         self.barriers: list[int] = []
 
     def run(self, fn: Callable[[int], Any]) -> list[Any]:
-        """Return ``fn(rank)`` for each rank, from the replayed second pass."""
-        inputs = [self._pass(rank, fn, None)[1] for rank in range(self.world_size)]
-        self.barriers = [0] * self.world_size
-        return [self._pass(rank, fn, inputs)[0] for rank in range(self.world_size)]
+        """Return ``fn(rank)`` for each rank, from the pass at which the collectives settle."""
+        previous: list[list[_Call]] | None = None
+        for _ in range(self.max_passes):
+            self.barriers = [0] * self.world_size
+            outcomes = [self._pass(rank, fn, previous) for rank in range(self.world_size)]
+            calls = [rank_calls for _, rank_calls in outcomes]
+            if previous is not None and _same_calls(calls, previous):
+                self._check_lockstep(calls)
+                return [result for result, _ in outcomes]
+            previous = calls
+        raise AssertionError(f"collectives did not settle within {self.max_passes} passes")
+
+    def _check_lockstep(self, calls: list[list[_Call]]) -> None:
+        counts = [len(rank_calls) for rank_calls in calls]
+        for index in range(max(counts)):
+            signatures = [
+                rank_calls[index][0] if index < len(rank_calls) else "no collective"
+                for rank_calls in calls
+            ]
+            if len(set(signatures)) > 1:
+                raise AssertionError(f"ranks disagree at collective {index}: {signatures}")
 
     def _pass(
-        self, rank: int, fn: Callable[[int], Any], inputs: list[list[torch.Tensor]] | None
-    ) -> tuple[Any, list[torch.Tensor]]:
-        seen: list[torch.Tensor] = []
+        self, rank: int, fn: Callable[[int], Any], previous: list[list[_Call]] | None
+    ) -> tuple[Any, list[_Call]]:
+        seen: list[_Call] = []
 
-        def collective(tensor: torch.Tensor, combine: Callable[[torch.Tensor], torch.Tensor]):
+        def collective(
+            kind: str,
+            detail: str,
+            tensor: torch.Tensor | None,
+            combine: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        ) -> None:
             index = len(seen)
-            seen.append(tensor.detach().clone())
-            if inputs is not None:
-                tensor.copy_(combine(torch.stack([peer[index] for peer in inputs])))
+            shape = () if tensor is None else tuple(tensor.shape)
+            dtype = "" if tensor is None else str(tensor.dtype)
+            signature: _Signature = (kind, detail, shape, dtype)
+            seen.append((signature, None if tensor is None else tensor.detach().clone()))
+            if tensor is None or combine is None or previous is None:
+                return
+            if all(index < len(c) and c[index][0] == signature for c in previous):
+                peers = [cast(torch.Tensor, c[index][1]) for c in previous]
+                tensor.copy_(combine(torch.stack(peers)))
 
         def all_reduce(tensor: torch.Tensor, op: Any = dist.ReduceOp.SUM, **_: Any) -> None:
             if op == dist.ReduceOp.SUM:
-                collective(tensor, lambda peers: peers.sum(dim=0))
+                collective("all_reduce", "sum", tensor, lambda peers: peers.sum(dim=0))
             elif op == dist.ReduceOp.MAX:
-                collective(tensor, lambda peers: peers.amax(dim=0))
+                collective("all_reduce", "max", tensor, lambda peers: peers.amax(dim=0))
             elif op == dist.ReduceOp.MIN:
-                collective(tensor, lambda peers: peers.amin(dim=0))
+                collective("all_reduce", "min", tensor, lambda peers: peers.amin(dim=0))
             else:
                 raise NotImplementedError(f"LockstepRanks has no all_reduce op {op}")
 
         def broadcast(tensor: torch.Tensor, src: int, **_: Any) -> None:
-            collective(tensor, lambda peers: peers[src])
+            collective("broadcast", f"src={src}", tensor, lambda peers: peers[src])
 
         def barrier(**_: Any) -> None:
-            if inputs is not None:
-                self.barriers[rank] += 1
+            collective("barrier", "", None)
+            self.barriers[rank] += 1
 
         with self.monkeypatch.context() as patched:
             patched.setattr(dist, "is_available", lambda: True)

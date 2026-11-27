@@ -2,8 +2,9 @@
 
 The 768px job splits each 12-image microbatch into four contiguous shards of 3
 and averages the shard losses. These tests lock that split, the loss-component
-reduce, and the non-finite abort. No process group is started: the collectives
-are faked serially by ``LockstepRanks``.
+reduce, and the cross-rank finite flag. No process group is started: the
+collectives are faked serially by ``LockstepRanks``. The window skip that uses
+the flag is tested in ``test_meta.py``.
 """
 
 from __future__ import annotations

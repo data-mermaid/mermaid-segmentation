@@ -826,6 +826,94 @@ def test_ddp_step_is_built_once_and_rebuilt_when_a_part_is_replaced(
     assert meta._get_ddp_step() is rebuilt
 
 
+class _RecordingDDP:
+    """Stand-in for ``DistributedDataParallel``: runs the wrapped step and records each forward
+    as synced or inside ``no_sync``. Gradients are not reduced; ``LockstepRanks`` fakes the
+    collectives that ``train_epoch`` makes itself."""
+
+    def __init__(self, module: torch.nn.Module, **_: object) -> None:
+        self.module = module
+        self.forwards: list[str] = []
+        self._syncing = True
+
+    def __call__(self, *args: object, **kwargs: object) -> torch.Tensor:
+        self.forwards.append("synced" if self._syncing else "no_sync")
+        return self.module(*args, **kwargs)
+
+    @contextlib.contextmanager
+    def no_sync(self):
+        self._syncing = False
+        try:
+            yield
+        finally:
+            self._syncing = True
+
+
+def _two_rank_meta(fixed_meta_model, **training: object):
+    return fixed_meta_model(training={"distributed": True, "world_size": 2, **training})
+
+
+def test_a_non_finite_synced_shard_drops_the_window_on_every_rank(
+    fixed_meta_model, lockstep_ranks, monkeypatch
+):
+    """Rank 1's loss is non-finite on window one's synced microbatch.
+
+    Both ranks drop that window and finish its armed reduction; window two then trains with
+    the same ``no_sync``-then-synced pattern, so only one update is applied.
+    """
+    monkeypatch.setattr(meta_module, "DistributedDataParallel", _RecordingDDP)
+
+    def body(rank: int) -> dict[str, object]:
+        meta = _two_rank_meta(fixed_meta_model, grad_accum_steps=2, iterations_per_train_epoch=2)
+        finished: list[int] = []
+        real_finish = meta._finish_skipped_reduction
+
+        def finish() -> None:
+            finished.append(meta.global_step)
+            real_finish()
+
+        meta._finish_skipped_reduction = finish
+        real_forward = meta.batch_predict_loss
+        calls = 0
+
+        def forward(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            loss, *rest = real_forward(*args, **kwargs)
+            if rank == 1 and calls == 2:
+                loss = loss * float("inf")
+            return (loss, *rest)
+
+        meta.batch_predict_loss = forward
+        meta.train_epoch(_label_batches(1, 1, 1, 1), epoch=0)
+        return {
+            "global_step": meta.global_step,
+            "finished": finished,
+            "forwards": meta._ddp_step.forwards,
+        }
+
+    expected = {"global_step": 1, "finished": [0], "forwards": ["no_sync", "synced"] * 2}
+    assert lockstep_ranks(2).run(body) == [expected, expected]
+
+
+def test_every_rank_joins_the_log_reduction_when_only_rank_zero_has_a_logger(
+    fixed_meta_model, lockstep_ranks, monkeypatch
+):
+    """Rank 1 has no logger but must still join ``reduce_components`` at each log step.
+
+    If it did not, rank 0 would wait in the reduction alone; ``LockstepRanks`` raises instead.
+    """
+    monkeypatch.setattr(meta_module, "DistributedDataParallel", _RecordingDDP)
+
+    def body(rank: int) -> list[int] | None:
+        meta = _two_rank_meta(fixed_meta_model, grad_accum_steps=1, iterations_per_train_epoch=4)
+        run_logger = _RecordingLogger() if rank == 0 else None
+        meta.train_epoch(_label_batches(1, 1, 1, 1), run_logger=run_logger, log_interval=2, epoch=0)
+        return None if run_logger is None else [step for _, step in run_logger.calls]
+
+    assert lockstep_ranks(2).run(body) == [[2, 4], None]
+
+
 class _RecordingMetric:
     def __init__(self) -> None:
         self.preds: list[list[int]] = []
