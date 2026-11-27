@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from mermaidseg.data import PointDataset
 from mermaidseg.data.config import SyncPlan, sync_plan
-from mermaidseg.data.sync import format_summary, run_sync
+from mermaidseg.data.sync import format_summary, run_sync, run_table_sync
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import SplitCoverageError
 from segdata_spec.manifest import Pin
-from segdata_spec.read import open_version
+from segdata_spec.read import open_tables, open_version
 from segdata_spec.resize import ResizeSpec
 from segdata_spec.sync import DatasetSyncResult, SyncResult
 from tests.mermaidseg.data.conftest import (
@@ -54,6 +56,38 @@ def test_run_sync_fills_the_cache_so_a_reader_opens_it(tmp_path: Path) -> None:
     assert len(ds) == 2
     _, mask = ds[0]
     assert mask[2, 3] == 5
+
+
+class _RecordingS3(FakeS3):
+    """A FakeS3 that records each key it serves."""
+
+    def __init__(self, source: FakeS3) -> None:
+        super().__init__(dict(source.objects))
+        self.fetched: list[str] = []
+
+    def get_object(self, Bucket: str, Key: str, IfMatch: str | None = None) -> dict[str, Any]:
+        self.fetched.append(Key)
+        return super().get_object(Bucket, Key, IfMatch)
+
+
+def test_run_table_sync_caches_the_tables_and_fetches_no_image(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    client = _RecordingS3(fake)
+    cache_dir = tmp_path / "synced"
+    result = run_table_sync(_plan(pin, None), cache_dir, client)
+    assert len(open_tables(cache_dir, DATASET_BUCKET, pin).images) == 2
+    assert _image_files(cache_dir) == set()
+    assert not any(k.endswith(".jpg") for k in client.fetched)
+    assert result.datasets["ds"].version == pin.version
+
+
+def test_run_table_sync_fails_on_an_unlisted_group(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    split_file = tmp_path / "splits.csv"
+    split_file.write_text("group,split\ng1,train\n")
+    with pytest.raises(SplitCoverageError, match=r"\['g2'\]"):
+        plan = replace(_plan(pin, None), split_files={"ds": split_file})
+        run_table_sync(plan, tmp_path / "synced", fake)
 
 
 def test_sync_plan_split_file_reaches_the_coverage_guard(tmp_path: Path) -> None:

@@ -88,3 +88,34 @@ def test_workers_flag_sets_max_workers_and_the_pool_size(
 
     assert seen["workers"] == workers
     assert seen["client"][1].max_pool_connections == pool
+
+
+def test_tables_only_runs_the_tables_path_and_not_the_full_sync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "data.yaml"
+    config.write_text(_CONFIG)
+    plan = SyncPlan(pins={}, taxonomy=None, selection={}, split_files={})
+    result = SyncResult(datasets={}, taxonomy=None)
+    seen: dict[str, Any] = {}
+
+    def _run_table_sync(p: SyncPlan, cache: Path, client: Any) -> SyncResult:
+        seen["args"] = (p, cache, client)
+        return result
+
+    def _run_sync(*_: Any) -> SyncResult:
+        raise AssertionError("full sync must not run")
+
+    monkeypatch.setattr(script, "sync_plan", lambda data_cfg, repo_root: plan)
+    monkeypatch.setattr(script, "run_table_sync", _run_table_sync)
+    monkeypatch.setattr(script, "run_sync", _run_sync)
+    monkeypatch.setattr(script.boto3, "client", lambda name, config: "client")
+    monkeypatch.setattr(script, "format_summary", lambda r: f"summary of {r is result}")
+
+    code = script.main(
+        ["--data-config", str(config), "--cache-dir", str(tmp_path / "c"), "--tables-only"]
+    )
+
+    assert code == 0
+    assert seen["args"] == (plan, tmp_path / "c", "client")
+    assert capsys.readouterr().out == "summary of True\n"

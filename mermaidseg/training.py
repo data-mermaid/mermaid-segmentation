@@ -5,6 +5,8 @@ import contextlib
 import copy
 import functools
 import json
+import os
+import shutil
 import signal
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,9 +19,16 @@ from torch.utils.data import ConcatDataset, DataLoader
 from mermaidseg.checkpoint import checkpoint_dir, prune_rolling_checkpoints, write_checkpoint
 from mermaidseg.config import to_plain_dict
 from mermaidseg.data.config import DataSection
-from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
+from mermaidseg.data.factory import build_datasets
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
-from mermaidseg.export import write_sidecar
+from mermaidseg.dataset_reconciliation.label_space import (
+    CLASSES_CSV,
+    CONCEPTS_CSV,
+    META_YAML,
+    SOURCE_LABELS_CSV,
+)
+from mermaidseg.export import require_sidecar_label_space, write_sidecar
+from mermaidseg.inference.bundle import sha256_file
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config, update_config_with_args
 from mermaidseg.lineage import check_same_data, collect_lineage, data_version, inherit_lineage
@@ -153,6 +162,60 @@ def make_shuffled_loader(
         broadcast_state=broadcast_generator_from_rank0,
     )
     return DataLoader(dataset, batch_sampler=sampler, generator=generator, **kwargs)
+
+
+# The run's copy of its label space, inside the run directory.
+_RUN_LABEL_SPACE = "label_space"
+_LABEL_SPACE_FILES = (CLASSES_CSV, CONCEPTS_CSV, SOURCE_LABELS_CSV, META_YAML)
+_ACKNOWLEDGED_CSV = "acknowledged.csv"
+
+
+def _label_space_files(source: Path) -> list[Path]:
+    """The generated files of the label space ``source``, then ``acknowledged.csv`` if present."""
+    files = [source / name for name in _LABEL_SPACE_FILES]
+    acknowledged = source / _ACKNOWLEDGED_CSV
+    return files + [acknowledged] if acknowledged.is_file() else files
+
+
+def _check_label_space_copy(files: list[Path], target: Path) -> None:
+    """Raise ValueError if the existing directory ``target`` differs from the label space ``files``.
+
+    An absent ``target`` passes. Reads only.
+    """
+    if not target.exists():
+        return
+    differing = [
+        p.name
+        for p in files
+        if not (target / p.name).is_file() or sha256_file(target / p.name) != sha256_file(p)
+    ]
+    if differing:
+        raise ValueError(
+            f"the run's label space copy {target} differs from the configured label space "
+            f"in {differing}; remove the copy or restore the label space"
+        )
+
+
+def _copy_label_space(files: list[Path], target: Path) -> dict[str, str]:
+    """Copy the label space ``files`` into the directory ``target``; the sha256 of each copy.
+
+    The copy is staged in ``.{target name}.partial`` beside ``target`` and renamed onto it, so a
+    crash leaves no partial ``target``. An existing ``target`` (a resumed or relaunched run) is
+    kept when its files match ``files``.
+
+    Raises:
+        ValueError: An existing ``target`` differs from ``files``; the message names the files.
+    """
+    _check_label_space_copy(files, target)
+    if target.exists():
+        return {path.name: sha256_file(target / path.name) for path in files}
+    staging = target.with_name(f".{target.name}.partial")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir()
+    for path in files:
+        shutil.copy2(path, staging / path.name)
+    os.replace(staging, target)
+    return {path.name: sha256_file(target / path.name) for path in files}
 
 
 def _assemble_train_datasets(
@@ -323,11 +386,15 @@ def run(args: argparse.Namespace) -> None:
     registry, schema = build_registry(
         dataset_dict,
         cfg.training,
+        section=section,
         schema_config=resolve_repo_path(args.concept_schema_config),
-        benthic_hierarchy=load_benthic_hierarchy(section, cache_dir),
         device=device,
     )
-    print0(dist_ctx, f"Froze concept channels to the datasets of {args.concept_schema_config}")
+    print0(
+        dist_ctx,
+        f"Classes and concept channels from {cfg.training.label_space} "
+        f"({registry.num_target_classes - 1} classes, {schema.num_channels} channels)",
+    )
 
     train_datasets = _assemble_train_datasets(dataset_dict, section)
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
@@ -355,9 +422,14 @@ def run(args: argparse.Namespace) -> None:
     print0(dist_ctx, f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     concept_id2name = schema.channel_id2name()
     run_dir = checkpoint_dir(args.output_dir, cfg.run_name)
+    label_space_sha256: dict[str, str] = {}
+    label_space_files = _label_space_files(resolve_repo_path(cfg.training.label_space))
+    require_sidecar_label_space(run_dir)
+    _check_label_space_copy(label_space_files, run_dir / _RUN_LABEL_SPACE)
     if dist_ctx.is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
         write_resolved_config(cfg_logger, run_dir)
+        label_space_sha256 = _copy_label_space(label_space_files, run_dir / _RUN_LABEL_SPACE)
 
     meta_model = build_meta_model(cfg, registry, device)
     if concept_source_mask is not None:
@@ -384,6 +456,7 @@ def run(args: argparse.Namespace) -> None:
             input_size=cfg.model.input_size,
             mean=IMAGENET_MEAN,
             std=IMAGENET_STD,
+            label_space=label_space_sha256,
             lineage=lineage,
         )
         sidecar = json.loads(sidecar_path.read_text())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import hashlib
 import json
 import multiprocessing
 import os
@@ -30,13 +31,22 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.data.config import DataSection
+from mermaidseg.data.factory import open_dataset_version
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import ConfigDict, build_train_parser, load_section, resolve_repo_path
 from mermaidseg.lineage import data_version
 from mermaidseg.model.distributed import DistContext
-from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
+from mermaidseg.run_setup import (
+    RESUME_CHECKPOINT_KEYS,
+    concept_mapping_path,
+    concept_removal_list,
+    read_checkpoint,
+)
 from mermaidseg.training import (
     _assemble_train_datasets,
+    _check_label_space_copy,
+    _copy_label_space,
     _encoder_config,
     _lineage_params,
     _sigterm_raises_system_exit,
@@ -46,6 +56,7 @@ from mermaidseg.training import (
 )
 from segdata_spec import stage as segdata_stage
 from tests.conftest import cbm_test_config, dinov3_encoder_mocker
+from tests.mermaidseg.conftest import write_test_label_space
 from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
 
 
@@ -94,6 +105,88 @@ class _Indices(Dataset):
         return index
 
 
+def _source_files(tmp_path: Path) -> list[Path]:
+    source = tmp_path / "source"
+    source.mkdir()
+    paths = [source / "classes.csv", source / "meta.yaml"]
+    for path in paths:
+        path.write_text(f"{path.name} A")
+    return paths
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_copy_label_space_returns_the_hashes_of_the_copy(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "run" / "label_space"
+    target.parent.mkdir()
+
+    hashes = _copy_label_space(files, target)
+
+    assert hashes == {"classes.csv": _sha256("classes.csv A"), "meta.yaml": _sha256("meta.yaml A")}
+    assert (target / "meta.yaml").read_text() == "meta.yaml A"
+
+
+def test_copy_label_space_replaces_a_leftover_partial_copy(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    partial = tmp_path / ".label_space.partial"
+    partial.mkdir()
+    (partial / "stale.csv").write_text("stale")
+
+    _copy_label_space(files, target)
+
+    assert sorted(p.name for p in target.iterdir()) == ["classes.csv", "meta.yaml"]
+    assert not partial.exists()
+
+
+def test_copy_label_space_keeps_an_identical_existing_copy(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    _copy_label_space(files, target)
+    marker = target / "classes.csv"
+    mtime = marker.stat().st_mtime_ns
+
+    hashes = _copy_label_space(files, target)
+
+    assert hashes["classes.csv"] == _sha256("classes.csv A")
+    assert marker.stat().st_mtime_ns == mtime
+
+
+def test_copy_label_space_refuses_an_existing_copy_that_differs_naming_the_file(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    _copy_label_space(files, target)
+    files[1].write_text("meta.yaml A2")
+
+    with pytest.raises(ValueError, match=r"\['meta\.yaml'\]"):
+        _copy_label_space(files, target)
+
+
+def test_check_label_space_copy_accepts_an_absent_target(tmp_path):
+    _check_label_space_copy(_source_files(tmp_path), tmp_path / "label_space")
+
+
+def test_check_label_space_copy_accepts_a_matching_copy(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    _copy_label_space(files, target)
+
+    _check_label_space_copy(files, target)
+
+
+def test_check_label_space_copy_refuses_a_differing_copy_naming_the_file(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    _copy_label_space(files, target)
+    (target / "classes.csv").write_text("changed")
+
+    with pytest.raises(ValueError, match=r"\['classes\.csv'\]"):
+        _check_label_space_copy(files, target)
+
+
 def _order(generator: torch.Generator) -> list[int]:
     loader = make_shuffled_loader(
         DistContext(), ConcatDataset([_Indices()]), batch_size=4, generator=generator
@@ -128,6 +221,9 @@ def test_seed_run_reseeds_a_built_loader_to_the_resume_order():
 
 SMOKE_RESOLUTION = 56
 SMOKE_RUN = "smoke"
+_SMOKE_TAXONOMY = pa.table(
+    {"id": ["1", "2"], "name": ["Pocillopora", "Sand"], "parent_id": [None, None]}
+)
 
 
 class _FrozenDatetime(datetime.datetime):
@@ -162,10 +258,7 @@ def _stage_smoke_versions(tmp_path: Path) -> dict[str, Any]:
     cache_dir, _, pin = write_version(
         tmp_path, kind="dense", images=images, labels=labels, name="coralscapes_v2"
     )
-    taxonomy = pa.table(
-        {"id": ["1", "2"], "name": ["Pocillopora", "Sand"], "parent_id": [None, None]}
-    )
-    taxonomy_pin = write_taxonomy(cache_dir, tmp_path, taxonomy)
+    taxonomy_pin = write_taxonomy(cache_dir, tmp_path, _SMOKE_TAXONOMY)
     return {
         "taxonomy": {
             "version": taxonomy_pin.version,
@@ -219,6 +312,31 @@ def _write_section(path: Path, section: str, values: dict[str, Any]) -> str:
     return str(path)
 
 
+def _write_smoke_label_space(tmp_path: Path, training: ConfigDict, data: dict[str, Any]) -> Path:
+    """Write the label space of the smoke data into ``<tmp_path>/label_space``; return its path.
+
+    Its meta matches ``training`` (with the run's concept removal and source mask files).
+    """
+    section = DataSection.model_validate(data)
+    mapping = concept_mapping_path(training)
+    schema_sources = set(
+        load_section(resolve_repo_path("configs/data_config.yaml"), "data")["datasets"]
+    )
+    schema = ConceptSchema.from_csv(
+        mapping, sources=schema_sources, removed_concepts=concept_removal_list(training, mapping)
+    )
+    directory = tmp_path / "label_space"
+    write_test_label_space(
+        directory,
+        {"coralscapes_v2": open_dataset_version(section, "coralscapes_v2", tmp_path / "cache")},
+        training,
+        schema,
+        section,
+        taxonomy=_SMOKE_TAXONOMY,
+    )
+    return directory
+
+
 def _smoke_configs(
     tmp_path: Path, epochs: int = 1, training_overrides: dict[str, Any] | None = None
 ) -> list[str]:
@@ -253,6 +371,7 @@ def _smoke_configs(
     )
     logger = ConfigDict(load_section(resolve_repo_path("configs/logger_config.yaml"), "logger"))
     data = _write_smoke_versions(tmp_path)
+    training.label_space = str(_write_smoke_label_space(tmp_path, training, data))
     return [
         "--training-config",
         _write_section(tmp_path / "training.yaml", "training", _plain(training)),
@@ -362,10 +481,23 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     output_dir = tmp_path / "out"
     cache_dir = tmp_path / "cache"
     sigterm_before = signal.getsignal(signal.SIGTERM)
-    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    args = _smoke_args(tmp_path, output_dir, cache_dir)
+    configured = tmp_path / "label_space"
+    (configured / "acknowledged.csv").write_text("dataset,native_name,kind,reason\n")
+    (configured / ".DS_Store").write_text("leftover")
+    training.run(args)
     assert signal.getsignal(signal.SIGTERM) is sigterm_before
 
     run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
+    copied = {p.name: p.read_bytes() for p in (run_dir / "label_space").iterdir()}
+    assert sorted(copied) == [
+        "acknowledged.csv",
+        "classes.csv",
+        "concepts.csv",
+        "label_space.meta.yaml",
+        "source_labels.csv",
+    ]
+    assert all(data == (configured / name).read_bytes() for name, data in copied.items())
     assert (run_dir / "model_step1").is_file()
     assert not (run_dir / "id2label.json").exists()
     assert not (run_dir / "concept_id2name.json").exists()
@@ -378,6 +510,9 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert sidecar["architecture"]["encoder_config"]["hidden_size"] == 16
     assert sidecar["preprocessing"]["mean"] == list(IMAGENET_MEAN)
     assert sidecar["preprocessing"]["std"] == list(IMAGENET_STD)
+    assert sidecar["label_space"] == {
+        name: hashlib.sha256(data).hexdigest() for name, data in copied.items()
+    }
     resolved = yaml.safe_load((run_dir / "config.yaml").read_text())
     assert resolved["run_name"] == SMOKE_RUN
     assert resolved["model"]["input_size"] == [SMOKE_RESOLUTION, SMOKE_RESOLUTION]

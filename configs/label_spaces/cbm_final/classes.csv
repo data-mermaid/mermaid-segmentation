@@ -1,0 +1,80 @@
+class_id,name,kind,mermaid_benthic_attribute_id
+0,ignore,ignore,
+1,acanthastrea,mermaid,d6511689-4a1f-4c28-b5bc-1eaf02b5dfbc
+2,acropora,mermaid,050c0689-0b01-4a6c-afbf-a5d3ca39c310
+3,agaricia agaricites,mermaid,da503ac3-1c43-49d4-aafa-a7f8c140dec7
+4,algae covered substrate,extra,
+5,alveopora,mermaid,6a813c81-58a1-4fb4-ace8-b62e7c4183ae
+6,astrea,mermaid,63f29fbf-76db-4a6b-9559-dfb7277ba6b5
+7,astreopora,mermaid,22e2002e-0d55-4a43-88b3-caf04dbf874f
+8,background,extra,
+9,bare substrate,mermaid,d9086647-3a82-4634-97bc-6e10347af39b
+10,coscinaraea,mermaid,53b51b8f-3d3d-426a-9316-5057cc57d7f9
+11,crustose coralline algae,mermaid,f4df7abd-3d51-42fb-8cab-5102b95fad8e
+12,cyanobacteria,mermaid,3218e7ea-8827-4262-96a1-104e5ec50ffc
+13,cyphastrea,mermaid,88d79d42-3fef-48ab-887e-dae60ae9072a
+14,dark,extra,
+15,dictyota,mermaid,987019bd-142e-4333-993a-a820030360a9
+16,diploastrea,mermaid,dcbcb1cf-af35-4755-8023-6d1b6f4fd8cf
+17,dipsastraea,mermaid,d41cc126-63b8-4fa7-88d6-9b9b7648ba80
+18,echinophyllia,mermaid,4111c390-2319-4f7a-a65c-76e9e37c8a45
+19,echinopora,mermaid,c1e97c98-de9f-4b05-963f-0276784fca2d
+20,euphyllia,mermaid,8b706c7f-fcf7-4d03-b271-58a06d77fbb4
+21,favia,mermaid,656169f6-2344-423c-845d-9d4c1d14d69d
+22,favites,mermaid,6d63693c-592d-4da5-88d8-7125832cbd76
+23,fish,extra,
+24,fungia,mermaid,c3807ef9-6a47-429f-a63b-fe5e131e1316
+25,galaxea,mermaid,c91dee81-7cb4-410b-bfce-52d98b67732f
+26,gardineroseris,mermaid,04b943e8-610c-4158-b4c3-9dd884ab9376
+27,goniastrea,mermaid,edbc586e-8499-4d31-9025-d15f2648f1fb
+28,goniopora,mermaid,5f926f95-6cb8-46a5-9ff4-6777d33964e0
+29,gorgonian,mermaid,3aa2e125-3f74-4f91-94f6-fd030319f2b1
+30,halimeda,mermaid,51558178-d2da-44ed-905b-db6976f6aa76
+31,hard coral,mermaid,350e9eb4-5e6b-48f5-aeb8-0bfdf023bf1c
+32,heliopora,mermaid,0f18ea18-0e25-42e8-bb96-f4be5f144075
+33,human,extra,
+34,human-made structure,extra,
+35,hydnophora,mermaid,af6c43fd-0f41-4103-8ad5-8d1191bd4c9f
+36,isopora,mermaid,8672775c-9167-42bd-b885-f1807f9ac9a4
+37,leptastrea,mermaid,70407def-b048-49d4-9a43-3eb0021f7b68
+38,leptoria,mermaid,23a1cb26-5cff-49fe-923d-cecd75de7547
+39,leptoseris,mermaid,8da49adb-eb3c-4486-a538-42114813b58e
+40,lobophora,mermaid,d63b491c-adc7-4869-aa6c-6c2a784830d5
+41,lobophyllia,mermaid,e3ea5520-1e7f-41c6-a141-6c27327b56a1
+42,macroalgae,mermaid,09226989-50e7-4c40-bd36-5bcef32ee7a1
+43,madracis,mermaid,223860e9-b7b5-412c-bcab-0f16d43928fb
+44,merulina,mermaid,cdee93cc-5434-460e-b1e8-78b4164ab266
+45,millepora,mermaid,995f68d0-2dec-4e22-916a-cf1f44c1663b
+46,montastraea,mermaid,e2a62f32-1424-44fa-ba52-fbdd4e9ee6f0
+47,montastraea cavernosa,mermaid,e8edb2ee-0fc3-445d-8617-b660313c9606
+48,montipora,mermaid,4acaa53b-7ec9-4abd-bb4a-1d96b6224c0d
+49,mycedium,mermaid,f6f3b5cf-7bc6-483a-8ef7-0c41a6672be2
+50,orbicella annularis,mermaid,9be51ec6-7400-46c7-bdfe-c56eac991cb7
+51,orbicella faveolata,mermaid,3f7a3174-94b4-4e50-b4d6-f80724bd0983
+52,pachyseris,mermaid,4d493a0d-6c7e-4f5f-8a71-06bac94a8c53
+53,padina,mermaid,053de64e-a2b9-40b6-b566-cf3a5e95e267
+54,pavona,mermaid,108ff93e-9191-42bf-b502-3a437407b22a
+55,pectinia,mermaid,602dc038-8e99-4c55-85e4-f3141ddc0041
+56,platygyra,mermaid,9cd8176f-b5b4-474e-87bc-f2744338fe00
+57,pocillopora,mermaid,da1dfe78-f982-4b09-81ae-b38d328bd85e
+58,porites,mermaid,2b55697f-f26e-433e-9070-f1fe9748bf7b
+59,porites astreoides,mermaid,e288a94f-7117-4a54-9558-7d71144ccdc1
+60,psammocora,mermaid,748cb267-f47c-4920-b5b0-39109ade448f
+61,rock,mermaid,7b351732-5ec1-43c5-b668-15ed24e33aed
+62,rubble,mermaid,ed2332ed-0762-45fb-87a3-d315e218faf1
+63,sand,mermaid,b76bca12-884b-4404-bb9f-97d505b0fe58
+64,sargassum,mermaid,e1272775-11a6-4f60-9054-956567a961df
+65,sea urchin,mermaid,f7980725-60b3-47c9-abd2-0a006ea30061
+66,seagrass,mermaid,5f1f7956-bc21-4bfd-a409-9740e614b2ac
+67,seriatopora,mermaid,316eeb46-e24d-449b-a0b7-c0c8c0b803e6
+68,siderastrea siderea,mermaid,8c98a043-b8e4-4d55-8ad2-fbdfcf455af5
+69,soft coral,mermaid,30a987e9-b420-4db6-a83a-a1f7cabd14fb
+70,sponge,mermaid,6b9fdd82-685f-4f21-8fa3-883e06be2c30
+71,stylophora,mermaid,c3ffe279-fb7b-499e-8fb8-b26403c80710
+72,symphyllia,mermaid,f87eae02-9123-4931-98a0-8d635670a46b
+73,transect tools,extra,
+74,tridacna giant clam,mermaid,1aa38424-a8ab-4c85-b463-10606426e66e
+75,turbinaria-algae,mermaid,6439edbc-f43a-485f-81b3-e64246c4fc90
+76,turbinaria-coral,mermaid,588f63cd-ffd2-4c38-8684-1208109165eb
+77,turf algae,mermaid,20090bf4-868e-431b-974c-ab9be5bbdb5f
+78,zoanthid,mermaid,1c0af377-dc41-4025-bc0a-917405f2a56c

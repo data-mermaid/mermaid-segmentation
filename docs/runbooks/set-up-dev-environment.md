@@ -117,9 +117,10 @@ uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 
 The sync downloads every pinned dataset version. The final-run data config needs up to the 1500 GB that the SageMaker volume provides, and AWS credentials that read `mermaid-ic-datasets`. See [Get the training datasets](training-datasets.md).
 
-Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `outputs`. The run writes two files there:
+Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `outputs`. The run writes these there:
 
 - `config.yaml`: the resolved config, as a record of the settings the run used. Do not pass it back in as a run config.
+- `label_space/`: a copy of the label space that `training.label_space` names. `model.json` lists the sha256 of each file under `label_space`.
 - `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version (each dataset's version, manifest sha256, resize spec and dropped-image count, and the taxonomy pin), resolved config, and the torch, transformers and peft versions). A resumed or warm-started run also records the source checkpoint's git SHA, dirty flag and data version under `parent`. `parent` is absent on a fresh run and never `null`: a checkpoint without lineage is refused. A resume (`--checkpoint`) also stops with an error if a dataset or taxonomy pin differs from the checkpoint's; `--init-weights` may change the data.
 
 The config flags (`--training-config`, `--model-config`, `--data-config`, `--concept-schema-config`, `--logger-config`) take a path relative to the repo root, or an absolute path. The defaults are in `configs/`. `--resolution` sets the train crop size and the model input size. Run `scripts/train.py --help` for resume (`--checkpoint`), init (`--init-weights`) and the other flags.

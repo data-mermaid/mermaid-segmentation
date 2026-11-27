@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -191,7 +192,13 @@ class _Harness:
             return self.datasets
 
         monkeypatch.setattr(val_loss, "build_datasets", build_datasets)
-        monkeypatch.setattr(val_loss, "build_registry", lambda *_a, **_k: (registry, schema))
+        self.registry_kwargs: dict = {}
+
+        def build_registry(*_a, **kwargs):
+            self.registry_kwargs = kwargs
+            return registry, schema
+
+        monkeypatch.setattr(val_loss, "build_registry", build_registry)
         monkeypatch.setattr(val_loss, "build_loss", build_loss)
         self.bundle = SimpleNamespace(
             id2label={0: "ignore", 1: "sand"},
@@ -199,9 +206,13 @@ class _Harness:
             input_size=(8, 8),
             path="bundle/path",
             model=_EchoModel(),
+            metadata={"label_space": {}},
         )
 
-    def run(self, tmp_path, **kwargs):
+    def run(self, tmp_path, *, label_space: bool = True, **kwargs):
+        self.bundle.path = tmp_path / "bundle"
+        if label_space:
+            (self.bundle.path / "label_space").mkdir(parents=True, exist_ok=True)
         return evaluate_val_loss(
             bundle=self.bundle,  # type: ignore[arg-type]
             section=kwargs.pop("section", _VAL_SECTION),
@@ -300,7 +311,7 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
     assert harness.build_args["image_ids"] == {("ds", "val"): ["i1"]}
     assert result["settings"] == {
         "split": "val",
-        "bundle": "bundle/path",
+        "bundle": str(tmp_path / "bundle"),
         "resolution": 8,
         "max_images_per_dataset": 1000,
         "per_pixel_loss_weight": 0.25,
@@ -309,6 +320,51 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
         "concept_source_mask": None,
     }
     assert (tmp_path / "scored" / "metrics.json").is_file()
+
+
+def test_val_loss_reads_the_label_space_of_the_bundle_not_the_repo_path_of_its_config(
+    tmp_path, monkeypatch
+):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    harness.cfg.training.label_space = "configs/label_spaces/gone"
+
+    harness.run(tmp_path)
+
+    assert harness.registry_kwargs["label_space_dir"] == tmp_path / "bundle" / "label_space"
+
+
+def test_val_loss_refuses_a_bundle_without_a_label_space(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+
+    with pytest.raises(ValueError) as excinfo:
+        harness.run(tmp_path, label_space=False)
+
+    assert str(excinfo.value) == (
+        f"bundle {tmp_path / 'bundle'} has no label_space/; it was exported before label "
+        "spaces existed, so re-export it from a retrained run"
+    )
+
+
+def test_val_loss_refuses_a_bundle_whose_label_space_was_edited_after_export(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    space = tmp_path / "bundle" / "label_space"
+    space.mkdir(parents=True)
+    (space / "classes.csv").write_text("exported\n")
+    harness.bundle.metadata = {
+        "label_space": {"classes.csv": hashlib.sha256(b"exported\n").hexdigest()}
+    }
+    (space / "classes.csv").write_text("edited\n")
+
+    with pytest.raises(ValueError, match="differs from the sha256"):
+        harness.run(tmp_path)
+
+
+def test_val_loss_refuses_a_bundle_whose_metadata_has_no_label_space(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    harness.bundle.metadata = {}
+
+    with pytest.raises(ValueError, match="exported before label spaces existed"):
+        harness.run(tmp_path)
 
 
 def _cbm_scoring_config(schema) -> ConfigDict:
@@ -352,9 +408,11 @@ def _run_real_val_loss(monkeypatch, tmp_path, schema, model, dataset, **kwargs):
         id2label={0: "ignore", **registry.target_id2label},
         concept_id2name=schema.channel_id2name(),
         input_size=tuple(IMAGE_SIZE),
-        path="bundle/path",
+        path=tmp_path / "bundle",
         model=model,
+        metadata={"label_space": {}},
     )
+    (tmp_path / "bundle" / "label_space").mkdir(parents=True)
     result = evaluate_val_loss(
         bundle=bundle,  # type: ignore[arg-type]
         section=_VAL_SECTION,
@@ -401,7 +459,13 @@ def test_val_loss_with_the_source_mask_zeroes_the_masked_concept_targets(
     mask = SimpleNamespace(
         keep=concept_keep(cbm_schema), path="mask.csv", num_masked=1, dataset="coralnet"
     )
-    monkeypatch.setattr(val_loss, "load_run_concept_source_mask", lambda *_a: mask)
+    mask_kwargs: dict = {}
+
+    def load_mask(*_args, **kwargs):
+        mask_kwargs.update(kwargs)
+        return mask
+
+    monkeypatch.setattr(val_loss, "load_run_concept_source_mask", load_mask)
     monkeypatch.setattr(
         val_loss,
         "attach_source_rows",
@@ -424,3 +488,4 @@ def test_val_loss_with_the_source_mask_zeroes_the_masked_concept_targets(
     assert (targets[0, bleached] == 0).all()
     assert (targets[1, bleached] == 1).all()
     assert result["settings"]["concept_source_mask"] == "mask.csv"
+    assert mask_kwargs["label_space_dir"] == tmp_path / "bundle" / "label_space"
