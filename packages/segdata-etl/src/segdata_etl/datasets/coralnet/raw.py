@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -63,7 +64,7 @@ from segdata_spec.sync import sync_tables
 from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
 from .io import CsvReader, make_csv_reader_s3
-from .markers import pinned_source_ids
+from .markers import pinned_parents
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +106,28 @@ class PinnedImageLost(ValueError):
     """A pinned source has an image that is in neither the scrape bucket nor the parent."""
 
 
-def _pinned_loss(kind: str, image_ids: list[str], source_ids: list[int]) -> PinnedImageLost:
-    """The error for ``image_ids`` of one ``kind`` lost from pinned ``source_ids``."""
+def _marker_records(source_id: int, parent: Mapping[str, Any]) -> str:
+    """One lost source's marker parent, e.g. ``s12 marker records coralnet-raw@v1 (...)``."""
+    return (
+        f"s{source_id} marker records {parent['dataset']}@{parent['version']} "
+        f"(manifest_sha256 {parent['manifest_sha256']})"
+    )
+
+
+def _pinned_loss(
+    kind: str,
+    image_ids: list[str],
+    source_ids: list[int],
+    pinned: Mapping[int, Mapping[str, Any]],
+) -> PinnedImageLost:
+    """The error for ``image_ids`` of one ``kind`` lost from pinned ``source_ids``.
+
+    The message names the parent each lost source's marker recorded.
+    """
+    records = "; ".join(_marker_records(sid, pinned[sid]) for sid in sorted(source_ids))
     return PinnedImageLost(
         f"{kind}: {len(image_ids)} images in pinned sources {source_ids} are in neither the "
-        f"scrape bucket nor the parent version; first 10: {image_ids[:10]}"
+        f"scrape bucket nor the parent version; first 10: {image_ids[:10]}; {records}"
     )
 
 
@@ -157,7 +175,9 @@ def labels_table(id2name: dict[str, Any]) -> pa.Table:
 
 
 def _select_images(
-    build: BuildTables, parent_ids: frozenset[str], pinned_sources: frozenset[int]
+    build: BuildTables,
+    parent_ids: frozenset[str],
+    pinned_sources: Mapping[int, Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[str]]:
     """Return the annotated images with dimensions, their annotations, the dropped counts and carries.
 
@@ -178,13 +198,14 @@ def _select_images(
     lost = (status == _NOT_FOUND) & images["image_id"].astype(str).isin(parent_ids) & annotated
     with_dims = images[has_dims]
     kept = with_dims[with_dims["image_id"].isin(annotations["image_id"][with_image])]
-    in_pinned = (status == _NOT_FOUND) & annotated & images["source_id"].isin(pinned_sources)
+    in_pinned = (status == _NOT_FOUND) & annotated & images["source_id"].isin(list(pinned_sources))
     gone = in_pinned & ~lost
     if gone.any():
         raise _pinned_loss(
             _NOT_FOUND,
             sorted(images["image_id"][gone].astype(str)),
             sorted(int(sid) for sid in images["source_id"][gone].unique()),
+            pinned_sources,
         )
     carried = sorted(images["image_id"][lost].astype(str))
     wanted = annotations["image_id"].isin(kept["image_id"]) | annotations["image_id"].isin(carried)
@@ -236,7 +257,7 @@ def _parent_ids(parent_images: pa.Table | None) -> frozenset[str]:
 def _split_carried(
     missing: list[str],
     held: frozenset[str],
-    pinned_sources: frozenset[int],
+    pinned_sources: Mapping[int, Mapping[str, Any]],
     source_of: Mapping[str, int],
 ) -> tuple[list[str], list[str]]:
     """Split the ids absent from the listing into those the parent holds and those it lacks.
@@ -250,7 +271,9 @@ def _split_carried(
     lacking = [i for i in missing if i not in held]
     lost = [i for i in lacking if source_of[i] in pinned_sources]
     if lost:
-        raise _pinned_loss(_SOURCE_MISSING, lost, sorted({source_of[i] for i in lost}))
+        raise _pinned_loss(
+            _SOURCE_MISSING, lost, sorted({source_of[i] for i in lost}), pinned_sources
+        )
     return carried, lacking
 
 
@@ -580,7 +603,7 @@ def _select_rows(
     workers: int,
     csv_reader: CsvReader | None,
     parent_images: pa.Table | None,
-    pinned_sources: frozenset[int],
+    pinned_sources: Mapping[int, Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[int], list[str]]:
     """Return the kept rows with source fingerprint and name, their points, drops, unlisted, carried.
 
@@ -641,7 +664,7 @@ def build_raw(
     workers: int,
     checkpoint: Path,
     parent_images: pa.Table | None = None,
-    pinned_sources: frozenset[int] = frozenset(),
+    pinned_sources: Mapping[int, Mapping[str, Any]] = MappingProxyType({}),
     csv_reader: CsvReader | None = None,
 ) -> RawTables:
     """Probe the kept originals and return the ``coralnet-raw`` tables.
@@ -811,7 +834,7 @@ def run_raw(args: argparse.Namespace) -> int:
     source_bucket, prefix = _source_bucket(), get_prefix()
     client = make_s3_client(workers=workers)
     build = read_build(client, source_bucket, args.build_run, args.source_ids)
-    pinned = pinned_source_ids(
+    pinned = pinned_parents(
         client,
         source_bucket,
         prefix,

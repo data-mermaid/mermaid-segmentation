@@ -7,7 +7,7 @@ import json
 import pytest
 from s3_fake import FakeS3
 
-from segdata_etl.datasets.coralnet.markers import pinned_source_ids
+from segdata_etl.datasets.coralnet.markers import pinned_parents
 
 BUCKET = "src"
 PREFIX = "coralnet-public-images"
@@ -23,9 +23,9 @@ def test_only_a_source_whose_marker_has_a_parent_key_is_pinned() -> None:
     s3.put(BUCKET, _marker_key(1), json.dumps({"parent": PIN}).encode())
     s3.put(BUCKET, _marker_key(2), json.dumps({"count": 5}).encode())
 
-    pinned = pinned_source_ids(s3, BUCKET, PREFIX, [1, 2, 3], workers=2)
+    pinned = pinned_parents(s3, BUCKET, PREFIX, [1, 2, 3], workers=2)
 
-    assert pinned == frozenset({1})
+    assert pinned == {1: PIN}
 
 
 def test_a_malformed_marker_raises_naming_its_source() -> None:
@@ -34,4 +34,23 @@ def test_a_malformed_marker_raises_naming_its_source() -> None:
     s3.put(BUCKET, _marker_key(7), b"{not json")
 
     with pytest.raises(RuntimeError, match="source 7"):
-        pinned_source_ids(s3, BUCKET, PREFIX, [1, 7], workers=1)
+        pinned_parents(s3, BUCKET, PREFIX, [1, 7], workers=1)
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        None,
+        "v1",
+        {},
+        False,
+        {"dataset": "coralnet-raw", "version": "v1"},
+        {"dataset": "coralnet-raw", "version": 1, "manifest_sha256": "abc"},
+    ],
+)
+def test_a_malformed_parent_raises_naming_its_source(parent: object) -> None:
+    s3 = FakeS3()
+    s3.put(BUCKET, _marker_key(7), json.dumps({"parent": parent}).encode())
+
+    with pytest.raises(RuntimeError, match=r"source 7.*malformed parent"):
+        pinned_parents(s3, BUCKET, PREFIX, [7], workers=1)
