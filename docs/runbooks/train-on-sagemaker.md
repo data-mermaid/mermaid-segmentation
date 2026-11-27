@@ -131,4 +131,4 @@ Checkpoints sync to:
 s3://$SM_STAGING_BUCKET/runs/<job>/checkpoints/model_checkpoints/<run>/
 ```
 
-The directory holds `model_step*`, `model_final`, `model.json` and `config.yaml`. Download the checkpoint you want together with `model.json`, then [export it](export-a-model.md). The `git_sha` in `model.json` and the saved `config.yaml` record what the job ran.
+The directory holds `model_step*`, `model_final`, `model.json`, `config.yaml` and the `label_space/` copy. Download the checkpoint you want together with `model.json` and `label_space/`, then [export it](export-a-model.md). The `git_sha` in `model.json` and the saved `config.yaml` record what the job ran.
