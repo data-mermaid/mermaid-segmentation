@@ -482,7 +482,7 @@ class AnnotationExporter:
         """Export the annotations of ``page_refs``, the images on browse page ``page_num``.
 
         Uses a worker-local, independently-logged-in session
-        (:meth:`_get_export_session`) so concurrent workers don't trample each other's
+        (:meth:`export_session`) so concurrent workers don't trample each other's
         server-side Django session state.
 
         Sends ``image_select_type=selected`` plus ``image_id_list`` (underscore-
@@ -503,7 +503,7 @@ class AnnotationExporter:
             **_EXPORT_OPTIONS,
         }
         chunk_df = self._export_validated(
-            self.auth._get_export_session(),
+            self.auth.export_session(),
             source_id,
             browse_page_url(self.auth.CORALNET_URL, source_id, page_num),
             form,
@@ -566,7 +566,7 @@ class AnnotationExporter:
             with attempt:
                 try:
                     if expired:
-                        self.auth._relogin(session)
+                        self.auth.relogin(session)
                         expired = False
                     timeout = min(
                         _EXPORT_PREP_TIMEOUT_MAX,

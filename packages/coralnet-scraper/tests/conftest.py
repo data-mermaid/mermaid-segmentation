@@ -353,7 +353,7 @@ def paginated_downloader(fake_s3) -> CoralNetDownloader:
     Production gives each worker its own logged-in ``requests.Session`` (see
     :meth:`CoralNetSession._new_logged_in_session`) to avoid the CoralNet
     server-side session race; that behaviour is exercised by
-    ``test_get_export_session_creates_independent_logged_in_session_per_thread``.
+    ``testexport_session_creates_independent_logged_in_session_per_thread``.
     """
     dl = CoralNetDownloader("u", "p", s3=fake_s3)
     dl.auth.logged_in = True

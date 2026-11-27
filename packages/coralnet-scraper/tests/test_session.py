@@ -26,13 +26,13 @@ def test_thread_sessions_are_not_shared_between_downloaders():
     first.session.cookies.set("sessionid", "first-id")
     second.session.cookies.set("sessionid", "second-id")
 
-    first_session = first.auth._get_thread_session()
-    second_session = second.auth._get_thread_session()
+    first_session = first.auth.thread_session()
+    second_session = second.auth.thread_session()
 
     assert first_session.cookies.get("sessionid") == "first-id"
     assert second_session.cookies.get("sessionid") == "second-id"
     assert first_session is not second_session
-    assert first.auth._get_thread_session() is first_session
+    assert first.auth.thread_session() is first_session
 
 
 def test_export_sessions_are_not_shared_between_downloaders():
@@ -44,11 +44,11 @@ def test_export_sessions_are_not_shared_between_downloaders():
     first.auth._new_logged_in_session = lambda: first_sentinel  # type: ignore[method-assign]
     second.auth._new_logged_in_session = lambda: second_sentinel  # type: ignore[method-assign]
 
-    assert first.auth._get_export_session() is first_sentinel
-    assert second.auth._get_export_session() is second_sentinel
+    assert first.auth.export_session() is first_sentinel
+    assert second.auth.export_session() is second_sentinel
 
 
-def test_get_export_session_creates_independent_logged_in_session_per_thread():
+def testexport_session_creates_independent_logged_in_session_per_thread():
     """Each export worker thread gets its own ``requests.Session`` from a fresh login.
 
     Regression guard for the CoralNet server-side session race: if two threads
@@ -65,13 +65,13 @@ def test_get_export_session_creates_independent_logged_in_session_per_thread():
 
     dl.auth._new_logged_in_session = fake_new_session  # type: ignore[method-assign]
 
-    # Each worker calls _get_export_session twice; both calls must return the
+    # Each worker calls export_session twice; both calls must return the
     # same Session (cached per-thread), but distinct threads must get distinct
     # Sessions (independent login).
     seen: dict[int, tuple[requests.Session, requests.Session]] = {}
 
     def worker(thread_id: int) -> None:
-        seen[thread_id] = (dl.auth._get_export_session(), dl.auth._get_export_session())
+        seen[thread_id] = (dl.auth.export_session(), dl.auth.export_session())
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
     for t in threads:

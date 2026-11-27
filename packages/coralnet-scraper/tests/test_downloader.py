@@ -73,7 +73,7 @@ def test_download_source_skips_a_source_without_confirmed_images_or_images(
     dl = CoralNetDownloader("u", "p", s3=fake_s3)
     dl.auth.logged_in = True
     with (
-        patch.object(dl.auth, "_get_source_overview_html", return_value=overview),
+        patch.object(dl.auth, "source_overview_html", return_value=overview),
         patch.object(dl, "download_metadata") as mock_meta,
         patch.object(dl.walker, "walk_source") as mock_walk,
     ):
@@ -120,7 +120,7 @@ def _failing_step_downloader(
     }
     for name, mock in mocks.items():
         setattr(owners[name], name, mock)
-    dl.auth._get_source_overview_html = MagicMock(  # type: ignore[method-assign]
+    dl.auth.source_overview_html = MagicMock(  # type: ignore[method-assign]
         return_value=_fixture("source_ok.html"),
         **({"side_effect": overrides["overview"]} if "overview" in overrides else {}),
     )
@@ -137,7 +137,7 @@ def test_download_source_returns_login_failed_when_login_fails(fake_s3):
 
     assert res.ok is False
     assert res.errors == ["login failed"]
-    dl.auth._get_source_overview_html.assert_not_called()  # type: ignore[attr-defined]
+    dl.auth.source_overview_html.assert_not_called()  # type: ignore[attr-defined]
 
 
 def test_download_source_reports_overview_fetch_failure(fake_s3):
@@ -152,7 +152,7 @@ def test_download_source_reports_overview_fetch_failure(fake_s3):
 
 def test_download_source_fails_when_the_overview_has_no_image_count(fake_s3):
     dl, mocks = _failing_step_downloader(fake_s3)
-    dl.auth._get_source_overview_html.return_value = "<html><body>No table</body></html>"  # type: ignore[attr-defined]
+    dl.auth.source_overview_html.return_value = "<html><body>No table</body></html>"  # type: ignore[attr-defined]
 
     res = dl.download_source(1, bucket_name="b", s3_prefix="p")
 

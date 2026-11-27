@@ -140,7 +140,7 @@ class ImageFetcher:
         Raises:
             ValueError: If the page has no original image, e.g. a private source.
         """
-        session = self.auth._get_thread_session()
+        session = self.auth.thread_session()
         url = urllib.parse.urljoin(self.auth.CORALNET_URL + "/", rel)
         r = session.get(url, timeout=_PAGE_GET_TIMEOUT)
         r.raise_for_status()
@@ -290,7 +290,7 @@ class ImageFetcher:
             skipped=outcomes["skipped"],
         )
 
-    def _download_missing_images(
+    def download_missing_images(
         self, refs: list[ImageRef], source_id: int, bucket_name: str, s3_prefix: str
     ) -> ImageFailures:
         """Download every image of ``refs`` that has no non-empty object on S3 yet.

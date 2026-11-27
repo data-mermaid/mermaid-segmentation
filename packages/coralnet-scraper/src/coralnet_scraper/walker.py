@@ -15,10 +15,10 @@ from coralnet_scraper import s3_io
 from coralnet_scraper.errors import (
     ContentError,
     SessionExpired,
+    WalkCountMismatch,
     WalkIncomplete,
     _retrying,
     _TotalChanged,
-    _WalkCountMismatch,
 )
 from coralnet_scraper.session import _PAGE_EXPORT_TIMEOUT, CoralNetSession, browse_page_url
 
@@ -180,7 +180,7 @@ class SourceWalker:
         for attempt in _retrying(_WALK_ATTEMPTS):
             with attempt:
                 if expired:
-                    self.auth._relogin(self.auth.session)
+                    self.auth.relogin(self.auth.session)
                     expired = False
                 try:
                     refs = self._walk_once(source_id, bucket_name, s3_prefix, expected)
@@ -253,7 +253,7 @@ class SourceWalker:
             ContentError: If the overview lists no image count.
             _TotalChanged: If the count is no longer ``expected``; ``_partial/`` is discarded
                 and a fresh state for the new count is saved.
-            _WalkCountMismatch: If ``found`` differs from the count; ``walk.json`` is discarded.
+            WalkCountMismatch: If ``found`` differs from the count; ``walk.json`` is discarded.
         """
         total = self.auth.fetch_total_images(source_id)
         if total is None:
@@ -264,4 +264,4 @@ class SourceWalker:
         if found != expected:
             key = s3_io.partial_key(s3_prefix, source_id, _WALK_FILE)
             self.s3.delete_object(Bucket=bucket_name, Key=key)
-            raise _WalkCountMismatch(found, expected)
+            raise WalkCountMismatch(found, expected)

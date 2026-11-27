@@ -63,8 +63,12 @@ class CoralNetSession:
         """Return the URL of a source's overview page."""
         return f"{self.CORALNET_URL}/source/{source_id}/"
 
-    def _get_source_overview_html(self, source_id: int) -> str:
-        """Fetch the overview page of a source and return its HTML."""
+    def source_overview_html(self, source_id: int) -> str:
+        """Return the HTML of a source's overview page, fetched with the main session.
+
+        Raises:
+            requests.HTTPError: On any non-2xx response, including 403 and 404.
+        """
         url = self._source_main_url(source_id)
         response = self.session.get(url, timeout=_PAGE_GET_TIMEOUT)
         response.raise_for_status()
@@ -104,8 +108,15 @@ class CoralNetSession:
         if "Sign out" not in login_response.text:
             raise RuntimeError("Login failed - the result page shows no signed-in user")
 
-    def _relogin(self, session: requests.Session) -> None:
-        """Log ``session`` in again after CoralNet treated it as logged out."""
+    def relogin(self, session: requests.Session) -> None:
+        """Log ``session`` in again after CoralNet treated it as logged out.
+
+        Clears the session's cookies and runs the login flow, which fetches a new
+        CSRF token. Holds the login lock, so concurrent calls log in one at a time.
+
+        Raises:
+            RuntimeError: If the login page has no CSRF token or the login fails.
+        """
         with self._login_lock:
             logger.warning("CoralNet session expired; logging in again")
             session.cookies.clear()
@@ -126,13 +137,16 @@ class CoralNetSession:
             logger.exception("CoralNet login failed for %s", self.username)
             return False
 
-    def _get_thread_session(self) -> requests.Session:
-        """Per-thread session with cookies copied from the main session.
+    def thread_session(self) -> requests.Session:
+        """Return this thread's own session, with cookies copied from the main session.
+
+        The session is created on first call and reused for later calls from the same
+        thread; the cookies are copied once, at creation.
 
         Safe for read-only requests (e.g. image URL resolution) where threads only
         consume server state. NOT safe for ``export_prep``-style endpoints that write to
         the Django server-side session keyed on ``sessionid`` -- use
-        :meth:`_get_export_session` for those.
+        :meth:`export_session` for those.
         """
         s = getattr(self._thread_local, "session", None)
         if s is None:
@@ -146,7 +160,7 @@ class CoralNetSession:
 
         Each call produces an isolated cookie jar (own ``sessionid``), so the returned
         session corresponds to its own server-side Django session. Used by
-        :meth:`_get_export_session` to give each phase-2 worker its own session and
+        :meth:`export_session` to give each phase-2 worker its own session and
         avoid the ``export_prep`` / ``serve`` race that happens when multiple threads
         share one Django sessionid.
         """
@@ -154,7 +168,7 @@ class CoralNetSession:
         self._perform_login(session)
         return session
 
-    def _get_export_session(self) -> requests.Session:
+    def export_session(self) -> requests.Session:
         """Return this worker thread's dedicated, independently-logged-in session.
 
         Lazy: the first call from a thread does one login round-trip (~1s),
@@ -173,7 +187,7 @@ class CoralNetSession:
 
     def fetch_total_images(self, source_id: int) -> int | None:
         """Return the image count on the source's overview page, or None when it lists none."""
-        return parse_image_status_counts(self._get_source_overview_html(source_id)).total_images
+        return parse_image_status_counts(self.source_overview_html(source_id)).total_images
 
 
 def browse_page_url(coralnet_url: str, source_id: int, page_num: int) -> str:

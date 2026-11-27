@@ -22,7 +22,7 @@ from coralnet_scraper.config import (
     validate_requests_per_second,
     validate_workers,
 )
-from coralnet_scraper.errors import _WalkCountMismatch
+from coralnet_scraper.errors import WalkCountMismatch
 from coralnet_scraper.exporter import AnnotationExporter, _upload_csv
 from coralnet_scraper.images import ImageFetcher
 from coralnet_scraper.models import DownloadResult, ImageFailures
@@ -176,7 +176,7 @@ class CoralNetDownloader:
             html = (
                 overview_html
                 if overview_html is not None
-                else self.auth._get_source_overview_html(source_id)
+                else self.auth.source_overview_html(source_id)
             )
             total_images = parse_total_images_from_source_html(html)
             if total_images:
@@ -350,7 +350,7 @@ class CoralNetDownloader:
             otherwise the verification failure codes (or ``overview_total_missing``) in
             ``errors``.
         """
-        counts = parse_image_status_counts(self.auth._get_source_overview_html(source_id))
+        counts = parse_image_status_counts(self.auth.source_overview_html(source_id))
         if counts.confirmed == 0:
             logger.info("Source %s has zero confirmed images on website; skipping", source_id)
             return DownloadResult(ok=True, skipped_no_confirmed=True)
@@ -405,7 +405,7 @@ class CoralNetDownloader:
         if not self.logged_in and not self.login():
             return DownloadResult(False, errors=["login failed"])
         try:
-            overview_html = self.auth._get_source_overview_html(sid)
+            overview_html = self.auth.source_overview_html(sid)
         except Exception as e:  # noqa: BLE001
             response = e.response if isinstance(e, requests.HTTPError) else None
             status = response.status_code if response is not None else None
@@ -480,7 +480,7 @@ class CoralNetDownloader:
         as the walk already discarded the rest of ``_partial/``.
 
         Raises:
-            _WalkCountMismatch: If the last walk attempt found other than the overview's count
+            WalkCountMismatch: If the last walk attempt found other than the overview's count
                 of images; ``_partial/walk.json`` is deleted so the next run walks again.
         """
         refs, total = self.walker.walk_source(
@@ -520,7 +520,7 @@ class CoralNetDownloader:
         errs = self._download_details(sid, bucket_name, s3_prefix, overview_html, state)
         try:
             refs = self._walk_and_list(sid, bucket_name, s3_prefix, state)
-        except _WalkCountMismatch as e:
+        except WalkCountMismatch as e:
             logger.error("Source %s: %s", sid, e)
             return DownloadResult(False, errors=[*errs, str(e)])
         except Exception:
@@ -540,7 +540,7 @@ class CoralNetDownloader:
             self._finish_stage(sid, bucket_name, s3_prefix, state, "export")
         image_failures = ImageFailures()
         if "images" not in state["stages"]:
-            image_failures = self.images._download_missing_images(refs, sid, bucket_name, s3_prefix)
+            image_failures = self.images.download_missing_images(refs, sid, bucket_name, s3_prefix)
             errs += _image_failure_codes(image_failures)
             if image_failures == ImageFailures():
                 self._finish_stage(sid, bucket_name, s3_prefix, state, "images")

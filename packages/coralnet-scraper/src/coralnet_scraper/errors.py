@@ -49,10 +49,11 @@ class _TotalChanged(WalkIncomplete):
         self.total = total
 
 
-class _WalkCountMismatch(WalkIncomplete):
+class WalkCountMismatch(WalkIncomplete):
     """The browse walk found a different number of images than the overview lists."""
 
     def __init__(self, found: int, expected: int) -> None:
+        """Record the walked ``found`` count and the overview's ``expected`` count."""
         super().__init__(f"walk_count_mismatch:{found}!={expected}")
 
 
