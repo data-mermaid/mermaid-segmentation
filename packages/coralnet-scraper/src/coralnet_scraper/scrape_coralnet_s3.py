@@ -313,23 +313,6 @@ def _stored_source_ids(s3: Any, bucket: str, prefix: str) -> list[int]:
     return sorted(int(m.group(1)) for f in folders if (m := _SOURCE_PREFIX.search(f)))
 
 
-def _warn_if_unadopted(s3: Any, bucket: str, prefix: str) -> None:
-    """Warn when the bucket holds source folders but none has a completion marker."""
-    stored = _stored_source_ids(s3, bucket, prefix)
-    if stored and not any(
-        s3_io.key_exists(s3, bucket, s3_io.object_key_complete_marker(prefix, sid))
-        for sid in stored
-    ):
-        logger.warning(
-            "%d source folders exist under s3://%s/%s but none has a completion marker; "
-            "run `coralnet-scrape verify-existing` first to adopt them, or every source "
-            "downloads again",
-            len(stored),
-            bucket,
-            prefix,
-        )
-
-
 def _changed_source_ids(
     downloader: CoralNetDownloader, s3: Any, bucket: str, prefix: str
 ) -> tuple[list[int], list[int]]:
@@ -481,7 +464,6 @@ def main(argv: list[str] | None = None) -> int:
         return _verify_existing(ids, downloader, s3, bucket, prefix)
     if not _guard_discovery(s3, bucket, prefix, discovered, allow_drop=args.allow_source_drop):
         return 1
-    _warn_if_unadopted(s3, bucket, prefix)
     breaker_cooldown_s = (
         DEFAULT_BREAKER_COOLDOWN_S if args.breaker_cooldown is None else args.breaker_cooldown
     )

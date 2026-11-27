@@ -397,36 +397,6 @@ def test_batch_dry_run_without_prune_is_rejected():
     assert exc.value.code == 2
 
 
-def _legacy_warnings(caplog) -> list[str]:
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.levelname == "WARNING" and "verify-existing" in r.getMessage()
-    ]
-
-
-def test_a_bucket_of_folders_without_markers_warns_once_and_the_run_proceeds(
-    monkeypatch, fake_s3, caplog
-):
-    fake_s3.put("my-bucket", "my-prefix/s1/annotations.csv", b"Name\n")
-    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
-
-    _, run, _ = _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
-
-    (warning,) = _legacy_warnings(caplog)
-    assert "2" in warning
-    run.assert_called_once()
-
-
-def test_no_legacy_warning_when_any_stored_source_has_a_marker(monkeypatch, fake_s3, caplog):
-    _store_source(fake_s3, 1, 5)
-    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
-
-    _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
-
-    assert _legacy_warnings(caplog) == []
-
-
 def test_main_reports_the_skipped_sources(monkeypatch, fake_s3):
     results = {
         1: DownloadResult(ok=True),
