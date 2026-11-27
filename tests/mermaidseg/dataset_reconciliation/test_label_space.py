@@ -15,6 +15,7 @@ from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.label_space import (
     LabelSpace,
     check_label_space,
+    label_keys_sha1,
     read_label_space,
     resolve_label_space,
     write_label_space,
@@ -87,13 +88,14 @@ def _resolve(
     roll_up: bool = False,
     offset: int = 0,
     name: str = "coralnet",
+    table: pd.DataFrame | None = None,
 ) -> LabelSpace:
     return resolve_label_space(
         {name: _tables(tmp_path, labels, name=name)},
         {name: offset},
         _TAXONOMY,
         SimpleNamespace(class_subset=list(subset), label_roll_up=roll_up),
-        _schema(tmp_path, source=name),
+        _schema(tmp_path, source=name, table=table),
         train_groups={name: None},
     )
 
@@ -375,6 +377,59 @@ def test_label_space_round_trips_through_its_directory(tmp_path: Path) -> None:
     assert _row(read, "zzz")["target_name"] == ""
 
 
+_ACK_BYTES = b"dataset,native_name,kind,reason\r\nx,y,z,w\r\n"
+
+
+def _snapshot(directory: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted(directory.iterdir())}
+
+
+def test_rewriting_a_directory_replaces_every_table_and_keeps_acknowledged_csv(
+    tmp_path: Path,
+) -> None:
+    space = _round_trip_space(tmp_path)
+    directory = tmp_path / "space"
+    directory.mkdir()
+    for name in ("classes.csv", "concepts.csv", "source_labels.csv", "label_space.meta.yaml"):
+        (directory / name).write_text("stale")
+    (directory / "acknowledged.csv").write_bytes(_ACK_BYTES)
+
+    write_label_space(directory, space)
+
+    assert sorted(p.name for p in directory.iterdir()) == [
+        "acknowledged.csv",
+        "classes.csv",
+        "concepts.csv",
+        "label_space.meta.yaml",
+        "source_labels.csv",
+    ]
+    assert (directory / "acknowledged.csv").read_bytes() == _ACK_BYTES
+    read = read_label_space(directory)
+    pd.testing.assert_frame_equal(read.classes, space.classes)
+    pd.testing.assert_frame_equal(read.source_labels, space.source_labels)
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_a_failure_while_writing_leaves_the_existing_directory_and_no_partial_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    space = _round_trip_space(tmp_path)
+    directory = tmp_path / "space"
+    write_label_space(directory, space)
+    (directory / "acknowledged.csv").write_text("kept")
+    before = _snapshot(directory)
+
+    def fail(*_args: Any, **_kwargs: Any) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("mermaidseg.dataset_reconciliation.label_space.yaml.safe_dump", fail)
+    with pytest.raises(OSError, match="disk full"):
+        write_label_space(directory, space)
+
+    assert _snapshot(directory) == before
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
 def _drop_column(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns="kind")
 
@@ -454,29 +509,60 @@ def test_a_malformed_acknowledgement_raises(tmp_path: Path, kind: str, reason: s
         check_label_space(space, acks, _HIERARCHY)
 
 
-def test_a_rank_naming_another_mermaid_attribute_raises(tmp_path: Path) -> None:
-    space = _resolve(tmp_path, [_label(1, "porites", "Acropora")], subset=["Acropora"])
+def _ranked_space(tmp_path: Path, target: str, ranks: dict[str, str]) -> LabelSpace:
+    """A label "acropora" trained as ``target`` whose concept row sets the given rank values."""
+    table = concept_table()
+    for rank, value in ranks.items():
+        table.loc[table["source_label_class_name"] == "acropora", rank] = value
+    return _resolve(tmp_path, [_label(1, "acropora", target)], subset=[target], table=table)
 
-    with pytest.raises(ValueError, match=r"coralnet.*porites.*rank_disagreement"):
-        check_label_space(space, _NO_ACKS, _HIERARCHY)
+
+_OTHER_ROOT = {"soft coral": None, "xeniidae": "soft coral", "other": None, "dead coral": "other"}
+_SAME_ROOT = {"hard coral": None, "agariciidae": "hard coral", "pachyseris": "hard coral"}
+_DESCENDANT = {"sponge": None, "porifera": "sponge"}
+_ORDER_OTHER_ROOT = {
+    "hard coral": None,
+    "scleractinia": "hard coral",
+    "other": None,
+    "dead coral": "other",
+}
 
 
 @pytest.mark.parametrize(
-    "target",
-    [
-        # genus acropora is the target; animalia, cnidaria, ... name no MERMAID attribute.
-        "Acropora",
-        # genus acropora is the target's parent.
-        "Acropora cytherea",
-    ],
-    ids=["target-and-unlisted-ranks", "ancestor"],
+    ("ranks", "detail"),
+    [({"family": "xeniidae"}, "family 'xeniidae'"), ({"genus": "Xeniidae"}, "genus 'xeniidae'")],
+    ids=["family", "genus-case-insensitive"],
 )
-def test_ranks_naming_the_target_its_ancestors_or_no_attribute_pass(
-    tmp_path: Path, target: str
+def test_a_value_under_another_root_than_the_target_raises(
+    tmp_path: Path, ranks: dict[str, str], detail: str
 ) -> None:
-    space = _resolve(tmp_path, [_label(1, "acropora", target)], subset=["Acropora"])
+    space = _ranked_space(tmp_path, "Dead coral", ranks)
 
-    check_label_space(space, _NO_ACKS, _HIERARCHY)
+    with pytest.raises(ValueError, match=rf"coralnet.*acropora.*rank_disagreement.*{detail}"):
+        check_label_space(space, _NO_ACKS, _OTHER_ROOT)
+
+
+@pytest.mark.parametrize(
+    ("target", "ranks", "hierarchy"),
+    [
+        # acropora, acroporidae ... name no MERMAID attribute.
+        ("Acropora", {}, _HIERARCHY),
+        # genus acropora is the target's parent.
+        ("Acropora cytherea", {}, _HIERARCHY),
+        # agariciidae is off the target's lineage but under the same root.
+        ("Pachyseris", {"family": "agariciidae"}, _SAME_ROOT),
+        # order is not a checked rank, whatever root scleractinia is under.
+        ("Dead coral", {"order": "scleractinia"}, _ORDER_OTHER_ROOT),
+        ("Sponge", {"family": "porifera"}, _DESCENDANT),
+    ],
+    ids=["target-and-unlisted-ranks", "ancestor", "same-root", "unchecked-rank", "descendant"],
+)
+def test_ranks_on_the_targets_line_or_root_or_unchecked_pass(
+    tmp_path: Path, target: str, ranks: dict[str, str], hierarchy: dict[str, str | None]
+) -> None:
+    space = _ranked_space(tmp_path, target, ranks)
+
+    check_label_space(space, _NO_ACKS, hierarchy)
 
 
 def test_drops_to_background_do_not_raise(tmp_path: Path) -> None:
@@ -491,11 +577,13 @@ def test_drops_to_background_do_not_raise(tmp_path: Path) -> None:
 
 
 def test_every_unacknowledged_case_is_reported_in_one_error(tmp_path: Path) -> None:
-    labels = [_label(1, "zzz", "Sand"), _label(2, "porites", "Acropora")]
-    space = _resolve(tmp_path, labels, subset=["Acropora", "Sand"])
+    table = concept_table()
+    table.loc[table["source_label_class_name"] == "acropora", "family"] = "xeniidae"
+    labels = [_label(1, "zzz", "Sand"), _label(2, "acropora", "Dead coral")]
+    space = _resolve(tmp_path, labels, subset=["Dead coral", "Sand"], table=table)
 
     with pytest.raises(ValueError) as error:
-        check_label_space(space, _NO_ACKS, _HIERARCHY)
+        check_label_space(space, _NO_ACKS, _OTHER_ROOT)
 
     assert "missing_concepts" in str(error.value)
     assert "rank_disagreement" in str(error.value)
@@ -518,3 +606,35 @@ def test_a_stale_acknowledgement_raises(
 
     with pytest.raises(ValueError, match=rf"stale.*{native_name}"):
         check_label_space(space, _acks(("coralnet", native_name, "missing_concepts")), _HIERARCHY)
+
+
+_KEY_CONFIG = {
+    "class_subset": ["Acropora", "Sand"],
+    "label_roll_up": True,
+    "concept_mapping_path": "configs/class_to_concepts.csv",
+    "concept_removal": "",
+    "concept_source_mask": "",
+}
+
+
+@pytest.mark.parametrize(
+    ("other", "same"),
+    [
+        ({**_KEY_CONFIG, "class_subset": ["Acropora", "Porites"]}, False),
+        ({**_KEY_CONFIG, "label_roll_up": False}, False),
+        ({**_KEY_CONFIG, "concept_mapping_path": "configs/other.csv"}, False),
+        ({**_KEY_CONFIG, "concept_removal": "configs/r.csv"}, False),
+        ({**_KEY_CONFIG, "concept_source_mask": "configs/m.csv"}, False),
+        ({**_KEY_CONFIG, "epochs": 99}, True),
+    ],
+    ids=[
+        "class_subset",
+        "label_roll_up",
+        "concept_mapping_path",
+        "concept_removal",
+        "concept_source_mask",
+        "unrelated_key",
+    ],
+)
+def test_label_keys_sha1_follows_the_label_keys_only(other: dict[str, Any], same: bool) -> None:
+    assert (label_keys_sha1(_KEY_CONFIG) == label_keys_sha1(other)) is same

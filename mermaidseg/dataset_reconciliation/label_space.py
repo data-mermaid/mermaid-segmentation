@@ -8,7 +8,11 @@ lookups are built from it (see :meth:`LabelSpace.lookups`).
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import shutil
+import tempfile
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +24,7 @@ import pyarrow as pa
 import torch
 import yaml
 
+from mermaidseg.config import to_plain_dict
 from mermaidseg.dataset_reconciliation.artifact_meta import select_groups
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_label_key
@@ -58,6 +63,15 @@ _INT_COLUMNS = {
 }
 ACK_COLUMNS = ["dataset", "native_name", "kind", "reason"]
 ACK_KINDS = frozenset({"missing_concepts", "rank_disagreement"})
+_LABEL_KEY_FIELDS = (
+    "class_subset",
+    "label_roll_up",
+    "concept_mapping_path",
+    "concept_removal",
+    "concept_source_mask",
+)
+
+_CHECKED_RANKS = frozenset({"family", "genus", "species"})
 
 _TRUE = 2
 _FALSE = 1
@@ -337,13 +351,65 @@ def resolve_label_space(
     )
 
 
-def write_label_space(directory: Path, space: LabelSpace) -> None:
-    """Write ``classes.csv``, ``concepts.csv``, ``source_labels.csv`` and the meta YAML."""
-    directory.mkdir(parents=True, exist_ok=True)
+def _write_tables(directory: Path, space: LabelSpace) -> None:
     space.classes.to_csv(directory / CLASSES_CSV, index=False)
     space.concepts.to_csv(directory / CONCEPTS_CSV, index=False)
     space.source_labels.to_csv(directory / SOURCE_LABELS_CSV, index=False)
     (directory / META_YAML).write_text(yaml.safe_dump(space.meta, sort_keys=False))
+
+
+def _copy_other_files(source: Path, target: Path) -> None:
+    """Copy the entries of ``source`` that ``_write_tables`` does not produce into ``target``."""
+    produced = {CLASSES_CSV, CONCEPTS_CSV, SOURCE_LABELS_CSV, META_YAML}
+    for entry in source.iterdir():
+        if entry.name in produced:
+            continue
+        if entry.is_dir():
+            shutil.copytree(entry, target / entry.name)
+        else:
+            shutil.copy2(entry, target / entry.name)
+
+
+def _current_umask() -> int:
+    """The process umask, read by setting and restoring it."""
+    previous = os.umask(0)
+    os.umask(previous)
+    return previous
+
+
+def write_label_space(directory: Path, space: LabelSpace) -> None:
+    """Write ``classes.csv``, ``concepts.csv``, ``source_labels.csv`` and the meta YAML.
+
+    The files are written to a temporary sibling of ``directory`` and swapped onto it, so a
+    failure leaves the previous file set. Other files of an existing ``directory``, such as
+    ``acknowledged.csv``, are carried over.
+    """
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(dir=directory.parent, prefix=f".{directory.name}.", suffix=".partial")
+    )
+    backup: Path | None = None
+    try:
+        _write_tables(staging, space)
+        os.chmod(staging, 0o777 & ~_current_umask())
+        if directory.exists():
+            _copy_other_files(directory, staging)
+            # An empty directory is a valid os.replace target; a non-empty one is not.
+            backup = Path(
+                tempfile.mkdtemp(dir=directory.parent, prefix=f".{directory.name}.", suffix=".old")
+            )
+            os.replace(directory, backup)
+        os.replace(staging, directory)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        if backup is not None:
+            if directory.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                os.replace(backup, directory)
+        raise
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def _read_table(directory: Path, file: str, columns: list[str]) -> pd.DataFrame:
@@ -404,26 +470,36 @@ def read_label_space(directory: Path) -> LabelSpace:
     return LabelSpace(classes=classes, concepts=concepts, source_labels=source_labels, meta=meta)
 
 
-def _lineage(target: str, hierarchy: Mapping[str, str | None]) -> set[str]:
-    """``target`` and its ancestors in ``hierarchy``; a cycle stops the walk."""
-    lineage = {target}
-    parent = hierarchy.get(target)
+def _lineage(name: str, hierarchy: Mapping[str, str | None]) -> list[str]:
+    """``name`` then its ancestors up to the root in ``hierarchy``; a cycle stops the walk."""
+    lineage = [name]
+    parent = hierarchy.get(name)
     while parent is not None and parent not in lineage:
-        lineage.add(parent)
+        lineage.append(parent)
         parent = hierarchy.get(parent)
     return lineage
 
 
 def _rank_disagreements(
-    concepts: str, target: str, rank_of: Mapping[str, str], hierarchy: Mapping[str, str | None]
+    concepts: str, target: str, hierarchy: Mapping[str, str | None]
 ) -> list[str]:
-    """``rank 'value'`` of each true rank channel naming a MERMAID attribute off ``target``'s line."""
-    lineage = _lineage(target, hierarchy)
+    """``rank 'value'`` of each true family, genus or species channel that disagrees with ``target``.
+
+    A value disagrees when it names a MERMAID attribute under another root than ``target``'s and
+    is not a descendant of ``target``. A ``target`` outside ``hierarchy`` has no root and never
+    disagrees.
+    """
+    if target not in hierarchy:
+        return []
+    target_root = _lineage(target, hierarchy)[-1]
     found = []
     for name in _split_names(concepts):
-        rank = rank_of[name]
-        value = name.partition("__")[2]
-        if rank and value in hierarchy and value not in lineage:
+        rank, _, raw = name.partition("__")
+        value = raw.lower()
+        if rank not in _CHECKED_RANKS or value not in hierarchy:
+            continue
+        lineage = _lineage(value, hierarchy)
+        if lineage[-1] != target_root and target not in lineage:
             found.append(f"{rank} {value!r}")
     return found
 
@@ -432,7 +508,6 @@ def _cases(
     space: LabelSpace, benthic_hierarchy: Mapping[str, str | None]
 ) -> dict[tuple[str, str, str], str]:
     """``(dataset, native_name, kind) -> detail`` of every case that needs an acknowledgement."""
-    rank_of = dict(zip(space.concepts["name"], space.concepts["rank"], strict=True))
     cases: dict[tuple[str, str, str], str] = {}
     for row in space.source_labels.itertuples(index=False):
         if row.concept_status == "missing" and not row.drop_reason:
@@ -440,12 +515,11 @@ def _cases(
                 f"no concept row for key {row.concept_key!r}"
             )
         if row.target_name:
-            disagreements = _rank_disagreements(
-                row.concepts, row.target_name, rank_of, benthic_hierarchy
-            )
+            disagreements = _rank_disagreements(row.concepts, row.target_name, benthic_hierarchy)
             if disagreements:
                 cases[(row.dataset, row.native_name, "rank_disagreement")] = (
-                    f"{', '.join(disagreements)} is not {row.target_name!r} or an ancestor"
+                    f"{', '.join(disagreements)} is under another top-level root than "
+                    f"{row.target_name!r}"
                 )
     return cases
 
@@ -468,11 +542,13 @@ def check_label_space(
 ) -> None:
     """Refuse a label space with unacknowledged cases, or acknowledgements that match none.
 
-    Cases are a label that trains a class but has no concept row (``missing_concepts``), and a label whose true rank
-    channel names a MERMAID benthic attribute that is neither its target nor an ancestor of it
-    (``rank_disagreement``). A rank value naming no attribute, and a label without a target, are
-    not checked. A label that drops to background is never a case, so an acknowledgement of one is
-    stale.
+    Cases are a label that trains a class but has no concept row (``missing_concepts``), and a
+    label whose true family, genus or species channel names a MERMAID benthic attribute that is
+    under a different top-level root of the hierarchy than the label's target and is not a
+    descendant of it (``rank_disagreement``). Other ranks, a value naming no attribute, a label
+    without a target, and a target outside the hierarchy are not checked; an ancestor or a
+    descendant of the target passes. A label that drops to background is never a
+    ``missing_concepts`` case, so an acknowledgement of one is stale.
 
     Args:
         space: The label space.
@@ -497,3 +573,13 @@ def check_label_space(
     ]
     if problems:
         raise ValueError("label space check failed:\n" + "\n".join(problems))
+
+
+def label_keys_sha1(training_cfg: Any) -> str:
+    """Hex sha1 of the ``training`` keys that decide a label space.
+
+    The keys are ``class_subset``, ``label_roll_up``, ``concept_mapping_path``, ``concept_removal``
+    and ``concept_source_mask``; other keys and the key order do not change it.
+    """
+    keys = to_plain_dict({field: training_cfg[field] for field in _LABEL_KEY_FIELDS})
+    return hashlib.sha1(yaml.safe_dump(keys, sort_keys=True).encode()).hexdigest()
