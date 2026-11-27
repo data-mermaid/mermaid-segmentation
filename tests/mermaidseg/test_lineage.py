@@ -284,15 +284,20 @@ def _all_changed() -> dict:
             id="several-at-once",
         ),
         pytest.param(_untaxed(), _pins(), ("taxonomy",), id="taxonomy-unpinned-now"),
-        pytest.param(_pins(), None, ("coralnet", "taxonomy"), id="no-data-version-in-checkpoint"),
     ],
 )
 def test_check_same_data_names_every_differing_pin(new, old, needles):
-    source = {} if old is None else {"data_version": old}
     with pytest.raises(ValueError) as raised:
-        check_same_data(new, source)
+        check_same_data(new, {"data_version": old})
     for needle in needles:
         assert needle in str(raised.value)
+
+
+def test_check_same_data_refuses_a_checkpoint_that_records_no_data_pins():
+    with pytest.raises(ValueError, match="records no data pins") as raised:
+        check_same_data(_pins(), {})
+    assert "--init-weights" in str(raised.value)
+    assert "added" not in str(raised.value)
 
 
 def test_git_state_reports_the_head_sha_and_whether_tracked_files_changed(git_repo):
