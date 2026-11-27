@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import re
 import urllib.parse
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from bs4 import BeautifulSoup
 
@@ -124,6 +123,16 @@ def _check_walk_page(
         raise WalkIncomplete(f"browse page {page} repeats an image id")
 
 
+class ResetPartial(Protocol):
+    """Discard a source's ``_partial/`` when its overview count changed."""
+
+    def __call__(
+        self, *, source_id: int, bucket_name: str, s3_prefix: str, total_images: int
+    ) -> Any:
+        """Delete the source's partial work."""
+        ...
+
+
 class SourceWalker:
     """Walk the browse pages of a source, checkpointing the walk in its ``_partial/``."""
 
@@ -132,15 +141,16 @@ class SourceWalker:
         auth: CoralNetSession,
         s3: Any,
         *,
-        reset_partial: Callable[[int, str, str, int], Any],
+        reset_partial: ResetPartial,
     ) -> None:
         """Create the walker; no network call is made.
 
         Args:
             auth: The CoralNet session whose main session walks the pages.
             s3: S3 client holding the sources' ``_partial/``.
-            reset_partial: Called as ``(source_id, bucket, prefix, total)`` when the overview
-                count changed during the walk; it discards the source's ``_partial/``.
+            reset_partial: Called with the keywords ``source_id``, ``bucket_name``,
+                ``s3_prefix`` and ``total_images`` when the overview count changed during
+                the walk; it discards the source's ``_partial/``.
         """
         self.auth = auth
         self.s3 = s3
@@ -259,7 +269,12 @@ class SourceWalker:
         if total is None:
             raise ContentError(f"source {source_id}: overview lists no image count")
         if total != expected:
-            self._reset_partial(source_id, bucket_name, s3_prefix, total)
+            self._reset_partial(
+                source_id=source_id,
+                bucket_name=bucket_name,
+                s3_prefix=s3_prefix,
+                total_images=total,
+            )
             raise _TotalChanged(total)
         if found != expected:
             key = s3_io.partial_key(s3_prefix, source_id, _WALK_FILE)

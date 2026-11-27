@@ -274,7 +274,7 @@ class CoralNetDownloader:
         return cast("dict[str, Any]", state)
 
     def _reset_partial(
-        self, source_id: int, bucket_name: str, s3_prefix: str, total_images: int
+        self, *, source_id: int, bucket_name: str, s3_prefix: str, total_images: int
     ) -> dict[str, Any]:
         """Delete the source's ``_partial/``, then save and return a fresh state.
 
@@ -515,7 +515,7 @@ class CoralNetDownloader:
         """
         sid = source_id
         state = self._load_state(sid, bucket_name, s3_prefix, total_images) or self._reset_partial(
-            sid, bucket_name, s3_prefix, total_images
+            source_id=sid, bucket_name=bucket_name, s3_prefix=s3_prefix, total_images=total_images
         )
         errs = self._download_details(sid, bucket_name, s3_prefix, overview_html, state)
         try:
