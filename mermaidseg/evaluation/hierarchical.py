@@ -1,9 +1,9 @@
 """Hierarchical taxonomy metrics for the evaluation suite.
 
 Feeds point or pixel concept outputs to
-:class:`~mermaidseg.model.hierarchical_metrics.HierarchicalMetrics` (lineage consistency,
+:class:`~mermaidseg.evaluation.hierarchical_metrics.HierarchicalMetrics` (lineage consistency,
 mistake severity, calibration ECE, rare-taxon accuracy). Scores are the model's activated
-concepts, which are already a per-rank softmax, so no score transform is applied.
+concepts, which are a per-rank softmax.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     build_taxonomy_tree,
     load_taxonomy_frame,
 )
+from mermaidseg.evaluation.hierarchical_metrics import HierarchicalMetrics
 from mermaidseg.evaluation.metrics import ConceptLayout
-from mermaidseg.model.hierarchical_metrics import HierarchicalMetrics
-from mermaidseg.model.rank_outputs import RankBatch
+from mermaidseg.evaluation.rank_outputs import RankBatch
 
 logger = logging.getLogger(__name__)
 

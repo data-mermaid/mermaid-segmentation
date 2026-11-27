@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 import torch
 
 from mermaidseg.dataset_reconciliation.taxonomy_tree import TaxonomyTree
-from mermaidseg.model.hierarchical_metrics import HierarchicalMetrics
-from mermaidseg.model.rank_outputs import RankBatch
+from mermaidseg.evaluation.hierarchical_metrics import HierarchicalMetrics
+from mermaidseg.evaluation.rank_outputs import RankBatch
 
 
 def _tree(channels: list[str], rank: str = "kingdom") -> TaxonomyTree:
@@ -106,22 +104,6 @@ def test_calibration_omits_a_ground_truth_subset_with_no_pixels():
 
     assert not [key for key in out if "none_gt" in key]
     assert out["ece/kingdom/taxon_gt/n"] == 1.0
-
-
-@pytest.mark.parametrize(
-    ("transform", "scores"),
-    [
-        pytest.param("none", [0.75, 0.25], id="none_keeps_probabilities"),
-        pytest.param("softmax", [math.log(3.0), 0.0], id="softmax_of_logits"),
-        pytest.param("renormalize", [3.0, 1.0], id="renormalize_positive_scores"),
-    ],
-)
-def test_calibration_confidence_follows_the_score_transform(transform, scores):
-    metrics = HierarchicalMetrics(_tree(["a", "b"]), n_bins=4, score_transform=transform)
-
-    metrics.update(_batch(torch.tensor(scores).reshape(1, 2, 1, 1), target=[1], pred=[1]))
-
-    assert metrics.compute()["confidence/kingdom"] == pytest.approx(0.75)
 
 
 # Taxa a, b, c, d and none. Supports and hits: a 4 pixels / 3 right, b 2 / 2, c 1 / 0, d unseen,

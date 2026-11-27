@@ -82,7 +82,7 @@ def coralnet_groups(section: DataSection, split: str, repo_root: Path = REPO_ROO
     Raises:
         ValueError: The coralnet entry has no ``split_file``, or no group has the split.
     """
-    from mermaidseg.evaluation.coralnet_eval import split_groups
+    from mermaidseg.evaluation.point_sources import split_groups
 
     split_file = section.datasets[CORALNET].split_file
     if split_file is None:
@@ -435,7 +435,7 @@ def main(argv: list[str] | None = None) -> None:
     sample_ids: list[str] | None = None
     uses_coralnet = "coralnet" in evals or (split == "train" and "val_loss" in evals)
     if args.images_per_source is not None and uses_coralnet:
-        from mermaidseg.evaluation.coralnet_eval import coralnet_reader, write_coralnet_sample
+        from mermaidseg.evaluation.point_sources import coralnet_reader, write_coralnet_sample
 
         sample_path = output_dir / f"coralnet_{split}_sample.parquet"
         sample_ids = write_coralnet_sample(
@@ -470,7 +470,8 @@ def main(argv: list[str] | None = None) -> None:
             )
 
     if "coralnet" in evals:
-        from mermaidseg.evaluation.coralnet_eval import coralnet_reader, evaluate_coralnet
+        from mermaidseg.evaluation.point_datasets import evaluate_point_dataset
+        from mermaidseg.evaluation.point_sources import CORALNET_SOURCE, coralnet_reader
 
         overlap = trained_on_scored_groups(section, coralnet_groups(section, split))
         summary["coralnet_split_in_training"] = bool(overlap)
@@ -484,21 +485,22 @@ def main(argv: list[str] | None = None) -> None:
         _run(
             [f"coralnet_{split}"],
             lambda: {
-                f"coralnet_{split}": evaluate_coralnet(
-                    predictor=predictor,
-                    reader=coralnet_reader(
+                f"coralnet_{split}": evaluate_point_dataset(
+                    f"coralnet_{split}",
+                    coralnet_reader(
                         section,
                         cache_dir,
                         groups=coralnet_groups(section, split),
                         split=split,
                         image_ids=sample_ids,
                     ),
+                    source_name=CORALNET_SOURCE,
+                    predictor=predictor,
                     id2label=id2label,
                     concept_names=concept_names,
                     taxonomy_csv=concept_mapping_path,
                     hierarchy=hierarchy,
                     output_dir=output_dir,
-                    split=split,
                     batch_size=args.batch_size,
                     num_workers=args.num_workers,
                     max_images_per_unit=args.max_images_per_unit,
@@ -508,14 +510,20 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if "pacific" in evals:
-        from mermaidseg.evaluation.pacific_eval import evaluate_pacific, pacific_reader
+        from mermaidseg.evaluation.point_datasets import evaluate_point_dataset
+        from mermaidseg.evaluation.point_sources import (
+            PACIFIC_SOURCE,
+            pacific_reader,
+        )
 
         _run(
             ["pacific"],
             lambda: {
-                "pacific": evaluate_pacific(
+                "pacific": evaluate_point_dataset(
+                    PACIFIC_SOURCE,
+                    pacific_reader(section, cache_dir, REPO_ROOT),
+                    source_name=PACIFIC_SOURCE,
                     predictor=predictor,
-                    reader=pacific_reader(section, cache_dir, REPO_ROOT),
                     id2label=id2label,
                     concept_names=concept_names,
                     taxonomy_csv=concept_mapping_path,

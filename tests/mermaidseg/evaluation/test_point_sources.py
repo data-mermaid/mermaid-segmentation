@@ -1,13 +1,13 @@
-"""CoralNet point evaluation: split-file groups, the reader and per-source image sampling."""
+"""Point-evaluation sources: split-file groups, the CoralNet and Pacific readers, and sampling."""
 
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from mermaidseg.evaluation import coralnet_eval
-from mermaidseg.evaluation.coralnet_eval import (
+from mermaidseg.evaluation.point_sources import (
     coralnet_reader,
+    pacific_reader,
     sample_images_per_source,
     split_groups,
     write_coralnet_sample,
@@ -91,27 +91,13 @@ def test_write_coralnet_sample_rejects_a_group_that_is_not_s_digits(tmp_path):
         write_coralnet_sample(path=tmp_path / "k.parquet", reader=reader, images_per_source=2)
 
 
-def test_evaluate_coralnet_maps_labels_through_the_readers_targets(tmp_path, monkeypatch):
+def test_the_reader_keeps_the_first_listed_annotator_of_each_point(tmp_path):
     cache = write_eval_cache(tmp_path)
-    reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s3"], split="val")
-    seen: dict = {}
 
-    def run(**kwargs):
-        seen.update(kwargs)
-        return {}
+    reader = pacific_reader(cache.section, cache.cache_dir, tmp_path)
 
-    monkeypatch.setattr(coralnet_eval, "run_point_evaluation", run)
-
-    result = coralnet_eval.evaluate_coralnet(
-        predictor=None,  # type: ignore[arg-type]
-        reader=reader,
-        id2label={0: "ignore", 1: "sand"},
-        concept_names=[],
-        taxonomy_csv="configs/class_to_concepts.csv",
-        hierarchy=None,
-        output_dir=tmp_path / "out",
-    )
-
-    assert seen["class_lookup"].name_to_class_id == {"acro": 0, "sand": 1}
-    assert seen["unit_col"] == "group"
-    assert result["groups"] == ["s3"]
+    points = reader.points.sort_values("image_id")
+    assert points[["image_id", "label_id", "annotator"]].to_numpy().tolist() == [
+        ["p1", 1, "host"],
+        ["p2", 2, "archived"],
+    ]

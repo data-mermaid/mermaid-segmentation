@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,15 +26,28 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 from mermaidseg.data.point_dataset import PointDataset
-from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
+from mermaidseg.evaluation.gt_mapping import (
+    ClassLookup,
+    ConceptLookup,
+    build_class_lookup,
+    build_concept_lookup,
+)
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS, HierarchicalScore
-from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, concept_block_from_binary
+from mermaidseg.evaluation.metrics import (
+    REPORTED_BINARY_CONCEPTS,
+    ConceptLayout,
+    MetricBundle,
+    concept_block_from_binary,
+)
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
 from mermaidseg.inference.predictor import CBMPredictor
 from mermaidseg.inference.preprocess import preprocess
 from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
+
+#: Column of the reader's images that names the scored unit (a CoralNet source, a Pacific site).
+UNIT_COL = "group"
 
 # Seed of the eval loader's generator, from which its worker seeds derive.
 _LOADER_SEED = 0
@@ -248,18 +261,6 @@ def unit_scalars(d: dict, binary_concepts: Sequence[str] = ()) -> dict[str, floa
     return out
 
 
-def unit_scalar_keys(
-    ranks: Sequence[str], binary_concepts: Sequence[str] = (), with_hier: bool = True
-) -> list[str]:
-    """Every key :func:`unit_scalars` can emit, in its order."""
-    keys = ["class_accuracy", "class_miou", "binary_macro_accuracy", "binary_macro_f1"]
-    keys += [f"tax_{rank}_{key}" for rank in ranks for key in _TAX_SCALARS]
-    keys += [f"{concept}_{key}" for concept in binary_concepts for key in _CONCEPT_SCALARS]
-    if with_hier:
-        keys += [f"hier/{key}" for key in HIER_HEADLINE_KEYS]
-    return keys
-
-
 def _unit_row_for_csv(unit: str, d: dict, binary_concepts: Sequence[str] = ()) -> dict:
     return {"unit": unit, "num_points": d["num_points"], **unit_scalars(d, binary_concepts)}
 
@@ -304,7 +305,6 @@ def run_point_evaluation(
     batch_size: int = 8,
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
-    progress_cb: Callable[[int, int], None] | None = None,
     removed_concepts: Sequence[str] = (),
 ) -> dict:
     """Run a point-annotation evaluation with per-unit streaming reports.
@@ -503,9 +503,6 @@ def run_point_evaluation(
             if remaining.get(unit, 0) <= 0:
                 finalize_unit(unit)
 
-        if progress_cb is not None:
-            progress_cb(processed, total_images)
-
     # Finalize any stragglers (e.g. all-failed units or count mismatches).
     for unit in list(pending.keys()):
         finalize_unit(unit)
@@ -582,3 +579,74 @@ def run_point_evaluation(
         "unmapped_class_labels": unmapped_class,
         "unmapped_concept_labels": unmapped_concept,
     }
+
+
+def evaluate_point_dataset(
+    name: str,
+    reader: PointDataset,
+    *,
+    source_name: str,
+    predictor: CBMPredictor,
+    id2label: dict[int, str],
+    concept_names: list[str],
+    taxonomy_csv: str | Path,
+    hierarchy: dict[str, str | None] | None,
+    output_dir: str | Path,
+    batch_size: int = 8,
+    num_workers: int = 8,
+    max_images_per_unit: int | None = None,
+    removed_concepts: Sequence[str] = (),
+) -> dict:
+    """Evaluate the model on a point dataset, per ``group`` unit and pooled.
+
+    Args:
+        name: Eval name; the outputs go to ``output_dir / name`` and key the result.
+        reader: Reader over the scored groups (see :mod:`mermaidseg.evaluation.point_sources`).
+        source_name: Dataset name of the taxonomy CSV rows that map the reader's labels to
+            concepts.
+        predictor: Inference wrapper around the model.
+        id2label: Target class id to label name.
+        concept_names: Model concept channel names.
+        taxonomy_csv: Taxonomy CSV the checkpoint was trained with.
+        hierarchy: Benthic hierarchy for label roll-up, or ``None`` to disable it.
+        output_dir: Directory receiving the per-unit and summary outputs.
+        batch_size: Images per forward batch.
+        num_workers: DataLoader workers.
+        max_images_per_unit: Cap on images per group.
+        removed_concepts: Concepts removed from the taxonomy during training.
+
+    Returns:
+        The evaluation result dict, with the sorted unique scored ``groups`` added.
+    """
+    annotations = reader_annotations(reader)
+    names = annotations["source_label_name"].unique().tolist()
+    logger.info(
+        "%s: %d images, %d annotations, %d distinct labels",
+        name,
+        len(reader.images),
+        len(annotations),
+        len(names),
+    )
+
+    class_lookup = build_class_lookup(reader.label_targets, names, id2label, hierarchy)
+    concept_lookup = build_concept_lookup(source_name, names, concept_names, taxonomy_csv)
+
+    result = run_point_evaluation(
+        eval_name=name,
+        reader=reader,
+        unit_col=UNIT_COL,
+        predictor=predictor,
+        class_lookup=class_lookup,
+        concept_lookup=concept_lookup,
+        concept_names=concept_names,
+        id2label=id2label,
+        output_dir=output_dir,
+        binary_concepts=REPORTED_BINARY_CONCEPTS,
+        taxonomy_csv=taxonomy_csv,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        max_images_per_unit=max_images_per_unit,
+        removed_concepts=removed_concepts,
+    )
+    result["groups"] = sorted(reader.images[UNIT_COL].astype(str).unique())
+    return result

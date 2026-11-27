@@ -466,9 +466,9 @@ class _Calls:
 def calls(monkeypatch: pytest.MonkeyPatch) -> _Calls:
     """Replace every package evaluator; the readers are built over the tiny cache."""
     from mermaidseg.evaluation import (
-        coralnet_eval,
         coralscapes_probe,
-        pacific_eval,
+        point_datasets,
+        point_sources,
         val_loss,
     )
 
@@ -481,8 +481,12 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> _Calls:
 
         return _fn
 
-    monkeypatch.setattr(coralnet_eval, "evaluate_coralnet", _stub("coralnet", _POOLED_RESULT))
-    monkeypatch.setattr(pacific_eval, "evaluate_pacific", _stub("pacific", _POOLED_RESULT))
+    def _point_dataset(name: str, reader: Any, **kwargs: Any) -> Any:
+        key = "pacific" if name == point_sources.PACIFIC_SOURCE else "coralnet"
+        recorded.record(key, {"name": name, "reader": reader, **kwargs})
+        return _POOLED_RESULT
+
+    monkeypatch.setattr(point_datasets, "evaluate_point_dataset", _point_dataset)
 
     def _probe(label_space: Any, probe_jsons: Any, version: Any, **kwargs: Any) -> Any:
         recorded.record(
@@ -494,13 +498,13 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> _Calls:
     monkeypatch.setattr(
         val_loss, "evaluate_val_loss", _stub("val_loss", {"overall": {"loss": 1.0}})
     )
-    write_sample = coralnet_eval.write_coralnet_sample
+    write_sample = point_sources.write_coralnet_sample
 
     def _write_sample(**kwargs: Any) -> Any:
         recorded.record("sample", kwargs)
         return write_sample(**kwargs)
 
-    monkeypatch.setattr(coralnet_eval, "write_coralnet_sample", _write_sample)
+    monkeypatch.setattr(point_sources, "write_coralnet_sample", _write_sample)
     monkeypatch.setattr(evaluate_script, "load_benthic_hierarchy", lambda *_: {"hier": 1})
     monkeypatch.setattr(evaluate_script, "run_removed_concepts", lambda *_: ["removed__a"])
     # The tiny bundle has no reported binary concept channels; the eval stages are under test.
@@ -578,7 +582,7 @@ def test_main_scores_coralnet_on_exactly_the_split_files_groups_of_the_split(
 
     kwargs = calls.one("coralnet")
     assert _groups(kwargs["reader"]) == groups
-    assert kwargs["split"] == split
+    assert kwargs["name"] == f"coralnet_{split}"
     assert kwargs["removed_concepts"] == ["removed__a"]
     assert kwargs["hierarchy"] == {"hier": 1}
     assert kwargs["concept_names"] == _tiny.CONCEPT_NAMES
@@ -761,12 +765,14 @@ def test_main_train_loss_on_a_sample_is_uncapped_and_restricted_to_the_sample(
 def test_main_records_a_failed_eval_and_runs_the_remaining_ones(
     monkeypatch, calls, bundle_dir, tmp_path, cache, data_config
 ):
-    from mermaidseg.evaluation import coralnet_eval
+    from mermaidseg.evaluation import point_datasets
 
-    def _boom(**_):
-        raise RuntimeError("boom")
+    def _boom_on_coralnet(name, *args, **kwargs):
+        if name.startswith("coralnet"):
+            raise RuntimeError("boom")
+        return _POOLED_RESULT
 
-    monkeypatch.setattr(coralnet_eval, "evaluate_coralnet", _boom)
+    monkeypatch.setattr(point_datasets, "evaluate_point_dataset", _boom_on_coralnet)
 
     summary = _main(bundle_dir, tmp_path, cache, data_config, "--evals", "coralnet", "pacific")
 
