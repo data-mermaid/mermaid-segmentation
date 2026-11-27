@@ -604,6 +604,39 @@ def test_coralscapes39_run_fits_one_svm_per_budget_and_scores_each_in_one_forwar
     assert not {"bleached", "anthropogenic", "hierarchical"} & set(on_disk)
 
 
+def test_capped_split_loads_only_the_images_it_scores(tmp_path, monkeypatch):
+    lut = coralscapes_v2_to_legacy_lut()
+    v2_for = {target: int(np.flatnonzero(lut == target)[0]) for target in (1, 2, 3)}
+    label = np.full((HEIGHT, WIDTH), v2_for[1], dtype=np.uint8)
+    label[:, 512:1024] = v2_for[2]
+    label[:, 1536:] = v2_for[3]
+    _stub_version_reads(monkeypatch, label)
+    monkeypatch.setattr(coralscapes_probe, "_split_rows", lambda _frame, _split: [{}, {}])
+    loads: list[object] = []
+
+    def counting_load(_version, row):
+        loads.append(row)
+        return _banded_image(), label
+
+    monkeypatch.setattr(coralscapes_probe, "_load_row", counting_load)
+    probe = _probe_json(
+        tmp_path / "k5.json", points_per_class_target=5, images=[_three_class_entry()]
+    )
+
+    out = evaluate_coralscapes_probe(
+        CORALSCAPES39,
+        [probe],
+        None,  # type: ignore[arg-type]
+        predictor=_WindowPredictor(scale=4.0, second=lambda w: w**2),  # type: ignore[arg-type]
+        output_dir=tmp_path / "out",
+        splits=["test"],
+        max_test_images=1,
+    )
+
+    assert out["coralscapes39_test"]["by_k"]["5"]["test"]["num_images"] == 1
+    assert len(loads) == 1
+
+
 def _kingdom_and_binary_concept_names() -> list[str]:
     kingdoms = [name for name in _full_concept_names() if name.startswith("kingdom__")]
     return [*kingdoms, "bleached", "anthropogenic"]

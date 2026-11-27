@@ -1057,9 +1057,9 @@ def _evaluate_split(
     t0 = time.time()
     processed = 0
     for row in tqdm(rows, total=n_images, desc=f"dense {split} ({label_space.eval_name})"):
-        image_np, label_np = _load_row(version, row)
         if max_images is not None and processed >= max_images:
             break
+        image_np, label_np = _load_row(version, row)
         what = f"{split} image {processed}"
         _require_rgb(image_np, what)
         _require_label(label_np, what)
