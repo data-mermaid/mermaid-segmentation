@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -43,7 +44,7 @@ class _FakeDownloader:
         self.session = object()
         self._login_ok = login_ok
         self.totals: dict[int, int | None] = {}
-        self.verify_results: dict[int, list[str] | Exception] = {}
+        self.verify_results: dict[int, DownloadResult | Exception] = {}
         self.verified: list[int] = []
         self.login_calls = 0
 
@@ -57,7 +58,7 @@ class _FakeDownloader:
     def fetch_total_images(self, source_id: int) -> int | None:
         return self.totals[source_id]
 
-    def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> list[str]:
+    def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> DownloadResult:
         self.verified.append(source_id)
         result = self.verify_results[source_id]
         if isinstance(result, Exception):
@@ -113,10 +114,32 @@ def test_main_passes_configured_bucket_prefix_and_discovered_ids(monkeypatch, fa
     assert discover.call_args.args[0] is kwargs["downloader"].session
 
 
-@pytest.mark.parametrize(("argv", "prune"), [([], False), (["--prune"], True)])
-def test_main_passes_the_prune_flag(monkeypatch, argv, prune):
-    _, run, _ = _run_main(monkeypatch, argv)
+@pytest.mark.parametrize(
+    ("argv", "prune", "dry_run"),
+    [([], False, False), (["--prune"], True, False), (["--prune", "--dry-run"], True, True)],
+)
+def test_main_passes_the_prune_and_dry_run_flags(monkeypatch, fake_s3, argv, prune, dry_run):
+    _, run, _ = _run_main(monkeypatch, argv, {1: DownloadResult(ok=True)}, fake_s3=fake_s3)
+
     assert run.call_args.kwargs["prune"] is prune
+    assert run.call_args.kwargs["dry_run"] is dry_run
+    settings = _run_report(fake_s3)["settings"]
+    assert (settings["prune"], settings["dry_run"]) == (prune, dry_run)
+
+
+@pytest.mark.parametrize(
+    ("argv", "cooldown"),
+    [
+        ([], 600.0),
+        (["--breaker-cooldown", "30"], 30.0),
+        (["--breaker-cooldown", "0"], 0.0),
+    ],
+)
+def test_main_passes_the_breaker_cooldown_and_reports_it(monkeypatch, fake_s3, argv, cooldown):
+    _, run, _ = _run_main(monkeypatch, argv, {1: DownloadResult(ok=True)}, fake_s3=fake_s3)
+
+    assert run.call_args.kwargs["breaker_cooldown_s"] == cooldown
+    assert _run_report(fake_s3)["settings"]["breaker_cooldown_s"] == cooldown
 
 
 def test_main_passes_delay_seconds(monkeypatch):
@@ -239,7 +262,9 @@ def test_main_reports_a_circuit_breaker_stop(monkeypatch, caplog, fake_s3):
         "requests_per_second": 1.5,
         "source_ids": None,
         "prune": True,
+        "dry_run": False,
         "allow_source_drop": True,
+        "breaker_cooldown_s": 600.0,
     }
     assert report["transport"] == _TRANSPORT
     assert report["sources"] == {"5": {"ok": False, "errors": ["annotations_failed"]}}
@@ -359,11 +384,24 @@ def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
         ["--prune", "verify-existing"],
         ["--allow-source-drop", "invalidate", "--all"],
         ["--prune", "invalidate", "--changed"],
+        ["--dry-run", "verify-existing"],
+        ["--breaker-cooldown", "30", "verify-existing"],
+        ["--breaker-cooldown", "0", "invalidate", "--all", "--yes"],
+        ["--breaker-cooldown", "-1"],
+        ["--breaker-cooldown", "nan"],
+        ["--breaker-cooldown", "inf"],
     ],
 )
-def test_prune_and_allow_source_drop_are_rejected_with_a_subcommand(argv):
+def test_batch_only_flags_are_rejected_with_a_subcommand_or_a_negative_value(argv):
     with pytest.raises(SystemExit) as exc:
         cli._parse_args(argv)
+
+    assert exc.value.code == 2
+
+
+def test_batch_dry_run_without_prune_is_rejected():
+    with pytest.raises(SystemExit) as exc:
+        cli._parse_args(["--dry-run"])
 
     assert exc.value.code == 2
 
@@ -505,7 +543,7 @@ def test_invalidate_all_deletes_every_marker(monkeypatch, fake_s3):
         _store_source(fake_s3, sid, 10)
     fake_s3.put("my-bucket", "my-prefix/_meta/discovered_source_ids.json", b"[1, 22]")
 
-    code, _, _ = _run_command(monkeypatch, fake_s3, ["invalidate", "--all"])
+    code, _, _ = _run_command(monkeypatch, fake_s3, ["invalidate", "--all", "--yes"])
 
     assert code == 0
     assert _remaining(fake_s3) == [
@@ -513,6 +551,37 @@ def test_invalidate_all_deletes_every_marker(monkeypatch, fake_s3):
         "s1/annotations.csv",
         "s22/annotations.csv",
     ]
+
+
+def test_invalidate_all_without_yes_or_dry_run_exits_2_and_deletes_nothing(monkeypatch, fake_s3):
+    for sid in (1, 22):
+        _store_source(fake_s3, sid, 10)
+    before = _remaining(fake_s3)
+
+    with pytest.raises(SystemExit) as exc:
+        _run_command(monkeypatch, fake_s3, ["invalidate", "--all"])
+
+    assert exc.value.code == 2
+    assert _remaining(fake_s3) == before
+
+
+@pytest.mark.parametrize(
+    "selector", [["--source-ids", "1"], ["--all"], ["--changed"]], ids=["ids", "all", "changed"]
+)
+def test_invalidate_dry_run_deletes_nothing_and_names_the_sources(
+    monkeypatch, fake_s3, caplog, selector
+):
+    caplog.set_level(logging.INFO)
+    _store_source(fake_s3, 1, 5)
+
+    code, _, _ = _run_command(
+        monkeypatch, fake_s3, ["invalidate", *selector, "--dry-run"], totals={1: 6}
+    )
+
+    assert code == 0
+    assert ("my-bucket", "my-prefix/s1/_complete.json") in fake_s3.objects
+    assert ("my-bucket", "my-prefix/s1/_partial/state.json") in fake_s3.objects
+    assert "Would invalidate 1 sources: [1]" in [r.getMessage() for r in caplog.records]
 
 
 def test_invalidate_changed_deletes_the_marker_of_a_source_whose_total_changed(
@@ -541,7 +610,10 @@ def test_verify_existing_skips_marked_sources_and_exits_1_listing_failures(
         fake_s3,
         ["verify-existing"],
         discovered=[1, 2, 3],
-        verify_results={2: [], 3: ["annotations_missing", "image_list_missing"]},
+        verify_results={
+            2: DownloadResult(True),
+            3: DownloadResult(False, errors=["annotations_missing", "image_list_missing"]),
+        },
     )
 
     assert code == 1
@@ -553,12 +625,38 @@ def test_verify_existing_skips_marked_sources_and_exits_1_listing_failures(
 
 def test_verify_existing_exits_0_when_every_source_passes(monkeypatch, fake_s3):
     code, dl, _ = _run_command(
-        monkeypatch, fake_s3, ["verify-existing"], discovered=[2, 3], verify_results={2: [], 3: []}
+        monkeypatch,
+        fake_s3,
+        ["verify-existing"],
+        discovered=[2, 3],
+        verify_results={2: DownloadResult(True), 3: DownloadResult(True)},
     )
 
     assert code == 0
     assert dl.verified == [2, 3]
     assert dl.login_calls == 0
+
+
+def test_verify_existing_logs_a_skipped_source_and_does_not_fail_it(monkeypatch, fake_s3, caplog):
+    caplog.set_level(logging.INFO)
+
+    code, dl, _ = _run_command(
+        monkeypatch,
+        fake_s3,
+        ["verify-existing"],
+        discovered=[2, 3],
+        verify_results={
+            2: DownloadResult(True),
+            3: DownloadResult(True, skipped_no_confirmed=True),
+        },
+    )
+
+    assert code == 0
+    assert dl.verified == [2, 3]
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    infos = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert any("Source 3" in m and "skipped" in m for m in infos)
+    assert not any("Source 2" in m and "skipped" in m for m in infos)
 
 
 def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
@@ -567,7 +665,7 @@ def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
         fake_s3,
         ["verify-existing", "--source-ids", "1,2"],
         discovered=[1, 2, 3],
-        verify_results={1: [], 2: [], 3: []},
+        verify_results={1: DownloadResult(True), 2: DownloadResult(True), 3: DownloadResult(True)},
     )
 
     assert code == 0
@@ -610,7 +708,7 @@ def test_verify_existing_fails_a_source_reporting_a_missing_overview_total(
         fake_s3,
         ["verify-existing"],
         discovered=[2],
-        verify_results={2: ["overview_total_missing"]},
+        verify_results={2: DownloadResult(False, errors=["overview_total_missing"])},
     )
 
     assert code == 1
@@ -626,7 +724,7 @@ def test_verify_existing_reports_a_raising_source_by_exception_name_and_goes_on(
         fake_s3,
         ["verify-existing"],
         discovered=[2, 3],
-        verify_results={2: ValueError("boom"), 3: []},
+        verify_results={2: ValueError("boom"), 3: DownloadResult(True)},
     )
 
     assert code == 1

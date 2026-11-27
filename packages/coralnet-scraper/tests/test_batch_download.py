@@ -33,19 +33,28 @@ def test_should_skip_only_a_source_with_a_marker(fake_s3):
     assert _skip(fake_s3, 2) is True
 
 
-@pytest.mark.parametrize("prune", [False, True])
-def test_run_batch_download_downloads_only_unmarked_sources_and_counts_the_skipped(fake_s3, prune):
+@pytest.mark.parametrize(("prune", "dry_run"), [(False, False), (True, False), (True, True)])
+def test_run_batch_download_downloads_only_unmarked_sources_and_counts_the_skipped(
+    fake_s3, prune, dry_run
+):
     _mark(fake_s3, 1)
     downloader = MagicMock()
     result = MagicMock(skipped_no_confirmed=False)
     downloader.download_source.return_value = result
 
     outcome = bd.run_batch_download(
-        [1, 2], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3, prune=prune
+        [1, 2],
+        downloader=downloader,
+        bucket="b",
+        s3_prefix="p",
+        s3_client=fake_s3,
+        prune=prune,
+        dry_run=dry_run,
+        breaker_cooldown_s=0,
     )
 
     downloader.download_source.assert_called_once_with(
-        2, bucket_name="b", s3_prefix="p", prune=prune
+        2, bucket_name="b", s3_prefix="p", prune=prune, dry_run=dry_run
     )
     assert outcome.results == {2: result}
     assert outcome.skipped_complete == 1
@@ -53,7 +62,12 @@ def test_run_batch_download_downloads_only_unmarked_sources_and_counts_the_skipp
 
 def _run(fake_s3, downloader):
     return bd.run_batch_download(
-        [1, 2, 3], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
+        [1, 2, 3],
+        downloader=downloader,
+        bucket="b",
+        s3_prefix="p",
+        s3_client=fake_s3,
+        breaker_cooldown_s=0,
     ).results
 
 
@@ -186,6 +200,7 @@ def test_run_batch_download_sleeps_after_each_download_not_after_a_skip(
             s3_prefix="p",
             s3_client=fake_s3,
             delay_seconds=delay,
+            breaker_cooldown_s=0,
         )
 
     assert sleep.call_args_list == expected_sleeps
@@ -203,7 +218,7 @@ class _ScriptedDownloader:
         self.attempted: list[int] = []
 
     def download_source(
-        self, sid: int, *, bucket_name: str, s3_prefix: str, prune: bool
+        self, sid: int, *, bucket_name: str, s3_prefix: str, prune: bool, dry_run: bool
     ) -> DownloadResult:
         self.attempted.append(sid)
         outcome = self.script[sid]
@@ -217,11 +232,16 @@ class _ScriptedDownloader:
 
 
 def _batch(
-    fake_s3, script: dict[int, bool | str | list[str] | Exception]
+    fake_s3, script: dict[int, bool | str | list[str] | Exception], cooldown: float = 0
 ) -> tuple[bd.BatchOutcome, list[int]]:
     downloader = _ScriptedDownloader(script)
     outcome = bd.run_batch_download(
-        list(script), downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
+        list(script),
+        downloader=downloader,
+        bucket="b",
+        s3_prefix="p",
+        s3_client=fake_s3,
+        breaker_cooldown_s=cooldown,
     )
     return outcome, downloader.attempted
 
@@ -368,12 +388,39 @@ def test_a_verification_failure_does_not_reset_the_outage_streak(fake_s3):
     assert attempted == [1, 2, 3, 4, 5, 6]
 
 
+def test_empty_exports_do_not_open_the_circuit(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(
+        range(1, 7), "export_empty"
+    )
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped is None
+    assert attempted == list(range(1, 7))
+
+
+def test_an_empty_export_does_not_reset_the_outage_streak(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = {
+        1: "annotations_failed",
+        2: "annotations_failed",
+        3: "export_empty",
+        4: "annotations_failed",
+        5: "annotations_failed",
+        6: "annotations_failed",
+        7: True,
+    }
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5, 6]
+
+
 @pytest.mark.parametrize(
     "error",
     [
         "cannot access source 1: Permission denied",
         "cannot access source 1: HTTP 404",
-        "cannot access source 1: HTTP 403",
     ],
 )
 def test_sources_that_are_inaccessible_do_not_open_the_circuit(fake_s3, error):
@@ -383,3 +430,137 @@ def test_sources_that_are_inaccessible_do_not_open_the_circuit(fake_s3, error):
 
     assert outcome.stopped is None
     assert attempted == list(range(1, 7))
+
+
+@pytest.mark.parametrize("code", ["overview_forbidden", "overview_total_missing"])
+def test_overview_blocks_and_missing_totals_open_the_circuit(fake_s3, code):
+    outcome, attempted = _batch(fake_s3, dict.fromkeys(range(1, 8), code))
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+
+
+def test_a_cooldown_then_a_success_resets_the_streak_and_the_run_continues(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: True, 7: True})
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped is None
+    assert attempted == [1, 2, 3, 4, 5, 6, 7]
+    assert sleep.call_args_list == [call(600)]
+
+
+def test_a_cooldown_then_an_outage_stops_the_run(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 7), False)
+    script[7] = True
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5, 6]
+    assert sleep.call_args_list == [call(600)]
+
+
+def test_a_raising_skip_check_while_a_trip_is_pending_stops_the_run(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: True, 7: True})
+    real = bd.should_skip_download
+
+    def flaky(*, source_id, **kwargs):
+        if source_id == 6:
+            raise RuntimeError("s3 down")
+        return real(source_id=source_id, **kwargs)
+
+    with (
+        patch.object(bd, "should_skip_download", side_effect=flaky),
+        patch.object(bd.time, "sleep") as sleep,
+    ):
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert 7 not in outcome.results
+    assert sleep.call_args_list == []
+
+
+def test_each_trip_gets_its_own_cooldown(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 12), False)
+    script.update({6: True, 12: True})
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped is None
+    assert attempted == list(range(1, 13))
+    assert sleep.call_args_list == [call(600), call(600)]
+
+
+def test_a_trip_on_the_last_source_stops_without_a_cooldown(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert sleep.call_args_list == []
+
+
+def test_a_trip_followed_only_by_skipped_sources_stops_without_a_cooldown(fake_s3):
+    _mark(fake_s3, 6)
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script[6] = True
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert sleep.call_args_list == []
+
+
+def test_a_non_outage_failure_while_probing_keeps_probing(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: "verification_failed", 7: False, 8: True})
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5, 6, 7]
+    assert sleep.call_args_list == [call(600)]
+
+
+def test_delay_and_cooldown_sleep_in_order_around_the_probe(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: True, 7: True})
+    downloader = _ScriptedDownloader(script)
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome = bd.run_batch_download(
+            list(script),
+            downloader=downloader,
+            bucket="b",
+            s3_prefix="p",
+            s3_client=fake_s3,
+            delay_seconds=2,
+            breaker_cooldown_s=600,
+        )
+
+    assert outcome.stopped is None
+    assert downloader.attempted == [1, 2, 3, 4, 5, 6, 7]
+    # Delay after sources 1-5 (5 trips the breaker), cooldown before probing 6, then delay after
+    # the probe and after source 7.
+    assert sleep.call_args_list == [
+        call(2),
+        call(2),
+        call(2),
+        call(2),
+        call(2),
+        call(600),
+        call(2),
+        call(2),
+    ]
