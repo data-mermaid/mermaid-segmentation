@@ -163,14 +163,14 @@ The pin flags go before the subcommand name. See the [scraper flags](../../packa
         --prune --source-ids <id>,<id>,...
       ```
 
-   `--prune` deletes only for a source that verifies in that run. Without the pin, a source with images only in the pinned version fails verification with `image_objects_missing`.
+   `--prune` deletes only for a source that verifies in that run. Without the pin, the run downloads again from CoralNet every image that is only in the pinned version, and the marker gets no `parent`. `verify-existing` without the pin fails such a source with `image_objects_missing`.
 5. Rebuild the dataset under a new version tag:
 
    ```bash
    uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> --upload-to-s3
    ```
 
-   `build-images` logs the `not_found` images of sources whose marker has `parent` as `not_found in pinned sources: <n>`. These images are in the pinned version, so they do not set exit code 1.
+   `build-images` logs the `not_found` images of sources whose marker has `parent` as `not_found in pinned sources: <n>`. `build-images` does not count `not_found` images of sources whose marker has `parent` toward exit code 1, because the pinned version is expected to hold them. `build coralnet raw` checks this and stops with `PinnedImageLost` if it does not.
 6. Stage the next raw version with the same pin. See [Stage the raw version](#stage-the-raw-version).
 
 ## Tune the request rate
@@ -254,7 +254,7 @@ Run this step on an EC2 host in `us-east-1`, not a laptop. A full corpus reads f
 uv run --package segdata-etl segdata build coralnet raw --stage-dir <stage> --build-run <run>
 ```
 
-The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build.
+The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads a parent staged under `<stage>` first; otherwise it syncs the published parent from `mermaid-ic-datasets` into `--cache-dir`. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build.
 
 If the marker of any included source has `parent`, the build needs the parent pin: without `--parent-version` and `--parent-manifest-sha256` it stops with `ParentRequired`. Pass the pin that the scraper used. If a pinned source has an annotated image that neither the scrape nor the parent holds, the build stops with `PinnedImageLost`. A carried image that disagrees with the parent's size stops the build with a `ValueError`; see [When a publish fails](#when-a-publish-fails).
 
