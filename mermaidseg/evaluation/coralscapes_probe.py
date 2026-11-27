@@ -64,6 +64,7 @@ from mermaidseg.evaluation.metrics import (
     BinaryConceptStats,
     ClassConfusion,
     concept_block_from_binary,
+    require_reported_concepts,
 )
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.predictor import CBMPredictor
@@ -583,9 +584,14 @@ def _dense_images(version: DatasetVersion) -> pd.DataFrame:
     return version.images.to_pandas().sort_values("image_id").reset_index(drop=True)
 
 
+def split_group(split: str) -> str:
+    """Return the ``coralscapes_v2`` group that the probes score as ``split``."""
+    return _SPLIT_GROUPS[split]
+
+
 def _split_rows(images: pd.DataFrame, split: str) -> list[dict[str, Any]]:
     """Return the rows of a split's group, in ``image_id`` order."""
-    return images[images["group"] == _SPLIT_GROUPS[split]].to_dict("records")
+    return images[images["group"] == split_group(split)].to_dict("records")
 
 
 def _load_row(version: DatasetVersion, row: Mapping[str, Any]) -> tuple[NDArray, NDArray]:
@@ -1132,12 +1138,7 @@ def evaluate_coralscapes_probe(
         raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
     codes = None
     if concepts is not None:
-        missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concepts.concept_names]
-        if missing:
-            raise RuntimeError(
-                f"Coralscapes eval requires concept channels named exactly {missing}, "
-                f"which concept_names ({len(concepts.concept_names)} entries) does not have."
-            )
+        require_reported_concepts(concepts.concept_names)
         codes = np.stack(
             [
                 build_coralscapes_concept_codes(concepts.taxonomy_csv, concept)

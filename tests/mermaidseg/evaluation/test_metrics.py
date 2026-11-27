@@ -14,6 +14,7 @@ from mermaidseg.evaluation.metrics import (
     MetricBundle,
     TaxonomicRankAccuracy,
     concept_block_from_binary,
+    require_reported_concepts,
 )
 
 
@@ -534,3 +535,19 @@ def test_concept_block_from_binary_rejects_an_entry_missing_a_required_field():
     binary = {"per_concept": {"bleached": {"tp": 1, "fp": 0}}}
     with pytest.raises(RuntimeError, match="bleached stats are missing fields"):
         concept_block_from_binary(binary, "bleached")
+
+
+@pytest.mark.parametrize(
+    ("concept_names", "missing"),
+    [
+        (["sand", "bleached"], r"\['anthropogenic'\]"),
+        (["sand"], r"\['bleached', 'anthropogenic'\]"),
+    ],
+)
+def test_require_reported_concepts_names_the_missing_ones(concept_names, missing):
+    with pytest.raises(RuntimeError, match=missing):
+        require_reported_concepts(concept_names)
+
+
+def test_require_reported_concepts_accepts_names_holding_every_reported_concept():
+    assert require_reported_concepts(["anthropogenic", "sand", "bleached"]) is None

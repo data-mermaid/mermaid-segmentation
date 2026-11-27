@@ -1,9 +1,9 @@
-"""Validation loss of an exported bundle on the val splits of a data config.
+"""Loss of an exported bundle on one split of a data section.
 
-Rebuilds the training-time registry (``mermaidseg.run_setup``) on the ``val`` block of every
-dataset in the data config, read from the synced cache, at the bundle's input size, around the bundle's model, with the
-training and model sections of the bundle's run config, and averages
-the ``ConceptBottleneckLoss`` components over batches:
+Rebuilds the training-time registry (``mermaidseg.run_setup``) on that split's block of every
+dataset in the section, scored as a val block and read from the synced cache, at the bundle's
+input size, around the bundle's model, with the training and model sections of the bundle's
+run config, and averages the ``ConceptBottleneckLoss`` components over batches:
 
     classification              target-class cross-entropy
     kingdom ... genus           per taxonomic rank
@@ -15,7 +15,7 @@ the ``ConceptBottleneckLoss`` components over batches:
 Every run is scored with the same pixel/image reduction (``per_pixel_loss_weight`` and
 ``per_image_loss_weight``, 0.5/0.5 by default), whatever weights it trained with, so runs
 of the loss-weight sweep stay comparable. Each dataset contributes a fixed, seeded subset
-of at most ``max_images_per_dataset`` val images. A component is averaged over the
+of at most ``max_images_per_dataset`` images. A component is averaged over the
 batches in which it has labelled pixels. Results are reported per dataset and overall
 (all batches pooled).
 
@@ -36,12 +36,12 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from mermaidseg.data.config import DataSection
+from mermaidseg.data.config import DataSection, DatasetEntry, Split, SplitSelection
 from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.inference.bundle import ModelBundle
-from mermaidseg.io import REPO_ROOT, ConfigDict, setup_config
+from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.data_parallel import build_step
 from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.model.loss import build_loss
@@ -105,23 +105,31 @@ def _check_layout(bundle: ModelBundle, registry: Any, channel_names: list[str]) 
         )
 
 
-def val_blocks_only(section: DataSection) -> DataSection:
-    """Return ``section`` restricted to the datasets with a val block, each without its other blocks."""
-    return section.model_copy(
-        update={
-            "datasets": {
-                name: entry.model_copy(update={"train": None, "test": None})
-                for name, entry in section.datasets.items()
-                if entry.val is not None
-            }
-        }
-    )
+def split_blocks_only(section: DataSection, split: Split) -> DataSection:
+    """Return ``section`` restricted to the datasets with a ``split`` block, scored as ``val``.
+
+    Each kept entry carries that block's selector and annotators in its ``val`` slot, without the
+    train-only ``transform`` and ``repeat``, and no other block.
+
+    Raises:
+        ValueError: No dataset has a ``split`` block.
+    """
+    datasets: dict[str, DatasetEntry] = {}
+    for name, entry in section.datasets.items():
+        block = getattr(entry, split)
+        if block is None:
+            continue
+        val = SplitSelection(use=block.use, groups=block.groups, annotators=block.annotators)
+        datasets[name] = entry.model_copy(update={"train": None, "val": val, "test": None})
+    if not datasets:
+        raise ValueError(f"data section has no {split} split")
+    return section.model_copy(update={"datasets": datasets})
 
 
-def _bundle_config(data_config: str | Path, bundle: ModelBundle) -> ConfigDict:
-    """Run config: the data section from ``data_config``, model and training from ``bundle``."""
-    cfg = setup_config({"data": str(data_config)}, resolution=bundle.input_size[0])
+def _bundle_config(bundle: ModelBundle) -> ConfigDict:
+    """Run config: the model and training sections of ``bundle``, at the bundle's input size."""
     run = ConfigDict(bundle.config)
+    cfg = ConfigDict()
     cfg.model = run.model.copy()
     cfg.model.input_size = list(bundle.input_size)
     cfg.training = run.training.copy()
@@ -131,7 +139,8 @@ def _bundle_config(data_config: str | Path, bundle: ModelBundle) -> ConfigDict:
 def evaluate_val_loss(
     *,
     bundle: ModelBundle,
-    data_config: str | Path,
+    section: DataSection,
+    split: Split,
     cache_dir: str | Path,
     output_dir: str | Path,
     device: torch.device,
@@ -147,31 +156,32 @@ def evaluate_val_loss(
     apply_source_mask: bool = False,
     image_ids: Mapping[tuple[str, str], Collection[str]] | None = None,
 ) -> dict:
-    """Validation loss components of the loaded ``bundle``, also written to ``<output_dir>/<name>/``.
+    """Loss components of the loaded ``bundle`` on ``split``, also written to ``<output_dir>/<name>/``.
 
-    ``cache_dir`` is the directory ``scripts/sync_data.py`` synced ``data_config`` into, and
-    ``image_ids`` keeps, per ``(dataset, "val")``, only those images (see
-    :func:`mermaidseg.data.factory.build_datasets`).
+    Every dataset of ``section`` with a ``split`` block is scored as a val block over that
+    block's groups (:func:`split_blocks_only`). ``cache_dir`` is the directory
+    ``scripts/sync_data.py`` synced ``section`` into, and ``image_ids`` keeps, per
+    ``(dataset, "val")``, only those images (see :func:`mermaidseg.data.factory.build_datasets`).
+
+    Raises:
+        ValueError: No dataset of ``section`` has a ``split`` block.
     """
     t0 = time.time()
-    cfg = _bundle_config(data_config, bundle)
+    cfg = _bundle_config(bundle)
     resolution = bundle.input_size[0]
     cfg.run_name = name
     cfg.training.distributed = False
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
 
-    section = DataSection.model_validate(cfg.data)
     dataset_dict = build_datasets(
-        val_blocks_only(section),
+        split_blocks_only(section, split),
         Path(cache_dir),
         repo_root=REPO_ROOT,
         padding=cfg.training.padding,
         input_size=cfg.model.input_size,
         image_ids=image_ids,
     )
-    if not dataset_dict:
-        raise ValueError(f"{data_config} has no val split")
     registry, schema = build_registry(
         dataset_dict,
         cfg.training,
@@ -270,7 +280,7 @@ def evaluate_val_loss(
         "per_dataset": per_dataset,
         "n_images": n_images,
         "settings": {
-            "data_config": str(data_config),
+            "split": split,
             "bundle": str(bundle.path),
             "resolution": resolution,
             "max_images_per_dataset": max_images_per_dataset,

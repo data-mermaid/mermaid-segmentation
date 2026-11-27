@@ -530,20 +530,11 @@ def _evaluate_with_stubbed_runner(monkeypatch, name, reader, source_name, tmp_pa
     return result, seen
 
 
-def test_a_pacific_style_run_records_its_sorted_unique_groups(tmp_path, monkeypatch):
-    cache = write_eval_cache(tmp_path)
-    reader = pacific_reader(cache.section, cache.cache_dir, tmp_path)
-
-    result, _ = _evaluate_with_stubbed_runner(
-        monkeypatch, "pacific_labeled_corals", reader, "pacific_labeled_corals", tmp_path
-    )
-
-    assert result["groups"] == ["heron_reef", "line_islands"]
-
-
 def test_groups_are_unique_and_sorted_when_a_group_has_several_images(tmp_path, monkeypatch):
     cache = write_eval_cache(tmp_path)
-    reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s3", "s1"], split="val")
+    reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s1", "s3"], split="val")
+    # Images arrive in descending group order, so only the explicit sort yields ["s1", "s3"].
+    reader.images = reader.images.sort_values("group", ascending=False)
 
     result, _ = _evaluate_with_stubbed_runner(
         monkeypatch, "coralnet_val", reader, "coralnet", tmp_path
@@ -558,7 +549,7 @@ def test_the_runner_gets_the_eval_name_lookups_and_options(tmp_path, monkeypatch
 
     result, seen = _evaluate_with_stubbed_runner(
         monkeypatch,
-        "pacific_labeled_corals",
+        "pacific_val",
         reader,
         "pacific_labeled_corals",
         tmp_path,
@@ -573,7 +564,7 @@ def test_the_runner_gets_the_eval_name_lookups_and_options(tmp_path, monkeypatch
     assert sorted(seen.pop("concept_lookup").name_to_row) == ["porites", "sand"]
     assert seen.pop("reader") is reader
     assert seen == {
-        "eval_name": "pacific_labeled_corals",
+        "eval_name": "pacific_val",
         "unit_col": "group",
         "predictor": "predictor",
         "concept_names": [],

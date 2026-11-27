@@ -14,6 +14,7 @@ the pooled accumulator.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,20 @@ from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 #: Binary concepts reported explicitly (accuracy / precision / recall / F1) next to
 #: the macro binary scores.
 REPORTED_BINARY_CONCEPTS: tuple[str, ...] = ("bleached", "anthropogenic")
+
+
+def require_reported_concepts(concept_names: Sequence[str]) -> None:
+    """Check that ``concept_names`` holds every name in ``REPORTED_BINARY_CONCEPTS``.
+
+    Raises:
+        RuntimeError: A reported binary concept is missing; the message names each one.
+    """
+    missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concept_names]
+    if missing:
+        raise RuntimeError(
+            f"the evaluation requires concept channels named exactly {missing}, "
+            f"which concept_names ({len(concept_names)} entries) does not have."
+        )
 
 
 def _safe_div(num: float, den: float) -> float:
