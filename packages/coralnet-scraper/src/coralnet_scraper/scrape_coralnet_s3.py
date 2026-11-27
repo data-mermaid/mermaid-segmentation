@@ -4,6 +4,8 @@ Run: ``uv run --package coralnet-scraper coralnet-scrape``. The destination come
 ``MERMAID_CORALNET_BUCKET`` (required) and ``MERMAID_CORALNET_PREFIX`` (optional).
 ``coralnet-scrape verify-existing`` marks sources already on S3 that verify;
 ``coralnet-scrape invalidate`` deletes completion markers so the next run downloads again.
+``--parent-version`` with ``--parent-manifest-sha256`` pins a published ``coralnet-raw`` version:
+its images count as present for the default run and ``verify-existing``.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import re
 import sys
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -38,6 +41,7 @@ from coralnet_scraper.config import (
 )
 from coralnet_scraper.downloader import CoralNetDownloader
 from coralnet_scraper.models import DownloadResult
+from coralnet_scraper.pin import RawPin, load_raw_pin
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +198,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Run even when CoralNet lists under 95%% of the sources it listed last run",
     )
+    p.add_argument(
+        "--parent-version",
+        help="Version of the published coralnet-raw dataset whose images count as present",
+    )
+    p.add_argument(
+        "--parent-manifest-sha256",
+        help="Manifest digest of --parent-version; required with it",
+    )
+    p.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("outputs") / "segdata-cache",
+        help="Local cache of the pinned version's tables (default: outputs/segdata-cache)",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     commands = p.add_subparsers(dest="command", metavar="{verify-existing,invalidate}")
     verify = commands.add_parser(
@@ -239,6 +257,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "--prune, --dry-run, --allow-source-drop and --breaker-cooldown "
             f"do not apply to {args.command}"
         )
+    if (args.parent_version is None) != (args.parent_manifest_sha256 is None):
+        p.error("--parent-version and --parent-manifest-sha256 go together")
+    if args.command == "invalidate" and args.parent_version is not None:
+        p.error("--parent-version and --parent-manifest-sha256 do not apply to invalidate")
     if args.command is None and args.dry_run and not args.prune:
         p.error("--dry-run needs --prune")
     if (
@@ -395,6 +417,13 @@ def _verify_existing(
     return 1 if failed else 0
 
 
+def _load_pin(args: argparse.Namespace, s3: Any) -> RawPin | None:
+    """Return the pinned ``coralnet-raw`` version the flags name, or ``None`` without them."""
+    if args.parent_version is None:
+        return None
+    return load_raw_pin(s3, args.parent_version, args.parent_manifest_sha256, args.cache_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the scraper command line.
 
@@ -410,7 +439,8 @@ def main(argv: list[str] | None = None) -> int:
         kind. Every run that
         reaches the batch loop writes a JSON run report to ``<prefix>/_runs/``. The
         ``verify-existing`` and ``invalidate`` subcommands read no credentials, do not log
-        in, and return their own codes.
+        in, and return their own codes. With ``--parent-version`` the pinned version's tables are
+        synced into ``--cache-dir`` before the downloader is built.
     """
     args = _parse_args(argv)
     logging.basicConfig(
@@ -423,12 +453,15 @@ def main(argv: list[str] | None = None) -> int:
     prefix = get_prefix()
     # The subcommands read only public overview and listing pages, so they never log in.
     user, pw = load_coralnet_credentials() if args.command is None else ("", "")
+    s3 = boto3.client("s3")
+    pin = _load_pin(args, s3)
     downloader = CoralNetDownloader(
         user,
         pw,
         max_workers=args.scraper_workers,
         export_workers=args.export_workers,
         requests_per_second=args.requests_per_second,
+        pin=pin,
     )
     logger.info(
         "Scraper max_workers=%d export_workers=%d requests_per_second=%s",
@@ -436,7 +469,6 @@ def main(argv: list[str] | None = None) -> int:
         downloader.export_workers,
         downloader.requests_per_second,
     )
-    s3 = boto3.client("s3")
     if args.command == "invalidate":
         return _invalidate(args, downloader, s3, bucket, prefix)
     if args.command is None and not downloader.login():
@@ -475,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
             "dry_run": bool(args.dry_run),
             "allow_source_drop": bool(args.allow_source_drop),
             "breaker_cooldown_s": breaker_cooldown_s,
+            "parent_version": args.parent_version,
+            "parent_manifest_sha256": args.parent_manifest_sha256,
         },
         started_at=started_at,
         finished_at=datetime.now(UTC),

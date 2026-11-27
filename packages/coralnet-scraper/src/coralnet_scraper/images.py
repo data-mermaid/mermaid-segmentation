@@ -291,9 +291,17 @@ class ImageFetcher:
         )
 
     def download_missing_images(
-        self, refs: list[ImageRef], source_id: int, bucket_name: str, s3_prefix: str
+        self,
+        refs: list[ImageRef],
+        source_id: int,
+        bucket_name: str,
+        s3_prefix: str,
+        *,
+        pinned: frozenset[int] = frozenset(),
     ) -> ImageFailures:
         """Download every image of ``refs`` that has no non-empty object on S3 yet.
+
+        Images whose id is in ``pinned`` are skipped: a published version holds them.
 
         Returns:
             The failure counts of :meth:`download_images`.
@@ -304,11 +312,18 @@ class ImageFetcher:
             for key, size in s3_io.object_sizes(self.s3, bucket_name, images_prefix).items()
             if size > 0
         }
+        unpinned = [r for r in refs if r.id not in pinned]
         todo = [
-            r for r in refs if s3_io.object_key_image(s3_prefix, source_id, str(r.id)) not in stored
+            r
+            for r in unpinned
+            if s3_io.object_key_image(s3_prefix, source_id, str(r.id)) not in stored
         ]
         logger.info(
-            "Source %s: %d of %d images already on S3", source_id, len(refs) - len(todo), len(refs)
+            "Source %s: %d of %d images already on S3, %d pinned",
+            source_id,
+            len(unpinned) - len(todo),
+            len(refs),
+            len(refs) - len(unpinned),
         )
         failures = self.download_images(todo, source_id, bucket_name, s3_prefix)
         if failures != ImageFailures():

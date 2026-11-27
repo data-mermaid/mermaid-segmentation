@@ -105,7 +105,13 @@ def _list_warnings(image_list: pd.DataFrame, annotated: set[str]) -> list[str]:
 
 
 def verify_source(
-    s3: Any, bucket: str, prefix: str, source_id: int, *, expected_total: int
+    s3: Any,
+    bucket: str,
+    prefix: str,
+    source_id: int,
+    *,
+    expected_total: int,
+    pinned: frozenset[int] = frozenset(),
 ) -> Verification:
     """Check a source's objects on S3 against each other and against CoralNet's image count.
 
@@ -115,9 +121,12 @@ def verify_source(
         prefix: Base key prefix of the scrape.
         source_id: CoralNet source id.
         expected_total: The image count CoralNet's overview reports for the source.
+        pinned: Image ids a pinned ``coralnet-raw`` version holds; a listed image with no
+            non-empty object counts as present when its id is here.
 
     Returns:
-        The failures, warnings and counts. A missing ``annotations.csv`` or ``image_list.csv``,
+        The failures, warnings and counts (``pinned_images`` counts listed images present only
+        through ``pinned``). A missing ``annotations.csv`` or ``image_list.csv``,
         or unusable annotation columns, end the checks early with no counts.
     """
     v = Verification()
@@ -144,7 +153,8 @@ def verify_source(
     v.warnings += _list_warnings(image_list, annotated)
 
     image_sizes = _image_object_sizes(objects, f"{base}images/")
-    missing = [i for i in ids if image_sizes.get(i, 0) <= 0]
+    absent = [i for i in ids if image_sizes.get(i, 0) <= 0]
+    missing = [i for i in absent if i not in pinned]
     if missing:
         v.failures.append(f"image_objects_missing:{len(missing)}")
     orphans = set(image_sizes) - set(ids)
@@ -156,6 +166,7 @@ def verify_source(
         "annotation_rows": len(annotations),
         "annotated_images": len(annotated),
         "image_objects": len(image_sizes),
+        "pinned_images": len(absent) - len(missing),
     }
     return v
 
