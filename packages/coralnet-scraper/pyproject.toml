@@ -12,6 +12,7 @@ dependencies = [
     "boto3",
     "pandas",
     "pillow>=13.0",
+    "pyarrow",
     "requests",
     "requests-ratelimiter",
     "segdata-spec",
