@@ -94,3 +94,42 @@ def test_login_fails_when_the_result_page_shows_no_sign_out_link(http_server):
     assert dl.login() is False
     assert dl.logged_in is False
     assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
+
+
+def _session_with_cookie_login(value_after_login: str) -> CoralNetSession:
+    """Return a session whose stubbed login sets ``sessionid`` to ``value_after_login``."""
+    auth = CoralNetSession("u", "p", max_workers=1, requests_per_second=None)
+
+    def fake_login(session: requests.Session) -> None:
+        session.cookies.set("sessionid", value_after_login)
+
+    auth._perform_login = fake_login  # type: ignore[method-assign]
+    return auth
+
+
+def test_thread_session_picks_up_cookies_after_main_relogin_and_keeps_its_session():
+    auth = _session_with_cookie_login("b")
+    auth.session.cookies.set("sessionid", "a")
+
+    first = auth.thread_session()
+    assert first.cookies.get("sessionid") == "a"
+    assert auth.thread_session() is first
+    assert first.cookies.get("sessionid") == "a"
+
+    auth.relogin(auth.session)
+
+    second = auth.thread_session()
+    assert second is first
+    assert second.cookies.get("sessionid") == "b"
+
+
+def test_relogin_of_another_session_does_not_refresh_thread_sessions():
+    auth = _session_with_cookie_login("b")
+    auth.session.cookies.set("sessionid", "a")
+    thread_session = auth.thread_session()
+
+    auth.relogin(requests.Session())
+    auth.session.cookies.set("sessionid", "c")
+
+    assert auth.thread_session() is thread_session
+    assert thread_session.cookies.get("sessionid") == "a"
