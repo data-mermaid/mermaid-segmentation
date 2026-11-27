@@ -42,21 +42,22 @@ def test_probe_git_reports_dirty_and_pushed(tmp_path):
     assert (local.dirty, local.pushed) == (False, False)
 
 
-def test_refuse_unpublishable_refuses_a_dirty_tree(tmp_path):
-    (tmp_path / "uv.lock").write_text("lock")
-    with pytest.raises(PublishRefused, match="uncommitted changes to tracked files"):
-        refuse_unpublishable(GitState(sha="abc", dirty=True, pushed=True), tmp_path)
-
-
-def test_refuse_unpublishable_refuses_an_unpushed_head(tmp_path):
-    (tmp_path / "uv.lock").write_text("lock")
-    with pytest.raises(PublishRefused, match="HEAD abc is not contained in any remote branch"):
-        refuse_unpublishable(GitState(sha="abc", dirty=False, pushed=False), tmp_path)
-
-
-def test_refuse_unpublishable_refuses_a_tree_without_uv_lock(tmp_path):
-    with pytest.raises(PublishRefused, match="no uv.lock"):
-        refuse_unpublishable(GitState(sha="abc", dirty=False, pushed=True), tmp_path)
+@pytest.mark.parametrize(
+    ("dirty", "pushed", "with_lock", "keyword"),
+    [
+        (True, True, True, "uncommitted"),
+        (False, False, True, "not contained in any remote branch"),
+        (False, True, False, "no uv.lock"),
+    ],
+    ids=["dirty", "unpushed", "no-uv-lock"],
+)
+def test_refuse_unpublishable_refuses_an_unpublishable_tree(
+    tmp_path, dirty, pushed, with_lock, keyword
+):
+    if with_lock:
+        (tmp_path / "uv.lock").write_text("lock")
+    with pytest.raises(PublishRefused, match=keyword):
+        refuse_unpublishable(GitState(sha="abc", dirty=dirty, pushed=pushed), tmp_path)
 
 
 def test_refuse_unpublishable_returns_the_uv_lock_hash_for_a_clean_pushed_tree(tmp_path):

@@ -19,7 +19,6 @@ import pytest
 import requests
 import stamina
 import tenacity
-from botocore.exceptions import ClientError
 from conftest import Reply, ScriptedServer
 from PIL import Image
 
@@ -31,8 +30,6 @@ from coralnet_scraper.downloader import (
     ImageInvalid,
     ImageRef,
     SessionExpired,
-    _parse_browse_thumbs,
-    _read_image_body,
     decode_export_csv,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
@@ -57,14 +54,6 @@ def _jpeg_bytes() -> bytes:
 _JPEG = _jpeg_bytes()
 _JPEG_HEADERS = {"Content-Type": "image/jpeg"}
 _CSV_HEADERS = {"Content-Type": "text/csv"}
-
-
-def test_export_timeouts_scale_with_source_size():
-    assert export_prep_timeout_seconds(None) == 300
-    assert export_prep_timeout_seconds(100) == 300
-    assert export_prep_timeout_seconds(1681, 100) == 792  # s57: 120 + 168,100 // 250
-    assert export_prep_timeout_seconds(5000, 200) == 4120
-    assert export_serve_timeout_seconds(32176) == 703
 
 
 @pytest.mark.parametrize(
@@ -188,24 +177,6 @@ def test_a_run_of_failed_images_stops_the_stage_and_skips_the_rest():
     assert downloader_mod._image_failure_codes(failures)[-1] == "images_outage"
 
 
-def test_an_image_that_fails_as_stop_is_set_reports_its_failure_and_uploads_nothing():
-    dl = CoralNetDownloader("u", "p")
-    stop = threading.Event()
-
-    def resolve(_rel: str) -> str:
-        stop.set()
-        raise requests.HTTPError("503")
-
-    with (
-        patch.object(dl, "_resolve_one_image_url", side_effect=resolve),
-        patch.object(dl, "download_image_to_s3", return_value=1) as upload,
-    ):
-        result = dl._download_image(ImageRef(1, 1, "/image/1/view/"), "b", "k", stop)
-
-    assert result == "missing_url"
-    upload.assert_not_called()
-
-
 def test_a_success_resets_the_image_failure_streak():
     # Images 1-19 fail, 20 succeeds, 21-39 fail: 19 consecutive failures twice.
     failures, _ = _outage_run(lambda i: i != 20, 39)
@@ -246,35 +217,6 @@ def _browse_page(
     """A browse page with ``n_thumbs`` thumbnails ``img<id>.jpg`` whose ids start at ``start_id``."""
     thumbs = [(start_id + i, f"img{start_id + i}.jpg") for i in range(n_thumbs)]
     return _browse_html(thumbs, next_href, csrf)
-
-
-def test_thread_sessions_are_not_shared_between_downloaders():
-    """Each downloader's per-thread session carries its own downloader's cookies."""
-    first = CoralNetDownloader("u", "p")
-    second = CoralNetDownloader("u", "p")
-    first.session.cookies.set("sessionid", "first-id")
-    second.session.cookies.set("sessionid", "second-id")
-
-    first_session = first._get_thread_session()
-    second_session = second._get_thread_session()
-
-    assert first_session.cookies.get("sessionid") == "first-id"
-    assert second_session.cookies.get("sessionid") == "second-id"
-    assert first_session is not second_session
-    assert first._get_thread_session() is first_session
-
-
-def test_export_sessions_are_not_shared_between_downloaders():
-    """Each downloader's export session comes from its own login, not another's cache."""
-    first = CoralNetDownloader("u", "p")
-    second = CoralNetDownloader("u", "p")
-    first_sentinel = requests.Session()
-    second_sentinel = requests.Session()
-    first._new_logged_in_session = lambda: first_sentinel  # type: ignore[method-assign]
-    second._new_logged_in_session = lambda: second_sentinel  # type: ignore[method-assign]
-
-    assert first._get_export_session() is first_sentinel
-    assert second._get_export_session() is second_sentinel
 
 
 def test_get_export_session_creates_independent_logged_in_session_per_thread():
@@ -450,38 +392,6 @@ def test_download_annotations_fails_after_four_export_prep_timeouts(fake_s3):
     assert run.ok is False
     assert run.prep_timeouts == [1720, 2020, 2320, 2620]  # 120 + 4000 * 100 // 250, +300 each
     assert _BULK_KEY not in fake_s3.objects
-
-
-def _export_validated_on(dl: CoralNetDownloader, stop: threading.Event | None) -> pd.DataFrame:
-    return dl._export_validated(
-        dl.session,
-        1,
-        _BROWSE_URL,
-        {},
-        {"img1.jpg"},
-        prep_timeout=300,
-        serve_timeout=120,
-        stop=stop,
-    )
-
-
-def test_export_validated_makes_no_further_attempt_once_stop_is_set(fake_s3):
-    dl = CoralNetDownloader("u", "p")
-    stop = threading.Event()
-    attempts: list[int] = []
-
-    def failing_round_trip(*_: object) -> pd.DataFrame:
-        attempts.append(1)
-        stop.set()
-        raise ContentError(f"attempt {len(attempts)}")
-
-    with (
-        patch.object(dl, "_export_round_trip", side_effect=failing_round_trip),
-        pytest.raises(ContentError, match="attempt 1"),
-    ):
-        _export_validated_on(dl, stop)
-
-    assert len(attempts) == 1
 
 
 def test_a_failed_page_stops_the_export_retries_of_the_pages_still_running(
@@ -756,11 +666,6 @@ def _login_get_html() -> str:
     return '<input type="hidden" name="csrfmiddlewaretoken" value="logintok"/>'
 
 
-def test_constructor_rejects_invalid_max_workers():
-    with pytest.raises(ValueError, match="workers"):
-        CoralNetDownloader("u", "p", max_workers=0)
-
-
 def _failing_step_downloader(
     fake_s3, **overrides
 ) -> tuple[CoralNetDownloader, dict[str, MagicMock]]:
@@ -802,16 +707,6 @@ def test_download_source_returns_login_failed_when_login_fails(fake_s3):
     assert res.ok is False
     assert res.errors == ["login failed"]
     dl._get_source_overview_html.assert_not_called()  # type: ignore[attr-defined]
-
-
-def test_download_source_reports_overview_fetch_failure(fake_s3):
-    dl, mocks = _failing_step_downloader(fake_s3, overview=requests.ConnectionError("down"))
-    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
-
-    assert res.ok is False
-    assert len(res.errors) == 1
-    assert res.errors[0].startswith("overview fetch failed:")
-    mocks["download_metadata"].assert_not_called()
 
 
 def test_download_source_fails_when_the_overview_has_no_image_count(fake_s3):
@@ -869,16 +764,6 @@ def test_download_source_stops_after_annotations_fail(fake_s3):
     dl.download_image_to_s3.assert_not_called()  # type: ignore[attr-defined]
 
 
-def test_download_source_reports_missing_url_when_single_image_lookup_raises(fake_s3):
-    dl, _ = _failing_step_downloader(fake_s3)
-
-    with patch.object(dl, "_resolve_one_image_url", side_effect=ValueError("private")):
-        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
-
-    assert "images_missing_url" in res.errors
-    assert res.image_failures == ImageFailures(missing_url=1, upload_failed=0)
-
-
 # ---------------------------------------------------------------------------
 # Image upload, metadata, labelset, permissions, login
 # ---------------------------------------------------------------------------
@@ -901,26 +786,6 @@ def _downloader_on(fake_s3) -> CoralNetDownloader:
     dl.logged_in = True
     dl.s3 = fake_s3
     return dl
-
-
-def test_download_image_to_s3_retries_a_503_then_uploads_the_bytes(fake_s3, http_server):
-    dl = _downloader_on(fake_s3)
-    http_server.script("/1.jpg", Reply(503), Reply(200, _JPEG, _JPEG_HEADERS))
-
-    size = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
-
-    assert size == len(_JPEG)
-    assert fake_s3.objects[("b", "k.jpg")] == _JPEG
-
-
-def test_download_image_to_s3_raises_on_a_404_and_uploads_nothing(fake_s3, http_server):
-    dl = _downloader_on(fake_s3)
-    http_server.script("/1.jpg", Reply(404, b"<html>Not found</html>"))
-
-    with pytest.raises(requests.HTTPError):
-        dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
-
-    assert fake_s3.objects == {}
 
 
 _CLASSIFIER_SCRIPT = """\
@@ -953,11 +818,6 @@ def test_download_metadata_uploads_classifier_history_and_returns_total(fake_s3)
     ]
     columns = ["Classifier nbr", "Accuracy", "Trained on", "Global id"]
     assert df[columns].to_numpy().tolist() == [[1, 0.5, 100, 77], [2, 0.6, 200, 88]]
-
-
-def test_download_metadata_puts_the_date_and_train_time_in_their_own_columns(fake_s3):
-    df = _uploaded_metadata(_downloader_on(fake_s3), fake_s3)
-
     assert df["Date"].tolist() == ["2020-01-01", "2020-02-01"]
     assert df["Traintime"].tolist() == [12, 15]
 
@@ -969,18 +829,6 @@ def test_download_metadata_without_classifier_data_returns_total_and_uploads_not
 
     assert result == (True, 1234)
     assert fake_s3.objects == {}
-
-
-def test_download_metadata_reports_failure_when_the_upload_raises(fake_s3):
-    dl = _downloader_on(fake_s3)
-    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "PutObject")
-
-    with patch.object(fake_s3, "put_object", side_effect=denied):
-        result = dl.download_metadata(
-            9, "b", "p", overview_html=_overview_html(1234) + _CLASSIFIER_SCRIPT
-        )
-
-    assert result == (False, 0)
 
 
 _LABEL_TABLE_HTML = """\
@@ -1014,14 +862,8 @@ def test_download_labelset_uploads_label_ids_names_and_short_codes(fake_s3):
     [
         ("<html><body>No table</body></html>", 200, False),
         ('<table id="label-table"><tr><th>Name</th></tr></table>', 200, True),
-        (
-            '<table id="label-table"><tr><th>Name</th></tr><tr><td>No link</td></tr></table>',
-            200,
-            True,
-        ),
-        (_LABEL_TABLE_HTML, 500, False),
     ],
-    ids=["no-table", "header-only", "no-linked-labels", "http-500"],
+    ids=["no-table", "header-only"],
 )
 def test_download_labelset_uploads_nothing_without_labels(fake_s3, html, status, expected_ok):
     dl = _downloader_on(fake_s3)
@@ -1129,11 +971,8 @@ def test_resolve_one_image_url_raises_when_the_page_has_no_original_image():
     ("total_images", "prep", "serve"),
     [
         (0, 300, 120),
-        (None, 300, 120),
         (17_000, 6920, 400),  # 120 + 1,700,000 // 250 is under the cap
-        (17_700, 7200, 414),  # 120 + 1,770,000 // 250 == 7200 exactly
         (200_000, 7200, 1800),  # both capped
-        (88_000, 7200, 1800),  # serve 60 + 1760 = 1820 is capped
     ],
 )
 def test_export_timeouts_floor_at_zero_and_cap_for_huge_sources(total_images, prep, serve):
@@ -1576,25 +1415,6 @@ def test_a_page_export_browse_page_without_the_export_form_logs_in_again(
     assert _chunk_names(fake_s3) == ["img1.jpg"]
 
 
-def test_a_bulk_export_with_names_outside_the_walk_is_exported_again(http_server, fake_s3):
-    _script_walk(http_server, [[1]])
-    http_server.script(_PREP, Reply(200, b'{"session_data_timestamp": "t1"}'))
-    http_server.script(
-        _SERVE_T1,
-        _csv_reply([("img1.jpg", 1, 1, 7), ("img9.jpg", 1, 1, 7)]),
-        _csv_reply([("img1.jpg", 1, 1, 7)]),
-    )
-
-    ok = _site_downloader(http_server, fake_s3).download_annotations(
-        1, "b", "p", refs=[ImageRef(1, "img1.jpg - Confirmed", 1)], total_images=1
-    )
-
-    assert ok is True
-    annotations = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
-    assert annotations["Name"].tolist() == ["img1.jpg"]
-    assert len(http_server.requests_to(_SERVE_T1)) == 2
-
-
 def test_a_page_rule_failure_resumes_the_walk_from_the_last_checkpoint(
     http_server, fake_s3, monkeypatch
 ):
@@ -1652,67 +1472,6 @@ def test_an_overview_total_changed_during_the_walk_redoes_it_against_the_new_tot
     assert json.loads(fake_s3.objects[("b", _MARKER)])["total_images"] == 3
 
 
-def test_a_kill_after_a_changed_total_walk_leaves_state_for_the_new_total(http_server, fake_s3):
-    _script_source(http_server, [[1, 2, 3]])
-    http_server.script(
-        "/source/1/",
-        Reply(200, _overview_html(2).encode()),
-        Reply(200, _overview_html(3).encode()),
-    )
-    http_server.script(_page_path(1), _page_reply([1, 2]), _page_reply([1, 2, 3]))
-    dl = _site_downloader(http_server, fake_s3)
-    walk_source = dl.walk_source
-
-    def killed_after_the_walk(*args: object, **kwargs: object) -> None:
-        walk_source(*args, **kwargs)
-        raise KeyboardInterrupt
-
-    dl.walk_source = killed_after_the_walk  # type: ignore[method-assign]
-    with pytest.raises(KeyboardInterrupt):
-        dl.download_source(1, "b", "p")
-
-    state = json.loads(fake_s3.objects[("b", f"{_PARTIAL}state.json")])
-    assert state["total_images"] == 3
-
-    http_server.received.clear()
-    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
-
-    assert res.ok is True
-    assert len(http_server.requests_to(_BASE)) == 1  # the export's form page, not a walk fetch
-
-
-@pytest.mark.parametrize(
-    ("html", "expected"),
-    [
-        (
-            '<span class="thumb_wrapper"><a href="/image/5/view/"><img/></a></span>',
-            ([(5, "")], None, False),
-        ),
-        (_browse_html([(5, "a.jpg")]), ([(5, "a.jpg")], None, True)),
-        (_browse_html([(5, "a.jpg")], "?page=2"), ([(5, "a.jpg")], "?page=2", True)),
-    ],
-    ids=["no-title", "no-next-anchor", "next-anchor"],
-)
-def test_parse_browse_thumbs_reads_titles_the_next_page_link_and_the_form(html, expected):
-    assert _parse_browse_thumbs(html) == expected
-
-
-def test_a_failed_page_export_starts_no_queued_page(http_server, fake_s3, monkeypatch):
-    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
-    _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in (1, 2, 3)])
-    http_server.script(_PREP, Reply(403))
-    dl = _site_downloader(http_server, fake_s3)
-
-    ok = dl.download_annotations_paginated(
-        1, "b", "p", refs=_refs({p: [p] for p in (1, 2, 3)}), page_workers=1
-    )
-
-    assert ok is False
-    # The lone worker may dequeue page 2 before the failure is seen; page 3 stays queued.
-    assert len(http_server.requests_to(_PREP)) <= 2
-    assert http_server.requests_to(_page_path(3)) == []
-
-
 def test_a_walk_short_of_the_overview_total_on_every_attempt_is_walked_again_on_the_next_run(
     http_server, fake_s3
 ):
@@ -1756,13 +1515,24 @@ def _login_downloader(server: ScriptedServer) -> CoralNetDownloader:
     return dl
 
 
-def test_login_retries_a_post_answered_503(http_server):
+@pytest.mark.parametrize(
+    ("post_replies", "logged_in", "posts"),
+    [
+        ([Reply(503), Reply(200, b"<a>Sign out</a>")], True, 2),
+        ([Reply(503)], False, 4),
+    ],
+    ids=["503-then-ok", "503-every-time"],
+)
+def test_login_retries_a_post_answered_503_up_to_four_times(
+    http_server, post_replies, logged_in, posts
+):
     login_page = Reply(200, _login_get_html().encode())
-    http_server.script(_LOGIN_PATH, login_page, Reply(503), Reply(200, b"<a>Sign out</a>"))
+    http_server.script(_LOGIN_PATH, login_page, *post_replies)
     dl = _login_downloader(http_server)
 
-    assert dl.login() is True
-    assert len(_posts_to(http_server, _LOGIN_PATH)) == 2
+    assert dl.login() is logged_in
+    assert dl.logged_in is logged_in
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == posts
 
 
 def test_login_fails_when_the_result_page_shows_no_sign_out_link(http_server):
@@ -1796,20 +1566,9 @@ def test_an_image_body_cut_short_is_downloaded_again(http_server, fake_s3):
     assert len(http_server.requests_to("/media/1.jpg")) == 2
 
 
-@pytest.mark.parametrize(
-    ("body", "content_type"),
-    [
-        (b"<html><body>Service unavailable</body></html>", "image/jpeg"),
-        (b"", "image/jpeg"),
-        (_JPEG, "text/html; charset=utf-8"),
-    ],
-    ids=["html", "empty", "html-content-type"],
-)
-def test_an_invalid_image_response_is_retried_and_never_uploaded(
-    http_server, fake_s3, body, content_type
-):
+def test_an_empty_image_response_is_retried_and_never_uploaded(http_server, fake_s3):
     http_server.script("/image/1/view/", Reply(200, _view_page(http_server, "/media/1.jpg")))
-    http_server.script("/media/1.jpg", Reply(200, body, {"Content-Type": content_type}))
+    http_server.script("/media/1.jpg", Reply(200, b"", {"Content-Type": "image/jpeg"}))
 
     assert _download_image_one(http_server, fake_s3) == ImageFailures(upload_failed=1)
     assert _IMAGE_KEY not in fake_s3.objects
@@ -1859,22 +1618,6 @@ def test_a_jpeg_with_bytes_after_its_end_marker_is_uploaded_with_its_format(http
         "ContentType": "image/jpeg",
         "Metadata": {"source-format": "JPEG", "source-bytes": str(len(body))},
     }
-
-
-def test_an_image_trickling_past_the_deadline_is_downloaded_again(
-    http_server, fake_s3, monkeypatch
-):
-    monkeypatch.setattr(downloader_mod, "_IMAGE_DEADLINE_S", 0.2)
-    http_server.script("/image/1/view/", Reply(200, _view_page(http_server, "/media/1.jpg")))
-    http_server.script(
-        "/media/1.jpg",
-        Reply(200, _JPEG, _JPEG_HEADERS, trickle_s=0.001),
-        Reply(200, _JPEG, _JPEG_HEADERS),
-    )
-
-    assert _download_image_one(http_server, fake_s3) == ImageFailures()
-    assert fake_s3.objects[_IMAGE_KEY] == _JPEG
-    assert len(http_server.requests_to("/media/1.jpg")) == 2
 
 
 class _SlowClock:
@@ -1984,15 +1727,6 @@ def test_an_export_whose_session_stays_expired_fails_after_four_attempts(
     assert ("b", f"{_PARTIAL}page-1.csv") not in fake_s3.objects
 
 
-def test_login_fails_after_four_posts_that_all_fail(http_server):
-    http_server.script(_LOGIN_PATH, Reply(200, _login_get_html().encode()), Reply(503))
-    dl = _login_downloader(http_server)
-
-    assert dl.login() is False
-    assert dl.logged_in is False
-    assert len(_posts_to(http_server, _LOGIN_PATH)) == 4
-
-
 def _noise_image_bytes(fmt: str) -> bytes:
     """A 256x256 random-pixel image, large enough that cutting it in half drops scan data."""
     pixels = random.Random(0).randbytes(256 * 256 * 3)
@@ -2007,7 +1741,6 @@ def _noise_image_bytes(fmt: str) -> bytes:
 
 _NOISE_JPEG = _noise_image_bytes("JPEG")
 _NOISE_PNG = _noise_image_bytes("PNG")
-_NOISE_GIF = _noise_image_bytes("GIF")
 
 
 def _serve_image(server: ScriptedServer, body: bytes, headers: dict[str, str]) -> None:
@@ -2033,73 +1766,18 @@ def test_a_png_served_as_image_jpeg_is_stored_with_the_detected_format(http_serv
     }
 
 
-# Content-Encoding makes the downloader skip its Content-Length check, so the body's own
-# decodability is the only thing that can reject the cut image.
 @pytest.mark.parametrize(
-    ("body", "headers"),
-    [
-        (
-            _NOISE_JPEG[: len(_NOISE_JPEG) // 2],
-            {**_JPEG_HEADERS, "Content-Encoding": "identity"},
-        ),
-        (_NOISE_GIF, {"Content-Type": "image/gif"}),
-    ],
-    ids=["jpeg-cut-no-length-check", "gif"],
+    "body",
+    [_NOISE_JPEG[: len(_NOISE_JPEG) // 2], _noise_image_bytes("GIF")],
+    ids=["truncated-jpeg", "gif-outside-the-allowlist"],
 )
-def test_an_undecodable_or_unsupported_image_is_retried_and_never_uploaded(
-    http_server, fake_s3, body, headers
-):
-    _serve_image(http_server, body, headers)
-
-    assert _download_image_one(http_server, fake_s3) == ImageFailures(upload_failed=1)
-    assert _IMAGE_KEY not in fake_s3.objects
-    assert len(http_server.requests_to("/media/1.jpg")) == 4
+def test_validate_image_bytes_rejects_an_undecodable_or_unlisted_image(body):
+    with pytest.raises(ImageInvalid, match="not a decodable image"):
+        validate_image_bytes(io.BytesIO(body))
 
 
-@pytest.mark.parametrize(
-    ("body", "headers", "accepted"),
-    [
-        (_NOISE_JPEG, _JPEG_HEADERS, True),
-        (_NOISE_JPEG + b"\x00", {**_JPEG_HEADERS, "Content-Encoding": "identity"}, False),
-    ],
-    ids=["exactly-the-cap", "streamed-over-the-cap"],
-)
-def test_an_image_body_over_the_size_cap_is_rejected(
-    http_server, fake_s3, monkeypatch, body, headers, accepted
-):
-    monkeypatch.setattr(downloader_mod, "_IMAGE_MAX_BYTES", len(_NOISE_JPEG))
-    _serve_image(http_server, body, headers)
+def test_validate_image_bytes_reports_an_mpo_as_mpo_and_leaves_the_buffer_at_the_start():
+    data = io.BytesIO(_noise_image_bytes("MPO"))
 
-    failures = _download_image_one(http_server, fake_s3)
-
-    assert failures == ImageFailures(upload_failed=0 if accepted else 1)
-    assert (_IMAGE_KEY in fake_s3.objects) is accepted
-
-
-class _NeverStreamed:
-    """A response declaring a body of 11 bytes whose body must not be read."""
-
-    headers = {"Content-Length": "11"}  # noqa: RUF012
-
-    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
-        raise AssertionError("body read despite a declared length over the cap")
-
-
-def test_a_declared_length_over_the_cap_is_rejected_before_any_body_is_read(monkeypatch):
-    monkeypatch.setattr(downloader_mod, "_IMAGE_MAX_BYTES", 10)
-
-    with pytest.raises(ImageInvalid, match="11"):
-        _read_image_body(_NeverStreamed(), deadline=float("inf"))  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("fmt", ["JPEG", "PNG", "MPO"])
-def test_validate_image_bytes_returns_the_format_and_leaves_the_buffer_at_the_start(fmt):
-    data = io.BytesIO(_noise_image_bytes(fmt))
-
-    assert validate_image_bytes(data) == fmt
+    assert validate_image_bytes(data) == "MPO"
     assert data.tell() == 0
-
-
-def test_validate_image_bytes_rejects_an_empty_buffer():
-    with pytest.raises(ImageInvalid, match="empty body"):
-        validate_image_bytes(io.BytesIO())

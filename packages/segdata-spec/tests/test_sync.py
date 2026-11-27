@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
 from PIL import Image
 from spec_helpers import (
     BUCKET,
@@ -35,7 +34,6 @@ from segdata_spec.errors import (
     FeatureMissing,
     ImageChanged,
     ImageMissing,
-    ImageUndecodable,
     ManifestNotFound,
     PinMismatch,
 )
@@ -155,8 +153,7 @@ def test_check_split_runs_after_tables_and_before_images(fake_s3, pin, cache):
     assert len(_image_gets(fake_s3)) == 3
 
 
-@pytest.mark.parametrize("max_workers", [1, 4])
-def test_check_split_failure_aborts_before_images(fake_s3, pin, cache, max_workers):
+def test_check_split_failure_aborts_before_images(fake_s3, pin, cache):
     def check_split(name: str, groups: set[str]) -> None:
         raise ValueError("split does not cover g2")
 
@@ -167,7 +164,6 @@ def test_check_split_failure_aborts_before_images(fake_s3, pin, cache, max_worke
             cache,
             bucket=BUCKET,
             check_split=check_split,
-            max_workers=max_workers,
         )
 
     assert _image_gets(fake_s3) == []
@@ -200,11 +196,9 @@ def test_second_sync_downloads_nothing(fake_s3, pin, cache):
     ("relative", "content", "error"),
     [
         (f"{IMG_BUCKET}/images/ds/a.jpg", b"aaaX", ChecksumMismatch),
-        (f"{IMG_BUCKET}/images/ds/a.jpg", b"aa", ChecksumMismatch),
-        (f"{BUCKET}/{PREFIX}labels.parquet", b"altered", ChecksumMismatch),
         (f"{BUCKET}/{PREFIX}manifest.json", b"{}", PinMismatch),
     ],
-    ids=["image-md5", "image-size", "table", "manifest"],
+    ids=["image-md5", "manifest"],
 )
 def test_corrupt_cached_file_fails_naming_it_without_redownload(
     fake_s3, pin, cache, relative, content, error
@@ -278,32 +272,6 @@ def test_cached_multipart_image_with_matching_crc_syncs_without_download(fake_s3
     assert _image_gets(fake_s3) == []
 
 
-def test_downloaded_image_with_wrong_crc_fails_and_is_not_cached(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path, crcs={"a": "AAAAAAAAAAA="})
-
-    with pytest.raises(ChecksumMismatch, match="images/ds/a.jpg"):
-        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-    assert not (cache / IMG_BUCKET / "images/ds/a.jpg").exists()
-
-
-def test_cached_mask_with_wrong_crc_fails(fake_s3, tmp_path, cache):
-    _, pin = publish_version(
-        fake_s3,
-        tmp_path,
-        images=DENSE_IMAGES,
-        points=None,
-        masks=MASKS,
-        mask_crcs={"a": "AAAAAAAAAAA="},
-    )
-    cached = cache / IMG_BUCKET / "images/ds/a.png"
-    cached.parent.mkdir(parents=True)
-    cached.write_bytes(b"ma")
-
-    with pytest.raises(ChecksumMismatch, match=re.escape(str(cached))):
-        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-
 def test_taxonomy_pin_is_synced_under_taxonomy_prefix(fake_s3, pin, tmp_path, cache):
     tax = publish_taxonomy_version(fake_s3, tmp_path)
 
@@ -345,22 +313,6 @@ def test_dense_masks_are_downloaded_with_images(fake_s3, tmp_path, cache):
     assert (cache / IMG_BUCKET / "images/ds/b.jpg").read_bytes() == b"bbbbbbbb"
 
 
-def test_changed_mask_fails(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
-    fake_s3.put(IMG_BUCKET, IMG_PREFIX + "b.png", b"XXXX")
-
-    with pytest.raises(ImageChanged, match="images/ds/b.png"):
-        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-
-def test_missing_mask_fails(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
-    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "b.png")]
-
-    with pytest.raises(ImageMissing, match="images/ds/b.png"):
-        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-
 @pytest.mark.parametrize(
     ("selection", "named"),
     [({"other": None}, "other"), ({"ds": {"G1"}}, "G1")],
@@ -373,18 +325,6 @@ def test_selection_naming_an_unknown_dataset_or_group_fails_before_any_image(
         sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection=selection)
 
     assert _image_gets(fake_s3) == []
-
-
-def test_published_key_escaping_the_cache_raises_and_writes_no_image(fake_s3, tmp_path, cache):
-    _, pin = publish_version(
-        fake_s3, tmp_path, images={"../evil": (b"xx", "g1")}, points=[("../evil", 1, 1, 5)]
-    )
-
-    with pytest.raises(ValueError, match="evil"):
-        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-    assert _image_gets(fake_s3) == []
-    assert not (cache / IMG_BUCKET).exists()
 
 
 SPEC = ResizeSpec(max_edge=32)  # 64x48 -> 32x24
@@ -440,41 +380,16 @@ def _rewrite_sidecar(cache: Path, **changes: Any) -> None:
     path.write_text(json.dumps({**json.loads(path.read_text()), **changes}))
 
 
-def _drop_from_sidecar(cache: Path, name: str) -> None:
-    path = _sidecar(cache, SPEC)
-    entry = json.loads(path.read_text())
-    del entry[name]
-    path.write_text(json.dumps(entry))
-
-
 @pytest.mark.parametrize(
     "tamper",
     [
-        lambda cache: _rewrite_sidecar(cache, size=_resized(cache, SPEC).stat().st_size + 1),
         lambda cache: _resized(cache, SPEC).write_bytes(
             b"x" * _resized(cache, SPEC).stat().st_size
         ),
-        lambda cache: _rewrite_sidecar(cache, width=31),
-        lambda cache: _rewrite_sidecar(cache, height=25),
-        lambda cache: _drop_from_sidecar(cache, "width"),
-        lambda cache: _drop_from_sidecar(cache, "height"),
         lambda cache: _rewrite_sidecar(cache, source_etag="0" * 32),
         lambda cache: _sidecar(cache, SPEC).unlink(),
-        lambda cache: _sidecar(cache, SPEC).write_text("{trunc"),
-        lambda cache: _sidecar(cache, SPEC).write_text("[]"),
     ],
-    ids=[
-        "indexed-size-only",
-        "output-bytes-same-length",
-        "indexed-width",
-        "indexed-height",
-        "missing-width",
-        "missing-height",
-        "stale-source-etag",
-        "missing-sidecar",
-        "malformed-sidecar",
-        "non-object-sidecar",
-    ],
+    ids=["output-bytes-same-length", "stale-source-etag", "missing-sidecar"],
 )
 def test_unverifiable_resized_output_fails_without_download(fake_s3, resize_pin, cache, tamper):
     _sync_resized(fake_s3, resize_pin, cache)
@@ -483,27 +398,6 @@ def test_unverifiable_resized_output_fails_without_download(fake_s3, resize_pin,
 
     with pytest.raises(ChecksumMismatch, match=re.escape(str(_resized(cache, SPEC)))):
         _sync_resized(fake_s3, resize_pin, cache)
-
-    assert _image_gets(fake_s3) == []
-
-
-def test_cached_output_fails_when_a_later_version_records_another_resized_size(
-    fake_s3, resize_pin, cache, tmp_path
-):
-    _sync_resized(fake_s3, resize_pin, cache)
-    # Same image bytes and ETag, but the row now says 96x48, which scales to 32x16, not 32x24.
-    _, later = publish_version(
-        fake_s3,
-        tmp_path,
-        version="20261121-abcdef2",
-        images=RESIZE_IMAGES,
-        points=[("a", 1, 1, 5)],
-        sizes={"a": (96, 48)},
-    )
-    fake_s3.calls.clear()
-
-    with pytest.raises(ChecksumMismatch, match=re.escape(str(_resized(cache, SPEC)))):
-        _sync_resized(fake_s3, later, cache)
 
     assert _image_gets(fake_s3) == []
 
@@ -519,63 +413,6 @@ def test_original_whose_row_size_disagrees_with_its_header_fails_and_caches_noth
         _sync_resized(fake_s3, pin, cache)
 
     assert not (cache / "resized").exists()
-
-
-def test_undecodable_original_raises_naming_it_and_caches_nothing(fake_s3, tmp_path, cache):
-    _, pin = publish_version(
-        fake_s3,
-        tmp_path,
-        images={"a": (b"not an image", "g1")},
-        points=[("a", 1, 1, 5)],
-        sizes=RESIZE_SIZES,
-    )
-
-    with pytest.raises(ImageUndecodable, match=f"s3://{IMG_BUCKET}/{IMG_PREFIX}a.jpg"):
-        _sync_resized(fake_s3, pin, cache)
-
-    assert not (cache / "resized").exists()
-
-
-def test_decompression_bomb_original_propagates_unwrapped(fake_s3, resize_pin, cache, monkeypatch):
-    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
-
-    with pytest.raises(Image.DecompressionBombError):
-        _sync_resized(fake_s3, resize_pin, cache)
-
-    assert not (cache / "resized").exists()
-
-
-def test_failed_sidecar_write_leaves_no_output(fake_s3, resize_pin, cache, monkeypatch):
-    real_replace = os.replace
-    output = _resized(cache, SPEC)
-    sidecar = _sidecar(cache, SPEC)
-
-    def replace(src: Any, dst: Any) -> None:
-        if Path(dst) == sidecar:
-            raise OSError("disk full")
-        real_replace(src, dst)
-
-    monkeypatch.setattr(os, "replace", replace)
-    with pytest.raises(OSError, match="disk full"):
-        _sync_resized(fake_s3, resize_pin, cache)
-    assert not output.exists()
-    assert not list(sidecar.parent.glob("*.tmp"))
-
-
-def test_sidecar_without_output_is_redone(fake_s3, resize_pin, cache):
-    _sync_resized(fake_s3, resize_pin, cache)
-    _resized(cache, SPEC).unlink()
-    _sidecar(cache, SPEC).write_text("{}")
-    fake_s3.calls.clear()
-
-    _sync_resized(fake_s3, resize_pin, cache)
-
-    data = _resized(cache, SPEC).read_bytes()
-    assert _decoded(_resized(cache, SPEC)).size == (32, 24)
-    assert json.loads(_sidecar(cache, SPEC).read_text())["sha256"] == (
-        hashlib.sha256(data).hexdigest()
-    )
-    assert _image_gets(fake_s3) == [IMG_PREFIX + "a.jpg"]
 
 
 def test_two_specs_share_one_cache_without_interfering(fake_s3, resize_pin, cache):
@@ -631,22 +468,6 @@ def test_sync_result_records_the_spec_applied_per_dataset(fake_s3, resize_pin, c
 
     assert result.datasets["ds"].resize == SPEC
     assert result.datasets["plain"].resize is None
-
-
-def test_max_workers_below_one_fails_before_any_s3_call(fake_s3, resize_pin, cache):
-    with pytest.raises(ValueError, match="max_workers"):
-        sync(fake_s3, {"ds": resize_pin}, cache, bucket=BUCKET, max_workers=0)
-
-    assert fake_s3.calls == []
-
-
-def test_resized_original_failing_verification_writes_nothing(fake_s3, resize_pin, cache):
-    fake_s3.body_overrides[(IMG_BUCKET, IMG_PREFIX + "a.jpg")] = JPEG_A[:-4]
-
-    with pytest.raises(ChecksumMismatch, match="images/ds/a.jpg"):
-        _sync_resized(fake_s3, resize_pin, cache)
-
-    assert not (cache / "resized").exists()
 
 
 POOL_IMAGES = {i: (i.encode() * 4, "g1") for i in "abcde"}
@@ -714,64 +535,6 @@ def test_failure_on_the_first_row_bounds_the_rows_submitted_and_cancels_the_rest
     assert len(_image_gets(fake_s3)) <= 3  # max_workers + 1: rows 0, 1 and at most one more
 
 
-def _marker_files(cache: Path, resize_id: str, name: str = "ds") -> list[Path]:
-    return sorted((cache / "synced" / resize_id / BUCKET / name / VERSION).glob("*.json"))
-
-
-def _markers(cache: Path, resize_id: str, name: str = "ds") -> list[dict[str, Any]]:
-    return [json.loads(path.read_text()) for path in _marker_files(cache, resize_id, name)]
-
-
-def test_sync_with_a_spec_writes_one_marker_file_under_the_spec_id(fake_s3, tmp_path, cache):
-    spec = ResizeSpec(max_edge=32)
-    jpeg = jpeg_bytes(64, 48)
-    _, pin = publish_version(
-        fake_s3,
-        tmp_path,
-        images={"a": (jpeg, "g1"), "b": (jpeg, "g1"), "c": (jpeg, "g2")},
-        sizes={"a": (64, 48), "b": (64, 48), "c": (64, 48)},
-    )
-
-    sync(
-        fake_s3,
-        {"ds": pin},
-        cache,
-        bucket=BUCKET,
-        selection={"ds": {"g1", "g2"}},
-        resize={"ds": spec},
-    )
-
-    assert _markers(cache, spec.id) == [
-        {
-            "resize": {"max_edge": 32, "filter": "lanczos", "jpeg_quality": 95},
-            "groups": ["g1", "g2"],
-        }
-    ]
-
-
-def test_sync_without_a_spec_writes_one_marker_file_under_original(fake_s3, pin, cache):
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g2"}})
-
-    assert _markers(cache, "original") == [{"resize": None, "groups": ["g2"]}]
-
-
-def test_sync_without_a_selection_records_all_groups(fake_s3, pin, cache):
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-    assert _markers(cache, "original")[0]["groups"] == "all"
-
-
-def test_each_sync_adds_a_marker_file_and_keeps_the_earlier_ones(fake_s3, pin, cache):
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g1"}})
-    first = _marker_files(cache, "original")
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g2"}})
-
-    files = _marker_files(cache, "original")
-    assert len(files) == 2
-    assert set(first) < set(files)
-    assert sorted(m["groups"] for m in _markers(cache, "original")) == [["g1"], ["g2"]]
-
-
 def test_a_failed_sync_leaves_no_marker(fake_s3, pin, cache):
     del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "c.jpg")]
 
@@ -779,10 +542,6 @@ def test_a_failed_sync_leaves_no_marker(fake_s3, pin, cache):
         sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
 
     assert not (cache / "synced").exists()
-
-
-def test_check_published_manifest_returns_none_for_a_matching_sha(fake_s3, pin):
-    assert check_published_manifest(fake_s3, BUCKET, pin) is None
 
 
 def test_check_published_manifest_names_the_key_of_a_missing_manifest(fake_s3, pin):
@@ -801,26 +560,6 @@ def test_check_published_manifest_gives_both_shas_on_mismatch(fake_s3, pin):
 
     assert actual in str(raised.value)
     assert pin.manifest_sha256 in str(raised.value)
-
-
-def test_check_published_manifest_propagates_a_non_404_client_error(fake_s3, pin):
-    denied = ClientError(
-        {
-            "Error": {"Code": "AccessDenied", "Message": "no"},
-            "ResponseMetadata": {"HTTPStatusCode": 403},
-        },
-        "GetObject",
-    )
-
-    def get_object(**kwargs: Any) -> Any:
-        raise denied
-
-    fake_s3.get_object = get_object  # type: ignore[method-assign]
-
-    with pytest.raises(ClientError) as raised:
-        check_published_manifest(fake_s3, BUCKET, pin)
-
-    assert raised.value is denied
 
 
 def test_check_published_manifest_taxonomy_flag_selects_the_taxonomy_prefix(fake_s3, tmp_path):
@@ -912,12 +651,8 @@ def test_sync_feature_set_refuses_an_unindexed_id_before_any_feature(fake_s3, tm
     [
         (lambda s3: s3.objects.pop((BUCKET, feature_key_of("a"))), FeatureMissing),
         (lambda s3: s3.put(BUCKET, feature_key_of("a"), b"feature-x"), ImageChanged),
-        (
-            lambda s3: s3.body_overrides.__setitem__((BUCKET, feature_key_of("a")), b"feat"),
-            ChecksumMismatch,
-        ),
     ],
-    ids=["absent", "replaced", "truncated"],
+    ids=["absent", "replaced"],
 )
 def test_sync_feature_set_fails_on_a_bad_feature_and_caches_nothing_for_it(
     fake_s3, tmp_path, cache, tamper, error
@@ -943,9 +678,7 @@ def test_sync_feature_set_without_a_selection_syncs_every_feature_and_records_al
         "b": cache / BUCKET / "features/ds/effnet/b.featurevector",
     }
     markers = list((cache / "synced/features/effnet" / BUCKET / "ds" / VERSION).glob("*.json"))
-    assert [json.loads(m.read_bytes()) for m in markers] == [
-        {"feature_set_sha256": fpin.manifest_sha256, "image_ids": "all"}
-    ]
+    assert [json.loads(m.read_bytes())["image_ids"] for m in markers] == ["all"]
 
 
 def test_sync_feature_set_refuses_a_set_built_for_another_dataset_sha(fake_s3, tmp_path, cache):

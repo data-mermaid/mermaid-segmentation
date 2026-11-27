@@ -106,15 +106,13 @@ _OUTAGE_CODES = frozenset(
 def _is_outage_failure(res: DownloadResult, *, raised: bool = False) -> bool:
     """Return whether a failed result signals an outage rather than a problem of one source.
 
-    A source whose download raised, or that failed with no error code, is an outage; otherwise
-    the downloader's login, annotations, image-list and overview-fetch errors are.
+    A source whose download raised is an outage; otherwise the downloader's login, annotations,
+    image-list and overview-fetch errors are.
     """
     if res.ok:
         return False
-    return (
-        raised
-        or not res.errors
-        or any(e in _OUTAGE_CODES or e.startswith("overview fetch failed") for e in res.errors)
+    return raised or any(
+        e in _OUTAGE_CODES or e.startswith("overview fetch failed") for e in res.errors
     )
 
 

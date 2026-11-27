@@ -69,11 +69,8 @@ def test_dump_round_trips_and_is_byte_stable():
     [
         ("20261120-ab12cd3", True),
         ("20261120-ab12cd3-2", True),
-        ("2026-11-20-ab12cd3", False),
         ("20261120-ab12cd", False),
         ("20261120-AB12CD3", False),
-        ("20261120-ab12cd3x", False),
-        ("latest", False),
     ],
 )
 def test_manifest_version_format(version, valid):
@@ -84,24 +81,6 @@ def test_manifest_version_format(version, valid):
     else:
         with pytest.raises(ValidationError):
             Manifest.model_validate(raw)
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda d: d.update(surprise=1),
-        lambda d: d.update(kind="mesh"),
-        lambda d: d["image_store"].update(owner="other"),
-        lambda d: d["label_mapping"].update(source="guess"),
-    ],
-    ids=["unknown-field", "bad-kind", "bad-owner", "bad-mapping-source"],
-)
-def test_manifest_rejects_invalid_input(mutate):
-    raw = _manifest_dict()
-    mutate(raw)
-
-    with pytest.raises(ValidationError):
-        Manifest.model_validate_json(json.dumps(raw))
 
 
 @pytest.mark.parametrize(

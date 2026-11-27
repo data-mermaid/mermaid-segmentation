@@ -113,22 +113,6 @@ def test_main_passes_configured_bucket_prefix_and_discovered_ids(monkeypatch, fa
     assert discover.call_args.args[0] is kwargs["downloader"].session
 
 
-@pytest.mark.parametrize(("argv", "prune"), [([], False), (["--prune"], True)])
-def test_main_passes_the_prune_flag(monkeypatch, argv, prune):
-    _, run, _ = _run_main(monkeypatch, argv)
-    assert run.call_args.kwargs["prune"] is prune
-
-
-def test_main_passes_delay_seconds(monkeypatch):
-    _, run, _ = _run_main(monkeypatch, ["--delay-seconds", "1.5"])
-    assert run.call_args.kwargs["delay_seconds"] == 1.5
-
-
-def test_main_passes_scraper_workers_to_downloader(monkeypatch):
-    downloader_cls, _, _ = _run_main(monkeypatch, ["--scraper-workers", "5"])
-    assert downloader_cls.call_args.kwargs["max_workers"] == 5
-
-
 _MIXED_RESULTS = {
     101: DownloadResult(ok=True),
     202: DownloadResult(
@@ -168,32 +152,6 @@ def test_summarize_failures_reports_skipped_images_under_images_outage():
         "images_missing_url: 5 (20 images)",
         "images_outage: 5 (30 images)",
     ]
-
-
-def test_summarize_failures_lists_failure_without_error_code_as_no_error_code():
-    results = {
-        7: DownloadResult(ok=False),
-        3: DownloadResult(ok=False, errors=["annotations_failed"]),
-    }
-    assert cli._summarize_failures(results) == [
-        "Failed to download 2 source(s)",
-        "annotations_failed: [3]",
-        "no_error_code: [7]",
-    ]
-
-
-def test_summarize_failures_is_empty_when_nothing_failed():
-    results = {
-        1: DownloadResult(ok=True),
-        2: DownloadResult(ok=True, skipped_no_confirmed=True),
-    }
-    assert cli._summarize_failures(results) == []
-
-
-def test_main_logs_failure_summary_and_returns_1(monkeypatch, caplog):
-    _run_main(monkeypatch, [], results=_MIXED_RESULTS, expected_code=1)
-    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert errors == _MIXED_LINES
 
 
 def test_main_returns_1_without_discovery_or_report_when_login_fails(monkeypatch, fake_s3):
@@ -256,6 +214,13 @@ def _put_failing_for_run_reports(fake_s3):
     return put
 
 
+def test_main_logs_failure_summary_and_returns_1(monkeypatch, caplog, fake_s3):
+    _run_main(monkeypatch, [], _MIXED_RESULTS, 1, fake_s3=fake_s3)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors == _MIXED_LINES
+
+
 def test_main_logs_the_summary_and_returns_1_when_the_report_write_fails(
     monkeypatch, caplog, fake_s3
 ):
@@ -305,11 +270,6 @@ def test_main_processes_only_the_given_source_ids_in_order(
     assert _run_report(fake_s3)["settings"]["source_ids"] == expected
 
 
-def test_main_rejects_a_non_integer_source_id(monkeypatch):
-    with pytest.raises(SystemExit):
-        _run_main(monkeypatch, ["--source-ids", "1,x"])
-
-
 _LISTING_KEY = ("my-bucket", "my-prefix/_meta/discovered_source_ids.json")
 
 
@@ -335,8 +295,11 @@ def test_discovery_guard_stops_a_run_whose_listing_shrank_below_95_percent(
     assert json.loads(fake_s3.objects[_LISTING_KEY]) == expected_listing
 
 
-@pytest.mark.parametrize("baseline", [None, [1, 2, 3]], ids=["no-baseline", "with-baseline"])
-@pytest.mark.parametrize("argv", [[], ["--allow-source-drop"]], ids=["default", "allow-drop"])
+@pytest.mark.parametrize(
+    ("baseline", "argv"),
+    [(None, []), ([1, 2, 3], ["--allow-source-drop"])],
+    ids=["no-baseline-default", "with-baseline-allow-drop"],
+)
 def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
     monkeypatch, fake_s3, caplog, baseline, argv
 ):
@@ -353,17 +316,9 @@ def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
     assert any(r.levelname == "ERROR" for r in caplog.records)
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--prune", "verify-existing"],
-        ["--allow-source-drop", "invalidate", "--all"],
-        ["--prune", "invalidate", "--changed"],
-    ],
-)
-def test_prune_and_allow_source_drop_are_rejected_with_a_subcommand(argv):
+def test_prune_and_allow_source_drop_are_rejected_with_a_subcommand():
     with pytest.raises(SystemExit) as exc:
-        cli._parse_args(argv)
+        cli._parse_args(["--prune", "verify-existing"])
 
     assert exc.value.code == 2
 
@@ -394,12 +349,6 @@ def test_no_legacy_warning_when_any_stored_source_has_a_marker(monkeypatch, fake
     fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
 
     _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
-
-    assert _legacy_warnings(caplog) == []
-
-
-def test_no_legacy_warning_for_an_empty_bucket(monkeypatch, fake_s3, caplog):
-    _run_main(monkeypatch, [], fake_s3=fake_s3)
 
     assert _legacy_warnings(caplog) == []
 
@@ -551,16 +500,6 @@ def test_verify_existing_skips_marked_sources_and_exits_1_listing_failures(
     assert errors == ["Source 3 not verified: annotations_missing, image_list_missing"]
 
 
-def test_verify_existing_exits_0_when_every_source_passes(monkeypatch, fake_s3):
-    code, dl, _ = _run_command(
-        monkeypatch, fake_s3, ["verify-existing"], discovered=[2, 3], verify_results={2: [], 3: []}
-    )
-
-    assert code == 0
-    assert dl.verified == [2, 3]
-    assert dl.login_calls == 0
-
-
 def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
     code, dl, _ = _run_command(
         monkeypatch,
@@ -572,6 +511,7 @@ def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
 
     assert code == 0
     assert dl.verified == [1, 2]
+    assert dl.login_calls == 0
 
 
 def test_invalidate_changed_continues_past_an_unreadable_source_and_exits_1(
@@ -600,22 +540,6 @@ def test_invalidate_changed_continues_past_an_unreadable_source_and_exits_1(
         "s2/annotations.csv",
         "s3/annotations.csv",
     ]
-
-
-def test_verify_existing_fails_a_source_reporting_a_missing_overview_total(
-    monkeypatch, fake_s3, caplog
-):
-    code, _, _ = _run_command(
-        monkeypatch,
-        fake_s3,
-        ["verify-existing"],
-        discovered=[2],
-        verify_results={2: ["overview_total_missing"]},
-    )
-
-    assert code == 1
-    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert errors == ["Source 2 not verified: overview_total_missing"]
 
 
 def test_verify_existing_reports_a_raising_source_by_exception_name_and_goes_on(

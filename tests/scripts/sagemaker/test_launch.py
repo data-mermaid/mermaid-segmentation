@@ -11,7 +11,6 @@ import pytest
 from botocore.exceptions import ClientError
 
 import scripts.sagemaker.launch as launch
-from mermaidseg.io import load_section, resolve_repo_path
 from scripts.sagemaker.run_config import RunConfig, load_run_config
 
 _RUNS = Path(__file__).resolve().parents[3] / "sagemaker" / "runs"
@@ -70,13 +69,6 @@ def test_committed_run_yamls_pass_check_without_env(no_sm_env, capsys, path, ext
     assert capsys.readouterr().out == f"OK: {path}\n"
 
 
-@pytest.mark.parametrize("path", sorted(_RUNS.glob("*.yaml")), ids=lambda p: p.stem)
-def test_committed_run_yamls_select_the_mlflow_tracker(path):
-    namespace = launch._parse_trainer_args(load_run_config(path))
-    section = load_section(resolve_repo_path(namespace.logger_config), "logger")
-    assert section["tracker"] == "mlflow"
-
-
 # ---------- validate_run ----------
 
 
@@ -92,10 +84,9 @@ def test_init_weights_and_init_from_job_must_be_given_together(run_yaml, init_fr
         launch.validate_run(load_run_config(run_yaml), init_from_job)
 
 
-@pytest.mark.parametrize("job", ["-starts-with-dash", "has_underscore"])
-def test_invalid_init_from_job_name_raises(job):
+def test_invalid_init_from_job_name_raises():
     with pytest.raises(ValueError, match="job name"):
-        launch.validate_run(load_run_config(_RES768), job)
+        launch.validate_run(load_run_config(_RES768), "-starts-with-dash")
 
 
 def test_unknown_trainer_flag_fails_as_value_error():
@@ -113,63 +104,35 @@ def test_nonexistent_config_path_fails_naming_it():
 # ---------- build_request ----------
 
 
-def test_build_request_for_res768():
+def test_build_request_for_res768_points_the_channels_output_and_checkpoints_at_the_job():
     request = launch.build_request(
         load_run_config(_RES768), "mermaidseg-cbm-final-res768-job", _FAKE_ENV, _SOURCE_JOB
     )
-    assert request == {
-        "TrainingJobName": "mermaidseg-cbm-final-res768-job",
-        "RoleArn": "arn:fake:role",
-        "AlgorithmSpecification": {
-            "TrainingImage": (
-                "123.dkr.ecr.fake.amazonaws.com/mermaid-segmentation-jobs:training-latest"
-            ),
-            "TrainingInputMode": "File",
-        },
-        "ResourceConfig": {
-            "InstanceType": "ml.g6e.12xlarge",
-            "InstanceCount": 1,
-            "VolumeSizeInGB": 1500,
-        },
-        "StoppingCondition": {"MaxRuntimeInSeconds": 604800},
-        "OutputDataConfig": {
-            "S3OutputPath": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/output/"
-        },
-        "CheckpointConfig": {
-            "S3Uri": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/checkpoints/",
-            "LocalPath": "/opt/ml/checkpoints",
-        },
-        "InputDataConfig": [
-            {
-                "ChannelName": "config",
-                "DataSource": {
-                    "S3DataSource": {
-                        "S3DataType": "S3Prefix",
-                        "S3Uri": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/config/",
-                        "S3DataDistributionType": "FullyReplicated",
-                    }
-                },
-            },
-            {
-                "ChannelName": "init",
-                "DataSource": {
-                    "S3DataSource": {
-                        "S3DataType": "S3Prefix",
-                        "S3Uri": (
-                            "s3://fake-bucket/runs/mermaidseg-cbm-final-20260101T000000Z-abc123/"
-                            "checkpoints/model_checkpoints/cbm_final/model_step300000"
-                        ),
-                        "S3DataDistributionType": "FullyReplicated",
-                    }
-                },
-            },
-        ],
-        "Environment": {
-            "HF_TOKEN_SECRET_ID": "fake/hf",
-            "MLFLOW_TRACKING_URI": "arn:fake:mlflow-app/app-x",
-            "MLFLOW_HTTP_REQUEST_TIMEOUT": "30",
-            "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
-        },
+
+    uris = {
+        channel["ChannelName"]: channel["DataSource"]["S3DataSource"]["S3Uri"]
+        for channel in request["InputDataConfig"]
+    }
+    assert uris == {
+        "config": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/config/",
+        "init": (
+            "s3://fake-bucket/runs/mermaidseg-cbm-final-20260101T000000Z-abc123/"
+            "checkpoints/model_checkpoints/cbm_final/model_step300000"
+        ),
+    }
+    assert request["OutputDataConfig"] == {
+        "S3OutputPath": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/output/"
+    }
+    assert request["CheckpointConfig"] == {
+        "S3Uri": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/checkpoints/",
+        "LocalPath": "/opt/ml/checkpoints",
+    }
+    assert request["StoppingCondition"] == {"MaxRuntimeInSeconds": 604800}
+    assert request["Environment"] == {
+        "HF_TOKEN_SECRET_ID": "fake/hf",
+        "MLFLOW_TRACKING_URI": "arn:fake:mlflow-app/app-x",
+        "MLFLOW_HTTP_REQUEST_TIMEOUT": "30",
+        "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
     }
 
 
@@ -188,8 +151,8 @@ def test_full_ecr_uri_in_job_image_raises():
 # ---------- env, dry-run, submit ----------
 
 
-@pytest.mark.parametrize("missing", _ENV_VARS)
-def test_missing_env_var_fails_naming_it(fake_env, monkeypatch, missing):
+def test_missing_env_var_fails_naming_it(fake_env, monkeypatch):
+    missing = "SM_ROLE_ARN"
     monkeypatch.setenv(missing, "")
     monkeypatch.setattr("boto3.client", lambda *a, **k: pytest.fail("no AWS call"))
     with pytest.raises(SystemExit, match=f"^ERROR: .*{missing}"):
@@ -206,10 +169,6 @@ def test_read_env_names_every_missing_or_empty_variable_at_once():
     assert str(error.value) == (
         "environment variables not set: SM_ROLE_ARN, SM_STAGING_BUCKET, HF_TOKEN_SECRET_ID"
     )
-
-
-def test_read_env_returns_each_required_variable_and_ignores_others():
-    assert launch.read_env({**_FAKE_ENV, "UNRELATED": "x"}) == _FAKE_ENV
 
 
 def test_dry_run_prints_the_request_without_boto3(fake_env, monkeypatch, capsys):

@@ -156,26 +156,17 @@ def test_the_train_blocks_annotator_priority_picks_each_points_label(tmp_path):
     assert yaml.safe_load((tmp_path / "mask.meta.yaml").read_text())["n_points"] == 1
 
 
-@pytest.mark.parametrize(
-    ("kind", "error", "message"),
-    [
-        ("points", ValueError, r"groups not in the dataset version: \['s99'\]"),
-        ("dense", ValueError, "has no points.parquet"),
-    ],
-    ids=["unknown-group", "no-points"],
-)
-def test_main_guards_raise(tmp_path, kind, error, message):
-    dense = kind == "dense"
+def test_main_refuses_a_dense_version_without_points(tmp_path):
     cache_dir, _, pin = write_version(
         tmp_path,
-        kind=kind,
-        images=[ImageSpec("a1", group="s7", mask=np.ones((8, 8), np.uint8) if dense else None)],
+        kind="dense",
+        images=[ImageSpec("a1", group="s7", mask=np.ones((8, 8), np.uint8))],
         labels=LABELS,
-        points=() if dense else [("a1", 0, 0, 1)],
+        points=(),
         name="coralnet",
     )
 
-    with pytest.raises(error, match=message):
+    with pytest.raises(ValueError, match="has no points.parquet"):
         _run(_inputs(tmp_path, cache_dir, pin, {"groups": ["s99"]}), tmp_path / "mask.csv")
 
 

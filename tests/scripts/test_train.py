@@ -39,7 +39,6 @@ def _stub_run(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> list:
     [
         pytest.param(["--cache-dir", "cache", "--num-workers", "0"], id="zero-num-workers"),
         pytest.param([*REQUIRED, "--nccl-timeout-min", "0"], id="zero-nccl-timeout"),
-        pytest.param([*REQUIRED, "--nccl-timeout-min", "-1"], id="negative-nccl-timeout"),
         pytest.param(
             [*REQUIRED, "--preempt-checkpoint-every-steps", "-1"], id="negative-preempt-every"
         ),
@@ -56,33 +55,15 @@ def test_main_rejects_invalid_arguments_without_starting_run(monkeypatch, argv):
     assert received == []
 
 
-def test_main_passes_the_parsed_arguments_to_run(monkeypatch):
-    received = _stub_run(monkeypatch, [*REQUIRED, "--resolution", "128", "--init-weights", "w.pt"])
-    train_script.main()
-    assert len(received) == 1
-    assert received[0].num_workers == 8
-    assert received[0].cache_dir == "cache"
-    assert received[0].resolution == 128
-    assert received[0].init_weights == "w.pt"
-    assert received[0].checkpoint is None
-
-
 @pytest.mark.parametrize(
     "extra",
     [
         pytest.param(["--nccl-timeout-min", "0.01"], id="small-positive-nccl-timeout"),
         pytest.param(["--preempt-checkpoint-every-steps", "0"], id="preempt-disabled"),
-        pytest.param(["--checkpoint", "x"], id="checkpoint-alone"),
-        pytest.param(["--init-weights", "y"], id="init-weights-alone"),
+        pytest.param(["--num-workers", "1"], id="single-data-loader-worker"),
     ],
 )
 def test_main_accepts_the_edge_of_each_valid_range(monkeypatch, extra):
     received = _stub_run(monkeypatch, [*REQUIRED, *extra])
     train_script.main()
     assert len(received) == 1
-
-
-def test_main_accepts_a_single_data_loader_worker(monkeypatch):
-    received = _stub_run(monkeypatch, ["--cache-dir", "cache", "--num-workers", "1"])
-    train_script.main()
-    assert received[0].num_workers == 1

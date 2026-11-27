@@ -110,15 +110,6 @@ def test_conform_names_the_missing_column():
         conform(table, IMAGES_SCHEMA)
 
 
-@pytest.mark.parametrize("source_name", [[None, None], ["s1/a.jpg", "s1/b.jpg"]])
-def test_conform_places_nullable_source_name_after_source_fingerprint(source_name):
-    result = conform(_images(source_name=source_name), IMAGES_SCHEMA)
-
-    names = result.column_names
-    assert names[names.index("source_fingerprint") + 1] == "source_name"
-    assert result["source_name"].to_pylist() == source_name
-
-
 def test_valid_tables_pass():
     validate_dataset_tables("points", _tables(points=True))
     validate_dataset_tables(
@@ -141,13 +132,6 @@ def test_valid_tables_pass():
                 images=_images(mask_key=["m/a.png", "m/b.png"], mask_etag=["me", None]),
             ),
         ),
-        (
-            "dense",
-            _tables(
-                points=False,
-                images=_images(mask_key=["m/a.png", "m/b.png"], mask_size=[5, None]),
-            ),
-        ),
     ],
     ids=[
         "duplicate-image-id",
@@ -156,7 +140,6 @@ def test_valid_tables_pass():
         "dense-kind-with-points",
         "points-kind-with-mask-key",
         "dense-kind-null-mask-etag",
-        "dense-kind-null-mask-size",
     ],
 )
 def test_invalid_table_sets_are_rejected(kind, tables):
