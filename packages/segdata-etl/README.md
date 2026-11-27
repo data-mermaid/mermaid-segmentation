@@ -569,7 +569,7 @@ Every dataset records `ingestion.images_uploaded`: the number of images this run
 
 | Dataset | `dropped` | `details` |
 |---|---|---|
-| `catlin_seaview` | `damaged_images`: the number of dropped images. | `damaged_images`: the dropped images for each region. |
+| `catlin_seaview` | `damaged_images`: the number of dropped images. | `damaged_images`: the dropped images for each region. `case_merged_labels`: raw label to merged label, for labels merged by letter case. |
 | `moorea_labeled_corals` | `damaged_images`: the number of dropped images. `off_annotations`: annotations dropped because their label is `off`. | `damaged_images`: the dropped images. `case_merged_labels`: raw label to merged label, for labels merged by letter case. |
 | `pacific_labeled_corals` | `annotations_unknown_archived`: annotations dropped because their `archived` label ID is not in the label table. `annotations_unmapped_imageid`: annotations dropped because their image ID is not in the image map. The run logs each count as a warning. | `excluded_sites`. |
 | `benthos_yuval` | Empty. | `excluded_sites`, `tile_size`, `label_key_template`, `num_tiles` (a count for each site) and `labels_uploaded`. |

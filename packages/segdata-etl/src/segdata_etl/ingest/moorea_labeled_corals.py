@@ -11,15 +11,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-from collections import defaultdict
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from ..common.images import find_undecodable
-from ..common.labels import build_classes_and_colors
+from ..common.labels import build_classes_and_colors, canonicalize
 from ..common.manifest import IngestSource, build_manifest
 from ..common.release import S3Target, preflight, put_raw_release, upload_files
 
@@ -90,20 +88,6 @@ def parse_annotations(txt_path: Path) -> list[tuple[int, int, str]]:
         except ValueError:
             logger.warning("Skipping malformed row in %s: %r", txt_path, line)
     return rows
-
-
-def canonicalize(labels: Iterable[str]) -> dict[str, str]:
-    """Case-merge label spellings; prefer mixed case over all-caps, then lexicographic order."""
-    groups: dict[str, list[str]] = defaultdict(list)
-    for label in labels:
-        groups[label.lower()].append(label)
-    out: dict[str, str] = {}
-    for variants in groups.values():
-        mixed = [v for v in variants if v != v.upper()]
-        canonical = sorted(mixed)[0] if mixed else sorted(variants)[0]
-        for v in variants:
-            out[v] = canonical
-    return out
 
 
 def _find_damaged(pairs: list[_Pair], *, workers: int) -> tuple[list[_Pair], list[str]]:
