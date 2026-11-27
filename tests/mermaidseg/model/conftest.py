@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
-from collections.abc import Callable, Iterator
-from pathlib import Path
+import copy
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 import torch
-import torch.distributed as dist
 from torch import nn
 
 from mermaidseg.io import ConfigDict
@@ -47,9 +45,8 @@ FixedMetaFactory = Callable[..., MetaModel]
 def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
     """Factory for a MetaModel over ``FixedOutputsModel`` (one pixel row of width 2).
 
-    ``class_logits`` are the per-class logits (default zeros), ``training`` overrides the
-    config's training section, and ``distributed`` builds the model for an initialised
-    process group.
+    ``class_logits`` are the per-class logits (default zeros), and ``training`` overrides the
+    config's training section.
     """
 
     def _factory(
@@ -63,7 +60,7 @@ def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
             logits.reshape(1, -1, 1, 1).expand(1, -1, 1, 2),
             torch.zeros(1, num_concepts, 1, 2),
         )
-        cfg = minimal_config
+        cfg = copy.deepcopy(minimal_config)
         for key, value in (training or {}).items():
             if isinstance(value, dict):
                 cfg.training[key].update(value)
@@ -84,15 +81,3 @@ def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
         )
 
     return _factory
-
-
-@pytest.fixture()
-def single_rank_group() -> Iterator[None]:
-    """An initialised one-process gloo group, destroyed afterwards."""
-    with tempfile.TemporaryDirectory() as rendezvous:
-        init_method = f"file://{Path(rendezvous) / 'rendezvous'}"
-        dist.init_process_group("gloo", init_method=init_method, rank=0, world_size=1)
-        try:
-            yield
-        finally:
-            dist.destroy_process_group()
