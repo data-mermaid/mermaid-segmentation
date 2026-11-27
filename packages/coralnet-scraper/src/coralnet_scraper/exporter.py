@@ -339,7 +339,7 @@ class AnnotationExporter:
                 self._export_pages_parallel(
                     source_id, bucket_name, s3_prefix, todo, max(1, min(workers, len(todo)))
                 )
-            combined = self._assemble_chunks(source_id, bucket_name, s3_prefix, list(pages))
+            combined = self._assemble_chunks(source_id, bucket_name, s3_prefix, list(pages), saved)
             annotations_key = s3_io.object_key_annotation_csv(s3_prefix, source_id)
             _upload_csv(self.s3, bucket_name, annotations_key, combined)
             logger.info(
@@ -363,12 +363,13 @@ class AnnotationExporter:
         bucket_name: str,
         s3_prefix: str,
         pages: dict[int, list[ImageRef]],
-    ) -> set[int]:
-        """Return the pages of ``pages`` whose saved export chunk in ``_partial/`` is usable.
+    ) -> dict[int, pd.DataFrame]:
+        """Return the usable saved export chunks in ``_partial/``, keyed by page of ``pages``.
 
         A chunk that cannot be read, lacks a ``Name`` column or has no rows for a page with a
         Confirmed image is deleted, so its page is exported again. A chunk of a page outside
-        ``pages`` is left alone and not returned.
+        ``pages`` is left alone and not returned. The returned frames spare the later assembly
+        a second read.
         """
         keys = s3_io.object_sizes(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
         saved = sorted(
@@ -382,9 +383,9 @@ class AnnotationExporter:
                 executor.map(lambda k: self._read_saved_chunk(bucket_name, k), chunk_keys)
             )
         usable = {
-            page
+            page: chunk
             for page, chunk in zip(saved, chunks, strict=True)
-            if _is_usable_chunk(chunk, pages[page])
+            if chunk is not None and _is_usable_chunk(chunk, pages[page])
         }
         unusable = [k for page, k in zip(saved, chunk_keys, strict=True) if page not in usable]
         if unusable:
@@ -400,16 +401,23 @@ class AnnotationExporter:
             return None
 
     def _assemble_chunks(
-        self, source_id: int, bucket_name: str, s3_prefix: str, pages: list[int]
+        self,
+        source_id: int,
+        bucket_name: str,
+        s3_prefix: str,
+        pages: list[int],
+        saved: dict[int, pd.DataFrame],
     ) -> pd.DataFrame:
-        """Return the saved export chunks of ``pages`` concatenated in that order.
+        """Return the export chunks of ``pages`` concatenated in that order.
 
-        The chunks are read across ``self.export_workers`` threads.
+        A page in ``saved`` uses that frame; the other pages are read from S3 across
+        ``self.export_workers`` threads.
 
         Raises:
             FileNotFoundError: If a page has no saved chunk.
         """
-        keys = [s3_io.partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in pages]
+        missing = [page for page in pages if page not in saved]
+        keys = [s3_io.partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in missing]
 
         def read(key: str) -> pd.DataFrame:
             chunk = s3_io.read_csv_s3(self.s3, bucket_name, key, encoding="utf-8")
@@ -418,7 +426,8 @@ class AnnotationExporter:
             return chunk
 
         with ThreadPoolExecutor(max_workers=self.export_workers) as executor:
-            chunks = list(executor.map(read, keys))
+            read_chunks = dict(zip(missing, executor.map(read, keys), strict=True))
+        chunks = [saved[page] if page in saved else read_chunks[page] for page in pages]
         return pd.concat(chunks, ignore_index=True)
 
     def _export_pages_parallel(

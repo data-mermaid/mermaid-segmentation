@@ -524,6 +524,15 @@ def test_a_paginated_export_skips_pages_with_a_saved_chunk(http_server, fake_s3,
         chunk = _ann_csv([(f"img{page}.jpg", 1, 1, 7)])
         fake_s3.put("b", f"{_PARTIAL}page-{page}.csv", chunk.encode())
     _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in range(1, 7)])
+    chunk_reads: list[str] = []
+    real_get_object = fake_s3.get_object
+
+    def counting_get_object(*, Bucket, Key, Range=None):
+        if "/_partial/page-" in Key:
+            chunk_reads.append(Key)
+        return real_get_object(Bucket=Bucket, Key=Key, Range=Range)
+
+    monkeypatch.setattr(fake_s3, "get_object", counting_get_object)
     http_server.script(
         _PREP, *[Reply(200, f'{{"session_data_timestamp": "t{p}"}}'.encode()) for p in (4, 5, 6)]
     )
@@ -543,6 +552,7 @@ def test_a_paginated_export_skips_pages_with_a_saved_chunk(http_server, fake_s3,
     assert browsed == [_page_path(n) for n in (4, 5, 6)]
     df = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
     assert df["Name"].tolist() == [f"img{p}.jpg" for p in range(1, 7)]
+    assert sorted(chunk_reads) == sorted(f"{_PARTIAL}page-{p}.csv" for p in range(1, 7))
 
 
 def _csv_reply(rows: list[tuple]) -> Reply:
