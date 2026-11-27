@@ -30,7 +30,7 @@ import time
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -42,12 +42,11 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.inference.bundle import ModelBundle
 from mermaidseg.io import REPO_ROOT, ConfigDict, setup_config
-from mermaidseg.model.concept_masking import apply_concept_source_mask
-from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
+from mermaidseg.model.data_parallel import build_step
 from mermaidseg.model.distributed import components_to_floats
+from mermaidseg.model.loss import build_loss
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
-    build_meta_model,
     build_registry,
     load_run_concept_source_mask,
 )
@@ -158,7 +157,6 @@ def evaluate_val_loss(
     cfg = _bundle_config(data_config, bundle)
     resolution = bundle.input_size[0]
     cfg.run_name = name
-    cfg.training.pop("taxonomic_loss", None)
     cfg.training.distributed = False
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
@@ -206,8 +204,19 @@ def evaluate_val_loss(
                 )
             )
 
-    meta = build_meta_model(cfg, registry, device, model=bundle.model)
-    meta.model.eval()
+    model = bundle.model.to(device)
+    model.eval()
+    # Scoring builds no taxonomic term.
+    step = build_step(
+        model,
+        build_loss(cfg.training.loss, registry.concept_value2id),
+        None,
+        registry.source_to_target,
+        registry.source_to_concepts,
+        device,
+        amp_dtype,
+        concept_keep=source_mask.keep if source_mask is not None else None,
+    )
 
     per_dataset: dict[str, dict] = {}
     overall = _Accumulator()
@@ -235,22 +244,11 @@ def evaluate_val_loss(
                     continue
                 images = images.to(device, non_blocking=True).float()
                 source_labels = source_labels.to(device, non_blocking=True).long()
-                target_labels = meta._to_target_labels(source_labels)
-                target_concepts = meta._to_concept_labels(source_labels)
-                if source_mask is not None:
-                    target_concepts = apply_concept_source_mask(
-                        target_concepts, source_mask.keep, batch[2]
-                    )
-                with torch.autocast(
-                    device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None
-                ):
-                    outputs = meta.model(images)
-                loss, _, _, components = apply_concept_bottleneck_loss(
-                    outputs,
-                    cast("torch.nn.Module", meta.loss),
-                    None,
-                    target_labels,
-                    target_concepts,
+                loss, *_, components = step(
+                    images,
+                    source_labels,
+                    return_maps=False,
+                    source_rows=batch[2] if source_mask is not None else None,
                 )
                 acc.add(components_to_floats({TOTAL_KEY: loss, **components}))
         per_dataset[dataset_name] = acc.means()
@@ -263,7 +261,7 @@ def evaluate_val_loss(
             len(image_indices),
         )
 
-    del meta
+    del step, model
     if device.type == "cuda":
         torch.cuda.empty_cache()
 

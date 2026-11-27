@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import mermaidseg.model.meta as meta_module
 import mermaidseg.model.models as models_module
+import mermaidseg.model.taxonomy_loss as taxonomy_loss_module
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.export import write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON
@@ -296,10 +297,10 @@ def test_nonfinite_microbatch_drops_the_window(minimal_config, make_meta_model):
 
     def _poison(*args, **kwargs):
         calls["n"] += 1
-        loss, outputs, concepts, components = real(*args, **kwargs)
+        loss, components = real(*args, **kwargs)
         if calls["n"] == 2:
             loss = torch.tensor(float("nan"))
-        return loss, outputs, concepts, components
+        return loss, components
 
     meta.batch_predict_loss = _poison
     images, labels = _images_labels(4)
@@ -322,10 +323,10 @@ def test_nonfinite_window_counts_loaded_samples_but_not_trained_samples(
 
     def _poison(*args, **kwargs):
         calls["n"] += 1
-        loss, outputs, concepts, components = real(*args, **kwargs)
+        loss, components = real(*args, **kwargs)
         if calls["n"] == 2:
             loss = torch.tensor(float("nan"))
-        return loss, outputs, concepts, components
+        return loss, components
 
     meta.batch_predict_loss = _poison
     images, labels = _images_labels(4)
@@ -379,7 +380,7 @@ def test_taxonomic_loss_reads_the_mapping_from_the_repo_not_the_current_director
         seen.append(path)
         raise _TreeBuildStop
 
-    monkeypatch.setattr(meta_module, "build_taxonomy_tree", _record)
+    monkeypatch.setattr(taxonomy_loss_module, "build_taxonomy_tree", _record)
     monkeypatch.chdir(tmp_path)
     with pytest.raises(_TreeBuildStop):
         make_meta_model(cfg)
@@ -442,9 +443,9 @@ def _record_micro_batches(meta) -> list[tuple[float, dict[str, float]]]:
     real = meta.batch_predict_loss
 
     def _recording(*args, **kwargs):
-        loss, outputs, concepts, components = real(*args, **kwargs)
+        loss, components = real(*args, **kwargs)
         records.append((float(loss.detach()), {k: float(v) for k, v in components.items()}))
-        return loss, outputs, concepts, components
+        return loss, components
 
     meta.batch_predict_loss = _recording
     return records
@@ -584,9 +585,11 @@ def test_train_epoch_masks_concept_targets(make_meta_model, monkeypatch, cbm_sch
     seen: list[torch.Tensor] = []
     original = meta.batch_predict_loss
 
-    def spy(images, target_labels=None, target_concepts=None, *args, **kwargs):
-        seen.append(target_concepts.detach().clone())
-        return original(images, target_labels, target_concepts, *args, **kwargs)
+    def spy(images, source_labels, source_rows, *, return_maps):
+        # Keep the maps so the step's concept targets can be read back.
+        loss, components = original(images, source_labels, source_rows, return_maps=True)
+        seen.append(meta._metric_shards[0].target_concepts.clone())
+        return loss, components
 
     monkeypatch.setattr(meta, "batch_predict_loss", spy)
     images = torch.randn(2, 3, *IMAGE_SIZE)
@@ -658,30 +661,52 @@ def test_apply_accumulated_step_skips_a_non_finite_gradient_norm(fixed_meta_mode
     assert param.grad is None
 
 
+def test_resume_offset_past_the_epoch_end_raises(fixed_meta_model):
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 4})
+    meta.global_step = 5
+
+    with pytest.raises(ValueError, match="resume offset"):
+        meta.train_epoch(_label_batches(1), epoch=0)
+
+    assert meta.global_step == 5
+
+
+def test_resume_offset_before_the_epoch_start_warns_and_runs_the_whole_epoch(
+    fixed_meta_model, caplog
+):
+    """Skipped windows leave ``global_step`` behind ``epoch * iterations``: offset -1 here."""
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 4})
+    meta.global_step = 3
+    updates: list[int] = []
+
+    with caplog.at_level("WARNING", logger=meta_module.logger.name):
+        meta.train_epoch(
+            _label_batches(1), epoch=1, on_optimizer_step=lambda m: updates.append(m.global_step)
+        )
+
+    assert updates == [4, 5, 6, 7]
+    assert any("resume offset -1" in record.getMessage() for record in caplog.records)
+
+
 @pytest.mark.parametrize(
-    ("epoch", "global_step", "expected_updates", "warns"),
+    ("global_step", "expected_updates"),
     [
-        pytest.param(0, 9, 4, True, id="past_the_epoch_end"),
-        pytest.param(3, 2, 4, True, id="before_the_epoch_start"),
-        pytest.param(0, 4, 0, False, id="at_the_epoch_end_is_a_finished_epoch"),
+        pytest.param(0, 4, id="at_the_epoch_start_runs_the_whole_epoch"),
+        pytest.param(4, 0, id="at_the_epoch_end_is_a_finished_epoch"),
     ],
 )
-def test_resume_offset_outside_the_epoch_restarts_it_at_zero(
-    fixed_meta_model, caplog, epoch, global_step, expected_updates, warns
+def test_resume_offset_at_either_epoch_bound_runs_the_rest(
+    fixed_meta_model, global_step, expected_updates
 ):
     meta = fixed_meta_model(training={"iterations_per_train_epoch": 4})
     meta.global_step = global_step
     updates: list[int] = []
 
-    with caplog.at_level("WARNING", logger=meta_module.logger.name):
-        meta.train_epoch(
-            _label_batches(1),
-            epoch=epoch,
-            on_optimizer_step=lambda m: updates.append(m.global_step),
-        )
+    meta.train_epoch(
+        _label_batches(1), epoch=0, on_optimizer_step=lambda m: updates.append(m.global_step)
+    )
 
     assert updates == list(range(global_step + 1, global_step + 1 + expected_updates))
-    assert any("resume offset" in record.getMessage() for record in caplog.records) is warns
 
 
 def test_warmup_raises_the_lr_before_the_decay_schedule_starts(fixed_meta_model):
@@ -745,10 +770,10 @@ def test_on_optimizer_step_fires_after_each_applied_update_and_not_for_a_skipped
 
     def _poison_second(*args, **kwargs):
         calls["n"] += 1
-        loss, outputs, concepts, components = real(*args, **kwargs)
+        loss, components = real(*args, **kwargs)
         if calls["n"] == 2:
             loss = torch.tensor(float("nan"))
-        return loss, outputs, concepts, components
+        return loss, components
 
     meta.batch_predict_loss = _poison_second
     seen: list[tuple[bool, int]] = []
@@ -773,12 +798,12 @@ def test_a_non_finite_grad_norm_skips_the_update_and_its_callback(fixed_meta_mod
 
     def _first_window_gets_a_nan_gradient(*args, **kwargs):
         calls["n"] += 1
-        loss, outputs, concepts, components = real(*args, **kwargs)
+        loss, components = real(*args, **kwargs)
         if calls["n"] == 1:
             loss = loss + bomb * 0.0
         else:
             bomb.grad = None  # not an optimizer parameter, so nothing else clears it
-        return loss, outputs, concepts, components
+        return loss, components
 
     meta.batch_predict_loss = _first_window_gets_a_nan_gradient
     seen: list[int] = []
@@ -792,6 +817,41 @@ def test_a_non_finite_grad_norm_skips_the_update_and_its_callback(fixed_meta_mod
     # The epoch mean covers the one applied window. Zero class logits give ln 4 = 2 ln 2 for
     # classification, plus 2 ln 2 for the concept terms.
     assert last_loss == pytest.approx(4 * math.log(2.0), rel=1e-4)
+
+
+# MetaModel attribute -> the ShardStep attribute that holds it.
+_STEP_PART_OF = {
+    "model": "model",
+    "loss": "loss_fn",
+    "taxonomic_loss": "taxonomic_loss",
+    "concept_source_keep": "concept_keep",
+}
+
+
+@pytest.mark.parametrize(
+    "swapped",
+    [
+        pytest.param(lambda meta: ("model", copy.deepcopy(meta.model)), id="model"),
+        pytest.param(lambda meta: ("loss", copy.deepcopy(meta.loss)), id="loss"),
+        pytest.param(lambda meta: ("taxonomic_loss", torch.nn.Identity()), id="taxonomic_loss"),
+        pytest.param(
+            lambda meta: ("concept_source_keep", torch.ones(4, 13, dtype=torch.bool)),
+            id="concept_source_keep",
+        ),
+    ],
+)
+def test_step_is_built_once_and_rebuilt_when_a_part_is_replaced(fixed_meta_model, swapped):
+    meta = fixed_meta_model()
+    first = meta.step
+    assert meta.step is first
+
+    name, replacement = swapped(meta)
+    setattr(meta, name, replacement)
+    rebuilt = meta.step
+
+    assert rebuilt is not first
+    assert getattr(rebuilt, _STEP_PART_OF[name]) is replacement
+    assert meta.step is rebuilt
 
 
 @pytest.mark.parametrize(

@@ -52,7 +52,7 @@ scripts/train.py
        labels and concepts from mermaidseg/dataset_reconciliation/
        MetaModel (mermaidseg/model/meta.py), Logger over a wandb or MLflow tracker (mermaidseg/logger.py)
   -> outputs/model_checkpoints/<run>/
-       model_step* / model_epoch* checkpoints (with lineage), config.yaml, model.json
+       model_step* checkpoints (with lineage; model_preempt* on Slurm; model_final at the end of a run), config.yaml, model.json
   -> scripts/export.py (mermaidseg/export.py)
   -> bundle: weights.safetensors + model.json
   -> mermaidseg/inference/

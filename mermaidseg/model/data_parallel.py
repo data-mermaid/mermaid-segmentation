@@ -1,7 +1,8 @@
-"""Per-rank label lookup, forward, and concept-bottleneck loss for DDP training.
+"""The training step: label lookup, forward, and concept-bottleneck loss.
 
-Each rank runs the label lookup, the forward, and the concept/taxonomy loss on
-its own shard (:class:`ShardStep`), wrapped for DDP by :class:`DDPLossStep`.
+:class:`ShardStep` runs the label lookup, the forward, and the concept/taxonomy
+loss on one GPU's batch (built by :func:`build_step`). Under DDP each rank runs
+it on its own shard, wrapped by :class:`DDPLossStep`.
 """
 
 from __future__ import annotations
@@ -35,8 +36,7 @@ def apply_concept_bottleneck_loss(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """Compute concept and taxonomy loss terms for one concept-bottleneck batch.
 
-    This is the loss body of ``MetaModel.batch_predict_loss``. The single-GPU
-    path and each distributed shard both call it, outside autocast, on
+    This is the loss body of :class:`ShardStep`, called outside autocast on
     fp32 logits.
 
     Args:
@@ -71,27 +71,23 @@ def shard_targets(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build target labels and concept maps for one shard on that shard's device.
 
-    Same lookups as ``MetaModel._to_target_labels`` and ``_to_concept_labels``.
-    With ``concept_keep`` and ``source_rows``, masked source x concept targets are set to 0 (``training.concept_source_mask``).
+    With both ``concept_keep`` and ``source_rows``, masked source x concept targets are set
+    to 0 (``training.concept_source_mask``). Without ``source_rows`` the concepts stay
+    unmasked: validation batches carry no rows and are never masked.
 
     Args:
         source_labels: Source label map.
         target_lookup: Source-to-target label lookup.
         concept_lookup: Source-to-concept lookup.
         concept_keep: Optional source x concept keep mask.
-        source_rows: Per-image source rows, required with ``concept_keep``.
+        source_rows: Per-image keep-table rows; ``None`` leaves the concepts unmasked.
 
     Returns:
         The target labels and the target concepts.
-
-    Raises:
-        RuntimeError: If ``concept_keep`` is set and ``source_rows`` is ``None``.
     """
     target_labels = source_labels_to_target_labels(source_labels, target_lookup)
     target_concepts = source_labels_to_concepts(source_labels, concept_lookup)
-    if concept_keep is not None:
-        if source_rows is None:
-            raise RuntimeError("concept_source_mask is set but the batch has no source rows.")
+    if concept_keep is not None and source_rows is not None:
         target_concepts = apply_concept_source_mask(target_concepts, concept_keep, source_rows)
     return target_labels, target_concepts
 
@@ -109,9 +105,11 @@ class MetricShard:
 class ShardStep(nn.Module):
     """Label lookup, forward, and concept-bottleneck loss for one GPU's shard.
 
-    The step's children are ``MetaModel``'s own model and losses, and its
-    lookup buffers share storage with ``MetaModel``'s lookups. Registering
-    them here does not re-parent ``MetaModel.model``.
+    This is the one training and validation step: ``MetaModel`` runs it on a
+    single GPU and, wrapped in :class:`DDPLossStep`, on each rank, and the
+    validation-loss evaluation runs it on an exported model. The step's
+    children are the caller's own model and losses, so registering them here
+    does not re-parent ``MetaModel.model``.
     """
 
     def __init__(
@@ -204,6 +202,47 @@ class ShardStep(nn.Module):
             target_concepts,
             components,
         )
+
+
+def build_step(
+    model: nn.Module,
+    loss_fn: nn.Module,
+    taxonomic_loss: nn.Module | None,
+    target_lookup: torch.Tensor,
+    concept_lookup: torch.Tensor,
+    device: torch.device,
+    amp_dtype: torch.dtype | None,
+    concept_keep: torch.Tensor | None = None,
+) -> ShardStep:
+    """The step over ``model`` and its losses, with the lookups on ``device``.
+
+    ``taxonomic_loss`` and ``concept_keep`` are held as given, so a caller can tell by
+    identity whether its step still matches its parts.
+
+    Args:
+        model: Segmentation model, already on ``device``.
+        loss_fn: Concept-bottleneck loss.
+        taxonomic_loss: Optional taxonomy loss, already on ``device``.
+        target_lookup: Source-to-target label lookup; held as long.
+        concept_lookup: Source-to-concept lookup; held as float.
+        device: Device the step's inputs live on.
+        amp_dtype: Autocast dtype for the forward; ``None`` runs it without autocast.
+        concept_keep: Optional source x concept keep mask.
+
+    Returns:
+        The step.
+    """
+    return ShardStep(
+        model,
+        loss_fn,
+        taxonomic_loss,
+        target_lookup.to(device).long(),
+        concept_lookup.to(device).float(),
+        use_amp=amp_dtype is not None,
+        # Autocast ignores the dtype when it is disabled.
+        amp_dtype=amp_dtype if amp_dtype is not None else torch.bfloat16,
+        concept_keep=concept_keep,
+    )
 
 
 class DDPLossStep(nn.Module):

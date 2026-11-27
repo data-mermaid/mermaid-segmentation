@@ -186,5 +186,16 @@ def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
     labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)
     *_, concepts, _ = step(images, labels, return_maps=True, source_rows=torch.tensor([1, 0]))
     assert (concepts[0, bleached] == 0).all() and (concepts[1, bleached] == 1).all()
-    with pytest.raises(RuntimeError, match="no source rows"):
-        shard_targets(labels, target, lookup, keep, None)
+
+
+def test_shard_targets_without_source_rows_leave_the_concepts_unmasked(cbm_schema):
+    """Validation batches carry no source rows, so a set keep table masks nothing."""
+    keep = concept_keep(cbm_schema)
+    lookup = source_lookup(cbm_schema)
+    bleached = cbm_schema.channel_names.index("bleached")
+    labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)  # acropora: bleached False
+
+    _, concepts = shard_targets(labels, torch.arange(NUM_CLASSES), lookup, keep, None)
+
+    # Row 1 of the keep table masks bleached; unmasked, both samples keep their False target 1.
+    assert (concepts[:, bleached] == 1).all()

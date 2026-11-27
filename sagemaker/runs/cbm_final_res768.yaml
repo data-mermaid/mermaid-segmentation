@@ -7,7 +7,7 @@ job:
   max_runtime_hours: 168
 train:
   run_name: cbm_final_res768
-  init_weights: model_checkpoints/cbm_final/model_step300000
+  init_weights: model_checkpoints/cbm_final/model_final
   args:
     - --training-config
     - configs/training_config_cbm_final_hires.yaml

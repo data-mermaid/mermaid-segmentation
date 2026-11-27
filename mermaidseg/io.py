@@ -124,11 +124,6 @@ def _read_mapping(config_path: str | Path) -> dict[str, Any]:
     return dict(loaded)
 
 
-def load_config(config_path: str | Path) -> ConfigDict:
-    """Load configuration from a YAML file."""
-    return ConfigDict(_read_mapping(config_path))
-
-
 def load_section(config_path: str | Path, section: str) -> dict[str, Any]:
     """Load one config section from a YAML file wrapped in its section key, and validate it.
 
@@ -142,13 +137,111 @@ def load_section(config_path: str | Path, section: str) -> dict[str, Any]:
     return validate_section(_read_mapping(config_path), section, config_path)
 
 
-def get_parser() -> argparse.ArgumentParser:
-    """Create and configure an argument parser for semantic segmentation training."""
+def build_train_parser() -> argparse.ArgumentParser:
+    """Build the argument parser of ``scripts/train.py``."""
+    # CLI overrides used by the slurm/launch_*.sh experiment launchers.
     parser = argparse.ArgumentParser(description="Semantic Segmentation Run", allow_abbrev=False)
-
     parser.add_argument("--run-name", type=str)
     parser.add_argument("--batch-size", type=int, help="batch size")
+    parser.add_argument(
+        "--training-config",
+        default="configs/training_config_cbm_final.yaml",
+        help="path to the training config YAML",
+    )
+    parser.add_argument(
+        "--model-config",
+        default="configs/model_config_cbm_dpt_lora_vitl.yaml",
+        help="path to the model config YAML (default: rank-16 ViT-L LoRA)",
+    )
+    parser.add_argument(
+        "--data-config",
+        default="configs/data_config.yaml",
+        help="path to the data config YAML (default: the final-run mixture of pinned versions)",
+    )
+    parser.add_argument(
+        "--concept-schema-config",
+        default="configs/data_config.yaml",
+        help=(
+            "Data config whose configured datasets freeze the concept channels, so every run "
+            "shares one layout whatever subset of the data it trains on."
+        ),
+    )
+    parser.add_argument(
+        "--logger-config",
+        default="configs/logger_config.yaml",
+        help="path to the logger config YAML",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=256,
+        help="square train crop and val resize in pixels; also sets model.input_size",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        required=True,
+        help="DataLoader workers per process (per rank under torchrun); must be >= 1",
+    )
+    parser.add_argument(
+        "--nccl-timeout-min",
+        type=float,
+        default=30.0,
+        help="minutes a collective may wait for a slow rank before the job is killed (> 0)",
+    )
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=None,
+        help="microbatches per optimizer step (default: training config, usually 1)",
+    )
+    parser.add_argument(
+        "--preempt-checkpoint-every-steps",
+        type=int,
+        default=0,
+        help=(
+            "Also write one rolling model_preempt{step} checkpoint every N optimizer "
+            "updates (0 disables). model_step interval checkpoints are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="root for run outputs; checkpoints land in <output-dir>/model_checkpoints/<run>",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        required=True,
+        help="dataset cache root that scripts/sync_data.py filled from the data config's pins",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="path to a checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--init-weights",
+        default=None,
+        help=(
+            "path to a checkpoint whose model weights initialize a new run. The "
+            "optimizer and warmup schedule stay as just constructed. Mutually "
+            "exclusive with --checkpoint"
+        ),
+    )
+    parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
     return parser
+
+
+def check_train_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject trainer arguments that parse but cannot run, through ``parser.error``."""
+    if args.preempt_checkpoint_every_steps < 0:
+        parser.error("--preempt-checkpoint-every-steps must be >= 0")
+    if args.num_workers < 1:
+        parser.error("--num-workers must be >= 1")
+    if args.nccl_timeout_min <= 0:
+        parser.error("--nccl-timeout-min must be > 0")
+    if args.checkpoint is not None and args.init_weights is not None:
+        parser.error("pass only one of --checkpoint and --init-weights")
 
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
@@ -235,18 +328,14 @@ def setup_config(
         ValueError: If a file is unwrapped or does not match its schema.
     """
     cfg = ConfigDict()
-    if "data" in config_path_dict:
-        data_section = load_section(cast("str | Path", config_path_dict["data"]), "data")
-        if resolution is not None:
-            apply_resolution(data_section, int(resolution))
-        cfg.data = data_section
-    if "model" in config_path_dict:
-        cfg.model = load_section(cast("str | Path", config_path_dict["model"]), "model")
-        if resolution is not None:
+    for name in ("data", "model", "training", "logger"):
+        if name not in config_path_dict:
+            continue
+        section = load_section(cast("str | Path", config_path_dict[name]), name)
+        if resolution is not None and name == "data":
+            apply_resolution(section, int(resolution))
+        cfg[name] = section
+        if resolution is not None and name == "model":
             cfg.model.input_size = [int(resolution), int(resolution)]
-    if "training" in config_path_dict:
-        cfg.training = load_section(cast("str | Path", config_path_dict["training"]), "training")
-    if "logger" in config_path_dict:
-        cfg.logger = load_section(cast("str | Path", config_path_dict["logger"]), "logger")
 
     return cfg

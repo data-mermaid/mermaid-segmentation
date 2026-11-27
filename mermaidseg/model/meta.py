@@ -6,32 +6,20 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from typing import Any, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 import transformers
-
-# from mermaidseg.model.eval import Evaluator
-from numpy.typing import NDArray
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.dataloader import _BaseDataLoaderIter
 from tqdm import tqdm
 
 from mermaidseg.config import lookup_class
-from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
-from mermaidseg.dataset_reconciliation.registry import source_labels_to_target_labels
-from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
 from mermaidseg.inference.predictor import class_predictions
-from mermaidseg.io import ConfigDict, resolve_repo_path
-from mermaidseg.model.concept_masking import apply_concept_source_mask
-from mermaidseg.model.data_parallel import (
-    DDPLossStep,
-    MetricShard,
-    ShardStep,
-    apply_concept_bottleneck_loss,
-)
+from mermaidseg.io import ConfigDict
+from mermaidseg.model.data_parallel import DDPLossStep, MetricShard, ShardStep, build_step
 from mermaidseg.model.distributed import (
     all_ranks_finite,
     current_context,
@@ -40,13 +28,16 @@ from mermaidseg.model.distributed import (
     reduce_components,
     require_world_size,
 )
-from mermaidseg.model.loss import LOSS_CLASSES
+from mermaidseg.model.loss import build_loss
 from mermaidseg.model.models import MODEL_CLASSES, load_pretrained_encoder
-from mermaidseg.model.taxonomy_loss import TaxonomicLoss
+from mermaidseg.model.taxonomy_loss import build_taxonomic_loss
+
+if TYPE_CHECKING:
+    from mermaidseg.model.eval import Evaluator
 
 logger = logging.getLogger(__name__)
 
-_BatchLoader = DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
+_BatchLoader = DataLoader[tuple[torch.Tensor, ...]]
 
 _BATCH_LOSS_KEY = "__batch_loss__"
 
@@ -144,6 +135,29 @@ def restore_warmup_progress(meta_model: Any, checkpoint: dict[str, Any]) -> None
         meta_model.warmup_scheduler.last_epoch = meta_model._warmup_iters_completed
 
 
+@dataclass
+class _EpochTally:
+    """Host wall times and sample counts summed over one training epoch."""
+
+    data_sec: float = 0.0
+    forward_sec: float = 0.0
+    backward_sec: float = 0.0
+    num_samples: int = 0
+    num_loaded_samples: int = 0
+    # When the last microbatch or update finished; data time runs from here to the next fetch.
+    batch_end: float = field(default_factory=time.perf_counter)
+
+    def timing(self) -> dict[str, float | int]:
+        """The ``timing`` dict ``train_epoch`` returns."""
+        return {
+            "data_loading_sec": self.data_sec,
+            "forward_sec": self.forward_sec,
+            "backward_sec": self.backward_sec,
+            "num_samples": self.num_samples,
+            "num_loaded_samples": self.num_loaded_samples,
+        }
+
+
 class MetaModel:
     """Wrapper for training and inference of segmentation models.
 
@@ -151,10 +165,9 @@ class MetaModel:
     train/validation loop primitives: joint segmentation + concept supervision.
 
     Source-label datasets emit ``source_labels`` in the joint global source
-    space (see :class:`SourceLabelRegistry`); ``MetaModel`` converts them to
-    ``target_labels`` and ``concept_labels`` on-device via long-tensor
-    lookups passed via ``source_to_target_lookup`` and
-    ``source_to_concepts_lookup``.
+    space (see :class:`SourceLabelRegistry`); ``step`` converts them to
+    ``target_labels`` and ``concept_labels`` on-device via the lookups
+    passed as ``source_to_target_lookup`` and ``source_to_concepts_lookup``.
 
     Attributes:
         run_name: Identifier for the current run/experiment.
@@ -233,6 +246,7 @@ class MetaModel:
         # One process per GPU (torchrun). The process group must already exist;
         # each rank's loader yields that rank's shard of the global microbatch.
         self.distributed = bool(training_kwargs.pop("distributed"))
+        self._step: ShardStep | None = None
         self._ddp_step: DistributedDataParallel | None = None
         # Keep table of training.concept_source_mask, set by set_concept_source_mask.
         self.concept_source_keep: torch.Tensor | None = None
@@ -299,27 +313,12 @@ class MetaModel:
         self.model = self.model.to(device)
         self.detach_concepts = detach_concepts
 
-        loss_cls = lookup_class(LOSS_CLASSES, "loss", training_kwargs.loss.pop("type"))
-        loss_kwargs = dict(training_kwargs.loss)
-        loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
-        self.loss = loss_cls(**loss_kwargs)
+        self.loss = build_loss(training_kwargs.loss, self.concept_value2id)
 
-        # Taxonomic KL coherence term added to the concept loss. The trainer drops the
-        # section when its kl_weight is not positive.
-        self.taxonomic_loss = None
-        taxonomic_cfg = training_kwargs.get("taxonomic_loss")
-        if taxonomic_cfg is not None:
-            taxonomic_kwargs = dict(taxonomic_cfg)
-            # Same tree as the hierarchical metrics.
-            taxonomy = build_taxonomy_tree(
-                resolve_repo_path(training_kwargs.concept_mapping_path),
-                ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy"),
-            )
-            self.taxonomic_loss = TaxonomicLoss(
-                taxonomy,
-                self.concept_value2id,
-                **taxonomic_kwargs,
-            ).to(device)
+        # Taxonomic KL coherence term added to the concept loss; None when its kl_weight is
+        # not positive.
+        taxonomic_loss = build_taxonomic_loss(training_kwargs, self.concept_value2id)
+        self.taxonomic_loss = taxonomic_loss.to(device) if taxonomic_loss is not None else None
 
         optimizer_cfg = dict(training_kwargs.optimizer)
         optimizer_cls = lookup_class(OPTIMIZER_CLASSES, "optimizer", optimizer_cfg.pop("type"))
@@ -415,17 +414,13 @@ class MetaModel:
         self.optimizer.zero_grad(set_to_none=True)
         return True
 
-    def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
-        """Map source-space labels to target-space labels via the lookup tensor."""
-        return source_labels_to_target_labels(source_labels, self.source_to_target_lookup)
-
     def set_concept_source_mask(self, keep: torch.Tensor | None) -> None:
         """Mask source x concept training targets (``training.concept_source_mask``).
 
         ``keep`` is the ``(S + 1, C)`` bool table of
         :class:`~mermaidseg.dataset_reconciliation.concept_source_mask.ConceptSourceMask`. Training
         batches must then carry a keep-table row per sample (``attach_source_rows``). Validation is
-        not masked.
+        not masked. The step is rebuilt with the new table on its next use.
         """
         if keep is not None:
             if keep.shape[1] != self.num_concepts:
@@ -434,9 +429,6 @@ class MetaModel:
                 )
             keep = keep.to(device=self.device, dtype=torch.bool)
         self.concept_source_keep = keep
-
-    def _to_concept_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
-        return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
 
     def _update_evaluator(
         self,
@@ -461,7 +453,7 @@ class MetaModel:
     def _consume_metric_shards(self, evaluator: Any) -> bool:
         """Update metrics from one GPU shard at a time.
 
-        Returns False when this step was not distributed. Shards are dropped
+        Returns False when the last forward stored no shards. Shards are dropped
         after they are consumed so a 768px map does not stay on GPU 0 alongside
         the next shard.
         """
@@ -487,72 +479,67 @@ class MetaModel:
             )
         return True
 
-    def _record_batch_metrics(
-        self,
-        evaluator: Any | None,
-        outputs: torch.Tensor | None,
-        target_labels: torch.Tensor | None,
-        concept_outputs: torch.Tensor | None,
-        target_concepts: torch.Tensor | None,
-    ) -> None:
-        """Record train or val metrics for the batch that just finished.
+    def _record_batch_metrics(self, evaluator: Any | None) -> None:
+        """Record train or val metrics from the shards the last forward stored.
 
-        ``evaluator=None`` records nothing and drops any distributed shards.
+        ``evaluator=None`` records nothing and drops the shards.
         """
         if evaluator is None:
             self._metric_shards = None
             return
-        if self._consume_metric_shards(evaluator):
-            return
-        if self.distributed:
-            raise RuntimeError("distributed forward did not return metric shards.")
-        assert outputs is not None
-        assert target_labels is not None
-        assert concept_outputs is not None
-        assert target_concepts is not None
-        self._update_evaluator(evaluator, outputs, target_labels, concept_outputs, target_concepts)
+        if not self._consume_metric_shards(evaluator):
+            raise RuntimeError("the forward did not store metric shards.")
 
-    def _get_ddp_step(self) -> DistributedDataParallel:
-        """This rank's lookup, forward, and loss, wrapped in DDP, built on first use.
+    @property
+    def step(self) -> ShardStep:
+        """This process's lookup, forward, and loss over the current model and losses.
 
-        Built lazily so it wraps weights loaded after
-        construction and the ``requires_grad`` set at model construction.
-        Rebuilt if ``model`` or a loss module has been replaced since.
+        Rebuilt on first use after ``model``, ``loss``, ``taxonomic_loss`` or
+        ``concept_source_keep`` has been replaced.
         """
-        ddp = self._ddp_step
-        if ddp is not None:
-            step = ddp.module.step
-            if (
-                step.model is self.model
-                and step.loss_fn is self.loss
-                and step.taxonomic_loss is self.taxonomic_loss
-                and step.concept_keep is self.concept_source_keep
-            ):
-                return ddp
-        step = DDPLossStep(
-            ShardStep(
+        step = self._step
+        if (
+            step is None
+            or step.model is not self.model
+            or step.loss_fn is not self.loss
+            or step.taxonomic_loss is not self.taxonomic_loss
+            or step.concept_keep is not self.concept_source_keep
+        ):
+            step = build_step(
                 self.model,
                 self.loss,
                 self.taxonomic_loss,
                 self.source_to_target_lookup,
                 self.source_to_concepts_lookup,
-                self.use_amp,
-                self.amp_dtype,
+                torch.device(self.device),
+                self.amp_dtype if self.use_amp else None,
                 self.concept_source_keep,
             )
-        )
+            self._step = step
+        return step
+
+    def _get_ddp_step(self) -> DistributedDataParallel:
+        """``self.step`` wrapped in DDP, built on first use.
+
+        Built lazily so it wraps weights loaded after
+        construction and the ``requires_grad`` set at model construction.
+        Rebuilt whenever ``self.step`` has been rebuilt.
+        """
+        step = self.step
+        ddp = self._ddp_step
+        if ddp is not None and ddp.module.step is step:
+            return ddp
         device = torch.device(self.device)
         # Buffers (lookups, loss matrices, model buffers) are identical on every
         # rank and never updated, so they are not re-broadcast each forward.
         # A bucket view of the 1x1 DPT/concept conv grads is not stride-compatible
         # (see the reducer's "Grad strides do not match bucket view strides"
         # warning), so leave the grads in their own storage.
-        # Built outside inference mode: a first build inside validation_epoch would
-        # make the reducer's buckets inference tensors that the next backward
-        # cannot update in place.
+        # Built outside inference mode, so the reducer's buckets are never
+        # inference tensors that a backward cannot update in place.
         with torch.inference_mode(False):
             self._ddp_step = DistributedDataParallel(
-                step,
+                DDPLossStep(step),
                 device_ids=[device.index] if device.type == "cuda" else None,
                 broadcast_buffers=False,
             )
@@ -580,105 +567,275 @@ class MetaModel:
     def batch_predict_loss(
         self,
         images: torch.Tensor,
-        target_labels: torch.Tensor | None = None,
-        target_concepts: torch.Tensor | None = None,
+        source_labels: torch.Tensor,
+        source_rows: torch.Tensor | None,
         *,
-        source_labels: torch.Tensor | None = None,
         return_maps: bool = True,
-        source_rows: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, torch.Tensor]]:
-        """Perform batch prediction and compute the loss.
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Run ``self.step`` on one batch and keep its maps for the metrics.
 
         Args:
-            images: Image tensor batch (already on-device, float).
-            target_labels: Target-space label tensor (already on-device, long).
-                Unused with ``distributed``.
-            target_concepts: Target concept tensor. Required on a single GPU;
-                unused with ``distributed``.
-            source_labels: Global source-label map (long). Required with
-                ``distributed``: each rank maps its shard to target labels and
-                concepts itself.
-            return_maps: With ``distributed``, keep this rank's maps in
-                ``_metric_shards``. Pass False when the batch is not scored.
-            source_rows: Keep-table row per sample, for ``concept_source_keep``
-                with ``distributed`` (each rank masks its own shard). On a
-                single GPU, ``train_epoch`` masks ``target_concepts`` before
-                calling this.
+            images: Image batch (already on-device, float).
+            source_labels: Global source-label map (already on-device, long).
+            source_rows: Keep-table row per sample for ``concept_source_keep``;
+                ``None`` leaves the concept targets unmasked.
+            return_maps: Keep the batch's maps in ``_metric_shards``. Pass False
+                when the batch is not scored.
 
         Returns:
-            A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
-            With ``distributed``, ``outputs`` and ``concept_outputs`` are
-            ``None``; the maps stay in ``_metric_shards``.
+            The loss and its components. The maps stay in ``_metric_shards``.
         """
         self._metric_shards = None
-        loss = None
-        outputs = None
-        concept_outputs = None
-        loss_components: dict[str, torch.Tensor] = {}
-
-        if self.distributed:
-            if source_labels is None:
-                raise RuntimeError("distributed requires source labels.")
+        # Training under DDP must backward the tensor DDP returned, not a copy from
+        # the stashed tuple, so the reducer hooks fire. Without grad there is nothing
+        # to reduce, so the wrapper is bypassed.
+        if self.distributed and torch.is_grad_enabled():
             ddp = self._get_ddp_step()
-            # Validation (no grad) bypasses the DDP wrapper; it has nothing to reduce.
-            # Training must backward the tensor DDP returned, not a copy from the
-            # stashed tuple, so the reducer hooks fire.
-            if torch.is_grad_enabled():
-                loss = ddp(images, source_labels, return_maps=return_maps, source_rows=source_rows)
-                output = ddp.module.last
-                if output is None:
-                    raise RuntimeError("distributed forward did not stash its outputs.")
-                _, outputs, concept_outputs, labels, concepts, loss_components = output
-            else:
-                loss, outputs, concept_outputs, labels, concepts, loss_components = ddp.module.step(
-                    images,
-                    source_labels,
-                    return_maps=return_maps,
-                    source_rows=source_rows,
-                )
-            self._metric_shards = (
-                [
-                    MetricShard(
-                        outputs=outputs,
-                        concept_outputs=concept_outputs,
-                        target_labels=labels,
-                        target_concepts=concepts,
-                    )
-                ]
-                if return_maps
-                else None
+            loss = ddp(images, source_labels, return_maps=return_maps, source_rows=source_rows)
+            output = ddp.module.last
+            if output is None:
+                raise RuntimeError("distributed forward did not stash its outputs.")
+            _, outputs, concept_outputs, labels, concepts, loss_components = output
+        else:
+            loss, outputs, concept_outputs, labels, concepts, loss_components = self.step(
+                images, source_labels, return_maps=return_maps, source_rows=source_rows
             )
-            return loss, None, None, loss_components
+        if return_maps:
+            self._metric_shards = [
+                MetricShard(
+                    outputs=outputs,
+                    concept_outputs=concept_outputs,
+                    target_labels=labels,
+                    target_concepts=concepts,
+                )
+            ]
+        return loss, loss_components
 
-        with torch.autocast(
-            device_type=self.device_type, dtype=self.amp_dtype, enabled=self.use_amp
-        ):
-            segmentation_outputs = self.model(images)
+    def _resume_offset(self, epoch: int | None) -> int:
+        """The update this epoch starts at: ``global_step - epoch * iterations``.
 
-        assert target_concepts is not None, "target_concepts is required without distributed"
-        loss, outputs, concept_outputs, loss_components = apply_concept_bottleneck_loss(
-            segmentation_outputs,
-            self.loss,
-            self.taxonomic_loss,
-            cast("torch.Tensor", target_labels),
-            target_concepts,
+        ``global_step`` counts applied updates only, so skipped windows in earlier epochs
+        make the offset negative; the epoch then starts at 0.
+
+        Raises:
+            ValueError: If the offset is past ``iterations_per_train_epoch``.
+        """
+        epoch_index = 0 if epoch is None else int(epoch)
+        offset = int(self.global_step) - epoch_index * self.iterations_per_train_epoch
+        if offset > self.iterations_per_train_epoch:
+            raise ValueError(
+                f"train_epoch: resume offset {offset} (global_step {self.global_step}, "
+                f"epoch {epoch_index}) is past {self.iterations_per_train_epoch}."
+            )
+        if offset < 0:
+            logger.warning(
+                "train_epoch: resume offset %s is outside 0..%s; starting this epoch at 0.",
+                offset,
+                self.iterations_per_train_epoch,
+            )
+            return 0
+        return offset
+
+    def _warn_stall_dump(self, stall_dump_sec: float) -> None:
+        """Log the main thread's id, which a faulthandler stack dump labels its stack with."""
+        if stall_dump_sec > 0:
+            logger.warning(
+                "rank %d: an update running over %.0f s dumps all stacks to stderr; "
+                "this rank's main thread is 0x%016x",
+                current_context().rank,
+                stall_dump_sec,
+                threading.get_ident(),
+            )
+
+    def _next_batch(
+        self, train_loader: _BatchLoader, tally: _EpochTally
+    ) -> tuple[tuple[torch.Tensor, ...], float]:
+        """Fetch the next training microbatch, restarting the loader when it runs out.
+
+        Returns:
+            The batch and the seconds spent fetching it.
+        """
+        assert self._train_loader_iter is not None
+        fetch_start = time.perf_counter()
+        try:
+            data = next(self._train_loader_iter)
+        except StopIteration:
+            self._train_loader_iter = iter(train_loader)
+            self._train_loader = train_loader
+            data = next(self._train_loader_iter)
+        fetch_sec = time.perf_counter() - fetch_start
+        if fetch_sec > SLOW_FETCH_WARN_SEC:
+            logger.warning(
+                "rank %d: train loader took %.0f s for one microbatch (update %d)",
+                current_context().rank,
+                fetch_sec,
+                int(self.global_step) + 1,
+            )
+        tally.data_sec += time.perf_counter() - tally.batch_end
+        return data, fetch_sec
+
+    def _prepare_targets(
+        self, data: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None:
+        """Move one training microbatch to the device, or return None for an empty batch.
+
+        Returns:
+            The images, source labels, and source rows (None without a concept source mask).
+
+        Raises:
+            RuntimeError: If a concept source mask is set and the batch has no source rows,
+                or the batch is empty in a distributed run.
+        """
+        images, source_labels, *extra = data
+        source_rows = extra[0] if extra else None
+        if self.concept_source_keep is not None and source_rows is None:
+            raise RuntimeError(
+                "concept_source_mask is set but the train batch has no source rows; "
+                "wrap the train datasets with attach_source_rows."
+            )
+        if images.numel() == 0:
+            if self.distributed:
+                # Skipping on one rank would leave the others waiting in a collective.
+                raise RuntimeError("train_epoch: empty batch in a distributed run.")
+            logger.warning("train_epoch: skipping an empty batch (all items failed to load).")
+            return None
+        images = images.to(self.device, non_blocking=True).float()
+        source_labels = source_labels.to(self.device, non_blocking=True).long()
+        if self.concept_source_keep is None:
+            source_rows = None
+        else:
+            source_rows = torch.as_tensor(source_rows).to(self.device).long()
+        return images, source_labels, source_rows
+
+    def _run_window(
+        self, train_loader: _BatchLoader, evaluator: "Evaluator | None", tally: _EpochTally
+    ) -> tuple[dict[str, torch.Tensor], float] | None:
+        """Forward and backward one accumulation window of ``grad_accum_steps`` microbatches.
+
+        Returns:
+            The window's mean loss (under ``_BATCH_LOSS_KEY``) and components, and the
+            seconds spent waiting on the loader; None when the window is dropped for an
+            empty batch or a non-finite loss.
+        """
+        micro_losses: list[torch.Tensor] = []
+        micro_components: list[dict[str, torch.Tensor]] = []
+        data_wait = 0.0
+        for micro in range(self.grad_accum_steps):
+            data, fetch_sec = self._next_batch(train_loader, tally)
+            data_wait += fetch_sec
+            tally.num_loaded_samples += int(data[0].size(0)) * self.world_size
+            batch = self._prepare_targets(data)
+            if batch is None:
+                tally.batch_end = time.perf_counter()
+                return None
+            images, source_labels, source_rows = batch
+            record_metrics = evaluator is not None and records_train_metrics(
+                self._train_microbatches_seen, self.train_metrics_every
+            )
+            self._train_microbatches_seen += 1
+
+            # Distributed: gradients are all-reduced once, in the window's last backward.
+            sync_grads = micro == self.grad_accum_steps - 1
+            with self._grad_sync_context(sync_grads):
+                forward_start = time.perf_counter()
+                loss, loss_components = self.batch_predict_loss(
+                    images, source_labels, source_rows, return_maps=record_metrics
+                )
+                tally.forward_sec += time.perf_counter() - forward_start
+
+                # Skip the window if any rank's shard loss is non-finite. The
+                # per-microbatch check is a host sync that cannot move to a logging
+                # interval: a non-finite window must not reach the optimizer.
+                if not all_ranks_finite(loss):
+                    logger.warning("train_epoch: skipping non-finite loss (value=%s)", loss.item())
+                    self._metric_shards = None
+                    del loss
+                    if self.distributed and sync_grads:
+                        self._finish_skipped_reduction()
+                    tally.batch_end = time.perf_counter()
+                    return None
+
+                backward_start = time.perf_counter()
+                self._accumulate_loss(loss)
+                tally.backward_sec += time.perf_counter() - backward_start
+
+            micro_losses.append(loss.detach())
+            micro_components.append(loss_components)
+            tally.num_samples += int(images.size(0)) * self.world_size
+            # Drop the graph before the maps are copied onto the evaluator device.
+            del loss
+            self._record_batch_metrics(evaluator if record_metrics else None)
+            tally.batch_end = time.perf_counter()
+
+        window_sum = _sum_components(
+            [{_BATCH_LOSS_KEY: loss_i} for loss_i in micro_losses] + micro_components
         )
+        n_micro = len(micro_losses)
+        return {key: value / n_micro for key, value in window_sum.items()}, data_wait
 
-        assert loss is not None, "Loss is not computed for the given batch."
-        assert isinstance(outputs, torch.Tensor)
+    def _apply_window(self, completed: bool, tally: _EpochTally) -> bool:
+        """Step the optimizer on a completed window, or drop a failed one.
 
-        return loss, outputs, concept_outputs, loss_components
+        On an applied step, ``global_step`` and the LR schedules advance.
+
+        Returns:
+            True when the optimizer step was applied.
+        """
+        if not completed:
+            self._abort_accumulation()
+            return False
+        backward_start = time.perf_counter()
+        # Decay starts on the update after warmup finishes. Stepping both on the
+        # warmup boundary would consume a decay step while the LR is still rising.
+        warmup_done = (
+            self.warmup_scheduler is None or self._warmup_iters_completed >= self.warmup_iters
+        )
+        step_applied = self._apply_accumulated_step()
+        if step_applied:
+            self.global_step += 1
+            self._step_warmup_scheduler()
+            if warmup_done:
+                self._step_iteration_scheduler()
+        tally.backward_sec += time.perf_counter() - backward_start
+        return step_applied
+
+    def _log_window(
+        self,
+        window_mean: Mapping[str, torch.Tensor],
+        run_logger: Any | None,
+        log_interval: int,
+        step_sec: float,
+        data_wait_sec: float,
+    ) -> None:
+        """Log one applied update's loss and components at the ``log_interval`` cadence."""
+        if self.global_step % max(log_interval, 1) != 0:
+            return
+        # Distributed: every rank joins the reduction, whether or not it has a logger.
+        if run_logger is None and not self.distributed:
+            return
+        logged = reduce_components(window_mean)
+        if run_logger is not None:
+            run_logger.log(
+                {
+                    "train/batch_loss": logged.pop(_BATCH_LOSS_KEY),
+                    **{f"train/batch_{key}": value for key, value in logged.items()},
+                    # Host wall time for this update, and the part of it spent
+                    # blocked on the train loader.
+                    "perf/step_sec": step_sec,
+                    "perf/data_wait_sec": data_wait_sec,
+                },
+                step=self.global_step,
+            )
 
     def train_epoch(
         self,
-        train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        train_loader: _BatchLoader,
+        evaluator: "Evaluator | None" = None,
         run_logger: Any | None = None,
         log_interval: int = 1,
         epoch: int | None = None,
         on_optimizer_step: Callable[[Any], None] | None = None,
-    ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
+    ) -> tuple[float, dict[str, float], dict[str, float | int]]:
         """Trains the model for one epoch using the provided data loader.
 
         One iteration is one optimizer update. ``grad_accum_steps`` microbatches are
@@ -690,8 +847,8 @@ class MetaModel:
         well, because ``global_step`` already counts the updates of earlier epochs.
 
         Args:
-            train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
-                Each batch is one microbatch.
+            train_loader: DataLoader yielding ``(inputs, source_labels)`` batches, plus
+                source rows with a concept source mask. Each batch is one microbatch.
             evaluator: Optional evaluator for computing per-epoch metrics.
             run_logger: Optional experiment logger; when provided, per-update train
                 losses are logged against the monotonic ``self.global_step`` axis.
@@ -711,250 +868,51 @@ class MetaModel:
             microbatches that reached backward; ``num_loaded_samples`` counts every
             sample the loader delivered, including windows later skipped for a
             non-finite loss or an empty batch. Both are summed over ranks.
+
+        Raises:
+            ValueError: If ``iterations_per_train_epoch`` is not positive, or the resume
+                offset is past ``iterations_per_train_epoch``. A negative offset does not
+                raise; it logs a warning and starts the epoch at 0.
         """
         self.model.train()
-
-        iterations_per_train_epoch = self.iterations_per_train_epoch
-        if iterations_per_train_epoch <= 0:
+        if self.iterations_per_train_epoch <= 0:
             raise ValueError("iterations_per_train_epoch must be > 0.")
+        start_update = self._resume_offset(epoch)
 
         # Per-update losses and components stay on the device until they are logged
         # or the epoch ends; the batch loss rides along under ``_BATCH_LOSS_KEY``.
         running: dict[str, torch.Tensor] = {}
-        metric_results: dict[str, float | NDArray[np.float64]] = {}
-
-        data_time_total = 0.0
-        forward_time_total = 0.0
-        backward_time_total = 0.0
-        num_samples = 0
-        num_loaded_samples = 0
-
-        batch_end = time.perf_counter()
+        applied_updates = 0
+        tally = _EpochTally()
 
         if self._train_loader is not train_loader:
             self._train_loader_iter = iter(train_loader)
             self._train_loader = train_loader
 
-        epoch_index = 0 if epoch is None else int(epoch)
-        start_update = int(self.global_step) - epoch_index * int(iterations_per_train_epoch)
-        if start_update < 0 or start_update > iterations_per_train_epoch:
-            logger.warning(
-                "train_epoch: resume offset %s is outside 0..%s; starting this epoch at 0.",
-                start_update,
-                iterations_per_train_epoch,
-            )
-            start_update = 0
-        applied_updates = 0
-
-        rank = current_context().rank
         stall_dump_sec = stall_dump_seconds(self.training_kwargs)
-        if stall_dump_sec > 0:
-            # faulthandler labels each stack by thread id only.
-            logger.warning(
-                "rank %d: an update running over %.0f s dumps all stacks to stderr; "
-                "this rank's main thread is 0x%016x",
-                rank,
-                stall_dump_sec,
-                threading.get_ident(),
-            )
-
+        self._warn_stall_dump(stall_dump_sec)
+        updates = range(start_update, self.iterations_per_train_epoch)
         for _update_idx in watch_for_stalls(
-            tqdm(range(start_update, iterations_per_train_epoch), disable=not is_main_process()),
-            stall_dump_sec,
+            tqdm(updates, disable=not is_main_process()), stall_dump_sec
         ):
             step_start = time.perf_counter()
-            step_data_wait = 0.0
             self.optimizer.zero_grad(set_to_none=True)
-            micro_losses: list[torch.Tensor] = []
-            micro_components: list[dict[str, torch.Tensor]] = []
-            window_failed = False
-
-            for _micro in range(self.grad_accum_steps):
-                assert self._train_loader_iter is not None
-                fetch_start = time.perf_counter()
-                try:
-                    data = next(self._train_loader_iter)
-                except StopIteration:
-                    self._train_loader_iter = iter(train_loader)
-                    self._train_loader = train_loader
-                    data = next(self._train_loader_iter)
-                fetch_sec = time.perf_counter() - fetch_start
-                step_data_wait += fetch_sec
-                if fetch_sec > SLOW_FETCH_WARN_SEC:
-                    logger.warning(
-                        "rank %d: train loader took %.0f s for one microbatch (update %d)",
-                        rank,
-                        fetch_sec,
-                        int(self.global_step) + 1,
-                    )
-
-                data_time_total += time.perf_counter() - batch_end
-
-                images, source_labels, *extra = data
-                num_loaded_samples += int(images.size(0)) * self.world_size
-                source_rows = extra[0] if extra else None
-                if self.concept_source_keep is not None and source_rows is None:
-                    raise RuntimeError(
-                        "concept_source_mask is set but the train batch has no source rows; "
-                        "wrap the train datasets with attach_source_rows."
-                    )
-                if images.numel() == 0:
-                    if self.distributed:
-                        # Skipping on one rank would leave the others waiting in a collective.
-                        raise RuntimeError("train_epoch: empty batch in a distributed run.")
-                    logger.warning(
-                        "train_epoch: skipping an empty batch (all items failed to load)."
-                    )
-                    window_failed = True
-                    batch_end = time.perf_counter()
-                    break
-                record_metrics = evaluator is not None and records_train_metrics(
-                    self._train_microbatches_seen, self.train_metrics_every
-                )
-                self._train_microbatches_seen += 1
-                images = images.to(self.device, non_blocking=True).float()
-                source_labels = source_labels.to(self.device, non_blocking=True).long()
-                if self.concept_source_keep is None:
-                    source_rows = None
-                else:
-                    source_rows = torch.as_tensor(source_rows).to(self.device).long()
-                if self.distributed:
-                    # Each GPU maps (and masks) its own shard of source labels.
-                    target_labels = None
-                    target_concepts = None
-                else:
-                    target_labels = self._to_target_labels(source_labels)
-                    target_concepts = self._to_concept_labels(source_labels)
-                    if source_rows is not None:
-                        target_concepts = apply_concept_source_mask(
-                            target_concepts,
-                            cast("torch.Tensor", self.concept_source_keep),
-                            source_rows,
-                        )
-
-                # Distributed: gradients are all-reduced once, in the window's last backward.
-                sync_grads = _micro == self.grad_accum_steps - 1
-                with self._grad_sync_context(sync_grads):
-                    forward_start = time.perf_counter()
-                    loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                        images,
-                        target_labels,
-                        target_concepts,
-                        source_labels=source_labels,
-                        return_maps=record_metrics,
-                        source_rows=source_rows,
-                    )
-                    forward_time_total += time.perf_counter() - forward_start
-                    assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
-
-                    # Distributed: skip the window if any rank's shard loss is non-finite,
-                    # as the single-process path does when the mean over shards is.
-                    # The per-microbatch finite check is a host sync that cannot move to a
-                    # logging interval: a non-finite window must not reach the optimizer.
-                    finite = (
-                        all_ranks_finite(loss) if self.distributed else bool(torch.isfinite(loss))
-                    )
-                    if not finite:
-                        logger.warning(
-                            "train_epoch: skipping non-finite loss (value=%s)", loss.item()
-                        )
-                        self._metric_shards = None
-                        del loss
-                        if self.distributed and sync_grads:
-                            self._finish_skipped_reduction()
-                        window_failed = True
-                        batch_end = time.perf_counter()
-                        break
-
-                    backward_start = time.perf_counter()
-                    self._accumulate_loss(loss)
-                    backward_time_total += time.perf_counter() - backward_start
-
-                micro_losses.append(loss.detach())
-                micro_components.append(loss_components)
-                num_samples += int(images.size(0)) * self.world_size
-                # Drop the graph before metrics. Distributed shards are already
-                # detached, so this frees activations before the shard's maps
-                # are copied onto the evaluator device.
-                if outputs is not None:
-                    outputs = outputs.detach()
-                if concept_outputs is not None:
-                    concept_outputs = concept_outputs.detach()
-                del loss
-
-                self._record_batch_metrics(
-                    evaluator if record_metrics else None,
-                    outputs,
-                    target_labels,
-                    concept_outputs,
-                    target_concepts,
-                )
-
-                batch_end = time.perf_counter()
-
-            if window_failed or not micro_losses:
-                self._abort_accumulation()
-                batch_end = time.perf_counter()
+            window = self._run_window(train_loader, evaluator, tally)
+            if not self._apply_window(window is not None, tally):
+                tally.batch_end = time.perf_counter()
                 continue
-
-            n_micro = len(micro_losses)
-            window_sum = _sum_components(
-                [{_BATCH_LOSS_KEY: loss_i} for loss_i in micro_losses] + micro_components
-            )
-            window_mean = {key: value / n_micro for key, value in window_sum.items()}
-
-            backward_start = time.perf_counter()
-            # Decay starts on the update after warmup finishes. Stepping both on the
-            # warmup boundary would consume a decay step while the LR is still rising.
-            warmup_done = (
-                self.warmup_scheduler is None or self._warmup_iters_completed >= self.warmup_iters
-            )
-            step_applied = self._apply_accumulated_step()
-            if step_applied:
-                self.global_step += 1
-                self._step_warmup_scheduler()
-                if warmup_done:
-                    self._step_iteration_scheduler()
-            backward_time_total += time.perf_counter() - backward_start
-
-            if not step_applied:
-                batch_end = time.perf_counter()
-                continue
-
+            assert window is not None
+            window_mean, data_wait = window
             running = _sum_components([running, window_mean])
             applied_updates += 1
-
-            # Distributed: every rank joins the reduction, whether or not it has a logger.
-            if self.global_step % max(log_interval, 1) == 0 and (
-                run_logger is not None or self.distributed
-            ):
-                logged = reduce_components(window_mean)
-                if run_logger is not None:
-                    run_logger.log(
-                        {
-                            "train/batch_loss": logged.pop(_BATCH_LOSS_KEY),
-                            **{f"train/batch_{key}": value for key, value in logged.items()},
-                            # Host wall time for this update, and the part of it spent
-                            # blocked on the train loader.
-                            "perf/step_sec": time.perf_counter() - step_start,
-                            "perf/data_wait_sec": step_data_wait,
-                        },
-                        step=self.global_step,
-                    )
+            self._log_window(
+                window_mean, run_logger, log_interval, time.perf_counter() - step_start, data_wait
+            )
             if on_optimizer_step is not None:
                 on_optimizer_step(self)
-            batch_end = time.perf_counter()
+            tally.batch_end = time.perf_counter()
 
-        if evaluator is not None:
-            for metric_name in evaluator.metric_dict:
-                metric_array = evaluator.metric_dict[metric_name].compute().cpu().numpy()
-                metric_results[metric_name] = (
-                    metric_array.item() if metric_array.ndim == 0 else metric_array
-                )
-                evaluator.metric_dict[metric_name].reset()
-
-            metric_results.update(evaluator.compute_concept_metric_results())
-
+        metric_results = self._drain_metrics(evaluator)
         # Skipped updates add nothing to ``running``, so they stay out of the mean.
         denom = applied_updates if applied_updates > 0 else 1
         # Summed per-update means are linear in the rank mean, so one reduction here
@@ -963,30 +921,36 @@ class MetaModel:
         last_loss = epoch_totals.pop(_BATCH_LOSS_KEY, 0.0) / denom
         for k, v in epoch_totals.items():
             metric_results[f"loss/{k}"] = v / denom
-        timing = {
-            "data_loading_sec": data_time_total,
-            "forward_sec": forward_time_total,
-            "backward_sec": backward_time_total,
-            "num_samples": num_samples,
-            "num_loaded_samples": num_loaded_samples,
-        }
-        return last_loss, metric_results, timing
+        return last_loss, metric_results, tally.timing()
+
+    @staticmethod
+    def _drain_metrics(evaluator: "Evaluator | None") -> dict[str, float]:
+        """Compute and reset every metric of ``evaluator``; empty without one.
+
+        Distributed: torchmetrics sums each metric's state over ranks in ``compute()``.
+        """
+        if evaluator is None:
+            return {}
+        results: dict[str, float] = {}
+        for name, metric in evaluator.metric_dict.items():
+            results[name] = metric.compute().item()
+            metric.reset()
+        results.update(evaluator.compute_concept_metric_results())
+        return results
 
     @torch.inference_mode()
     def validation_epoch(
         self,
-        val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
-    ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
-        """Calculate the validation loss and metrics for one epoch."""
+        val_loader: _BatchLoader,
+        evaluator: "Evaluator | None" = None,
+    ) -> tuple[float, dict[str, float]]:
+        """Calculate the validation loss and metrics for one epoch, without concept masking."""
         self.model.eval()
         iterations_per_val_epoch = self.iterations_per_val_epoch
         if iterations_per_val_epoch <= 0:
             raise ValueError("iterations_per_val_epoch must be > 0.")
 
         running: dict[str, torch.Tensor] = {}
-        metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         if self._val_loader is not val_loader:
             self._val_loader_iter = iter(val_loader)
@@ -1010,43 +974,18 @@ class MetaModel:
                 continue
             images = images.to(self.device, non_blocking=True).float()
             source_labels = source_labels.to(self.device, non_blocking=True).long()
-            if self.distributed:
-                target_labels = None
-                target_concepts = None
-            else:
-                target_labels = self._to_target_labels(source_labels)
-                target_concepts = self._to_concept_labels(source_labels)
 
-            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                images,
-                target_labels,
-                target_concepts,
-                source_labels=source_labels,
-                return_maps=evaluator is not None,
+            loss, loss_components = self.batch_predict_loss(
+                images, source_labels, None, return_maps=evaluator is not None
             )
-            assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running = _sum_components([running, {_BATCH_LOSS_KEY: loss}, loss_components])
             del loss
-
-            self._record_batch_metrics(
-                evaluator, outputs, target_labels, concept_outputs, target_concepts
-            )
+            self._record_batch_metrics(evaluator)
 
         # Distributed: the mean over ranks of the per-rank sums is the per-batch mean over
         # shards, summed.
         epoch_totals = reduce_components(running)
-
-        # Distributed: torchmetrics sums each metric's state over ranks in compute().
-        if evaluator is not None:
-            for metric_name in evaluator.metric_dict:
-                metric_array = evaluator.metric_dict[metric_name].compute().cpu().numpy()
-                metric_results[metric_name] = (
-                    metric_array.item() if metric_array.ndim == 0 else metric_array
-                )
-                evaluator.metric_dict[metric_name].reset()
-
-            metric_results.update(evaluator.compute_concept_metric_results())
-
+        metric_results = self._drain_metrics(evaluator)
         last_loss = epoch_totals.pop(_BATCH_LOSS_KEY, 0.0) / iterations_per_val_epoch
         for k, v in epoch_totals.items():
             metric_results[f"loss/{k}"] = v / iterations_per_val_epoch

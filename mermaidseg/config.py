@@ -113,13 +113,12 @@ class TrainingConfig(_Strict):
     iterations_per_train_epoch: int
     batch_size: int
     seed: int
-    metric_of_interest: str
     loader: LoaderConfig
     stall_dump_sec: int
     world_size: int
     grad_accum_steps: int
     train_metrics_every: int
-    checkpoint_every_steps: int
+    checkpoint_every_steps: Annotated[int, Field(gt=0)]
     class_subset: list[str]
     padding: int
     label_roll_up: bool

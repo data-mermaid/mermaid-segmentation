@@ -15,10 +15,13 @@ from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
 )
 from mermaidseg.dataset_reconciliation.taxonomy_tree import TaxonomyTree, build_taxonomy_tree
+from mermaidseg.io import REPO_ROOT
+from mermaidseg.model import taxonomy_loss as taxonomy_loss_module
 from mermaidseg.model.taxonomy_loss import (
     TaxonomicCoherenceLoss,
     TaxonomicLoss,
     build_parent_matrices,
+    build_taxonomic_loss,
 )
 
 ORDERS = ["scleractinia", "alcyonacea"]
@@ -245,3 +248,43 @@ def test_taxonomic_loss_disabled_is_zero():
 
     assert loss.coherence_loss is None
     assert total.item() == 0.0 and components == {}
+
+
+def _training_cfg(kl_weight: float) -> dict:
+    return {
+        "concept_mapping_path": "configs/class_to_concepts.csv",
+        "taxonomic_loss": {
+            "ambiguity_policy": "permissive",
+            "kl_weight": kl_weight,
+            "kl_stop_grad_coarse": True,
+        },
+    }
+
+
+@pytest.mark.parametrize("kl_weight", [0, -0.1])
+def test_build_taxonomic_loss_returns_none_for_a_non_positive_weight(kl_weight):
+    assert build_taxonomic_loss(_training_cfg(kl_weight), _concept_value2id(RANKS)) is None
+
+
+def test_build_taxonomic_loss_returns_none_without_the_section():
+    cfg = {"concept_mapping_path": "configs/class_to_concepts.csv"}
+    assert build_taxonomic_loss(cfg, _concept_value2id(RANKS)) is None
+
+
+def test_build_taxonomic_loss_builds_the_loss_from_the_repo_mapping(monkeypatch):
+    seen: dict = {}
+
+    def _build_tree(path, ambiguity_policy):
+        seen.update(path=path, ambiguity_policy=ambiguity_policy)
+        return _tree(RANKS, PATHS)
+
+    monkeypatch.setattr(taxonomy_loss_module, "build_taxonomy_tree", _build_tree)
+    loss = build_taxonomic_loss(_training_cfg(0.5), _concept_value2id(RANKS))
+
+    assert isinstance(loss, TaxonomicLoss)
+    assert loss.kl_weight == 0.5
+    assert loss.coherence_loss is not None
+    assert seen == {
+        "path": REPO_ROOT / "configs" / "class_to_concepts.csv",
+        "ambiguity_policy": "permissive",
+    }

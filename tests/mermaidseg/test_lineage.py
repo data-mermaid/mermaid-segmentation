@@ -11,7 +11,7 @@ import pytest
 
 from mermaidseg import lineage
 from mermaidseg.data.config import DataSection
-from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
+from mermaidseg.lineage import check_same_data, collect_lineage, data_version, inherit_lineage
 
 
 def _collect(**overrides):
@@ -162,7 +162,7 @@ def test_data_version_pins_each_dataset_and_the_taxonomy():
         (True, {"git_dirty": False}, True),
         (False, {"git_dirty": None}, None),
         (None, {"git_dirty": False}, None),
-        (False, None, None),
+        (False, {}, None),
         (None, {"git_dirty": True}, True),
     ],
 )
@@ -170,11 +170,12 @@ def test_inherit_lineage_combines_git_dirty_of_own_and_source(own, source, expec
     assert inherit_lineage({"git_dirty": own}, source)["git_dirty"] is expected
 
 
-def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutating():
+def test_inherit_lineage_keeps_only_the_source_sha_dirty_flag_and_data_without_mutating():
     own = {"git_dirty": False, "git_sha": "abc", "seed": 7, "resolved_config": {"a": 1}}
     source = {
         "git_dirty": False,
         "git_sha": "old",
+        "data_version": {"datasets": {"d": {"version": "v1"}}, "taxonomy": None},
         "parent": {"git_dirty": True},
         "resolved_config": {"b": 2},
     }
@@ -182,7 +183,11 @@ def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutati
 
     result = inherit_lineage(own, source)
 
-    assert result["parent"] == {"git_sha": "old", "git_dirty": False}
+    assert result["parent"] == {
+        "git_sha": "old",
+        "git_dirty": False,
+        "data_version": {"datasets": {"d": {"version": "v1"}}, "taxonomy": None},
+    }
     assert {k: result[k] for k in ("git_sha", "seed", "resolved_config")} == {
         "git_sha": "abc",
         "seed": 7,
@@ -190,3 +195,93 @@ def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutati
     }
     assert own == own_before
     assert source == source_before
+
+
+def _pins() -> dict:
+    return {
+        "datasets": {
+            "coralnet": {"version": "v1", "manifest_sha256": "a" * 64, "resize": 2048},
+        },
+        "taxonomy": {"version": "t1", "manifest_sha256": "b" * 64},
+    }
+
+
+def test_check_same_data_accepts_identical_pins():
+    assert check_same_data(_pins(), {"data_version": _pins()}) is None
+
+
+def _with_dataset(pins: dict, name: str, **fields) -> dict:
+    out = copy.deepcopy(pins)
+    out["datasets"][name] = {**out["datasets"].get("coralnet", {}), **fields}
+    return out
+
+
+def _changed(**fields) -> dict:
+    return _with_dataset(_pins(), "coralnet", **fields)
+
+
+def _added() -> dict:
+    return _with_dataset(_pins(), "coralscapes")
+
+
+def _taxonomy_changed() -> dict:
+    out = _pins()
+    out["taxonomy"] = {"version": "t2", "manifest_sha256": "b" * 64}
+    return out
+
+
+def _untaxed() -> dict:
+    out = _pins()
+    out["taxonomy"] = None
+    return out
+
+
+def _two_datasets() -> dict:
+    return _with_dataset(
+        _pins(), "coralscapes", version="s1", manifest_sha256="d" * 64, resize=None
+    )
+
+
+def _all_changed() -> dict:
+    out = _two_datasets()
+    out["datasets"]["coralnet"]["version"] = "v2"
+    out["datasets"]["coralscapes"]["version"] = "s2"
+    out["taxonomy"] = {"version": "t2", "manifest_sha256": "b" * 64}
+    return out
+
+
+@pytest.mark.parametrize(
+    ("new", "old", "needles"),
+    [
+        pytest.param(_changed(version="v2"), _pins(), ("coralnet", "v1", "v2"), id="version"),
+        pytest.param(
+            _changed(manifest_sha256="c" * 64),
+            _pins(),
+            ("coralnet", "manifest_sha256"),
+            id="manifest",
+        ),
+        pytest.param(_changed(resize=None), _pins(), ("coralnet", "resize"), id="resize"),
+        pytest.param(_added(), _pins(), ("coralscapes",), id="dataset-added"),
+        pytest.param(_pins(), _added(), ("coralscapes",), id="dataset-removed"),
+        pytest.param(_taxonomy_changed(), _pins(), ("taxonomy", "t1", "t2"), id="taxonomy"),
+        pytest.param(
+            _all_changed(),
+            _two_datasets(),
+            ("coralnet", "coralscapes", "taxonomy"),
+            id="several-at-once",
+        ),
+        pytest.param(_untaxed(), _pins(), ("taxonomy",), id="taxonomy-unpinned-now"),
+    ],
+)
+def test_check_same_data_names_every_differing_pin(new, old, needles):
+    with pytest.raises(ValueError) as raised:
+        check_same_data(new, {"data_version": old})
+    for needle in needles:
+        assert needle in str(raised.value)
+
+
+def test_check_same_data_refuses_a_checkpoint_that_records_no_data_pins():
+    with pytest.raises(ValueError, match="records no data pins") as raised:
+        check_same_data(_pins(), {})
+    assert "--init-weights" in str(raised.value)
+    assert "added" not in str(raised.value)

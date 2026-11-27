@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import sys
 import types
@@ -13,7 +12,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
 
@@ -27,7 +25,6 @@ from mermaidseg.logger import (
     _mlflow_run_url,
     _safe_wandb_artifact_name,
     make_tracker,
-    prune_rolling_checkpoints,
 )
 from tests.conftest import FakeMetaModel
 
@@ -80,7 +77,6 @@ def fake_tracker(monkeypatch: pytest.MonkeyPatch) -> list[FakeTracker]:
 
 
 def _logger(make_config, meta=None, **kwargs):
-    kwargs.setdefault("id2concept", {})
     lgr = Logger(config=make_config(), meta_model=meta or FakeMetaModel(), **kwargs)
     tracker = lgr.tracker
     assert isinstance(tracker, FakeTracker)
@@ -492,40 +488,12 @@ class TestLoggerInit:
 
 
 class TestLoggerLog:
-    """Metric logging: scalars and ndarrays with id maps."""
+    """Metric logging."""
 
     def test_scalar_metrics_reach_the_tracker_with_the_step(self, make_config, fake_tracker):
         lgr, tracker = _logger(make_config)
         lgr.log({"loss": 0.3}, step=5)
         assert tracker.metrics == [({"loss": 0.3}, 5)]
-
-    def test_ndarray_class_metrics_unpacked(self, make_config, fake_tracker):
-        lgr, tracker = _logger(make_config, id2label={0: "coral", 1: "sand", 2: "rock"})
-        lgr.log({"iou": np.array([0.75, 0.5, 0.25])}, step=1)
-        assert tracker.metrics == [({"iou/coral": 0.75, "iou/sand": 0.5, "iou/rock": 0.25}, 1)]
-
-    def test_ndarray_without_id_map_uses_index(self, make_config, fake_tracker):
-        lgr, tracker = _logger(make_config)
-        lgr.log({"dice": np.array([0.5, 0.25])}, step=1)
-        assert tracker.metrics == [({"dice/class_0": 0.5, "dice/class_1": 0.25}, 1)]
-
-    def test_ndarray_concept_metrics_name_unmapped_indices_by_index(
-        self, make_config, fake_tracker
-    ):
-        lgr, tracker = _logger(make_config, id2concept={0: "hard"})
-        lgr.log({"concept_accuracy": np.array([0.75, 0.5])}, step=1)
-        assert tracker.metrics == [
-            ({"concept_accuracy/hard": 0.75, "concept_accuracy/concept_1": 0.5}, 1)
-        ]
-
-    def test_ndarray_concept_metrics_use_id2concept(self, make_config, fake_tracker):
-        lgr, tracker = _logger(
-            make_config, id2label={0: "coral", 1: "sand"}, id2concept={0: "hard", 1: "soft"}
-        )
-        lgr.log({"concept_accuracy": np.array([0.75, 0.5])}, step=1)
-        assert tracker.metrics == [
-            ({"concept_accuracy/hard": 0.75, "concept_accuracy/soft": 0.5}, 1)
-        ]
 
 
 class TestLoggerDispatch:
@@ -556,218 +524,6 @@ class TestLoggerDispatch:
         assert tracker.params == [{"num_target_classes": 2, "num_global_source_classes": 3}]
 
 
-class _MoveRecordingLinear(torch.nn.Linear):
-    """A ``Linear`` that records every ``.to()``, ``.cpu()`` or ``.cuda()`` applied to it."""
-
-    moves: list[str]
-
-    def _apply(self, fn, recurse=True):  # type: ignore[no-untyped-def]
-        self.moves.append("moved")
-        return super()._apply(fn, recurse)
-
-
-def _meta_with_move_recording_model(run_name: str) -> FakeMetaModel:
-    meta = FakeMetaModel(run_name=run_name)
-    model = _MoveRecordingLinear(4, meta.num_classes)
-    model.moves = []
-    meta.model = model
-    meta.optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    meta.scheduler = torch.optim.lr_scheduler.StepLR(meta.optimizer, step_size=1)
-    return meta
-
-
-def _spy_torch_save(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict, str]]:
-    """Record the (object, target path) of every ``torch.save`` while still writing the file."""
-    calls: list[tuple[dict, str]] = []
-    real_save = torch.save
-
-    def _save(obj: dict, f: Any, *args: Any, **kwargs: Any) -> None:
-        calls.append((obj, str(f)))
-        real_save(obj, f, *args, **kwargs)
-
-    monkeypatch.setattr(torch, "save", _save)
-    return calls
-
-
-def _spy_os_replace(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Record every ``os.replace`` (source, destination) while still renaming."""
-    calls: list[tuple[str, str]] = []
-    real_replace = os.replace
-
-    def _replace(src: Any, dst: Any) -> None:
-        calls.append((str(src), str(dst)))
-        real_replace(src, dst)
-
-    monkeypatch.setattr(os, "replace", _replace)
-    return calls
-
-
-class TestSaveModelCheckpoint:
-    """Checkpoint saving to local files."""
-
-    def test_local_checkpoint_skipped_when_disabled(self, tmp_path, make_config, fake_tracker):
-        meta = FakeMetaModel(run_name="ckpt-skip")
-        lgr = Logger(
-            id2concept={},
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-            save_local_checkpoints=False,
-        )
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
-        assert not (tmp_path / "model_checkpoints" / "ckpt-skip").exists()
-
-    def test_step_checkpoint_name_and_resume_flags(self, tmp_path, make_config, fake_tracker):
-        meta = FakeMetaModel(run_name="step-ckpt")
-        meta.global_step = 25000
-        meta._warmup_iters_completed = 4000
-        config = make_config()
-        lgr = Logger(
-            id2concept={},
-            config=config,
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=1,
-        )
-        lgr.save_model_checkpoint(
-            meta,
-            epoch=0,
-            metrics_dict={"loss": 0.1},
-            checkpoint_name="model_step25000",
-            epoch_complete=False,
-        )
-        path = tmp_path / "model_checkpoints" / "step-ckpt" / "model_step25000"
-        assert path.is_file()
-        ckpt = torch.load(path, weights_only=True)
-        assert ckpt["global_step"] == 25000
-        assert ckpt["warmup_iters_completed"] == 4000
-        assert ckpt["epoch_complete"] is False
-        assert ckpt["epoch"] == 0
-
-    def test_checkpoint_carries_the_loggers_lineage_only_when_set(
-        self, tmp_path, make_config, fake_tracker
-    ):
-        lineage = {"git_sha": "abc", "git_dirty": False}
-        for name, kwargs in (("with-lineage", {"lineage": lineage}), ("no-lineage", {})):
-            meta = FakeMetaModel(run_name=name)
-            lgr = Logger(
-                id2concept={},
-                config=make_config(),
-                meta_model=meta,
-                checkpoint_dir=str(tmp_path),
-                log_checkpoint=1,
-                **kwargs,
-            )
-            lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.1})
-        saved = {
-            name: torch.load(
-                tmp_path / "model_checkpoints" / name / "model_epoch1", weights_only=True
-            )
-            for name in ("with-lineage", "no-lineage")
-        }
-        assert saved["with-lineage"]["lineage"] == lineage
-        assert "lineage" not in saved["no-lineage"]
-
-    def test_checkpoint_metrics_and_config_load_as_plain_python(
-        self, tmp_path, make_config, fake_tracker
-    ):
-        meta = FakeMetaModel(run_name="plain-ckpt")
-        lgr = Logger(
-            id2concept={},
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=1,
-        )
-        metrics = {
-            "iou": np.array([0.5, 0.25]),
-            "acc": np.float32(0.75),
-            "loss": torch.tensor(0.125),
-            "step": 3,
-        }
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict=metrics)
-        path = tmp_path / "model_checkpoints" / "plain-ckpt" / "model_epoch1"
-        ckpt = torch.load(path, weights_only=True)
-        assert ckpt["metrics"] == {"iou": [0.5, 0.25], "acc": 0.75, "loss": 0.125, "step": 3}
-        assert type(ckpt["config"]) is dict
-        assert type(ckpt["config"]["training"]) is dict
-        assert ckpt["config"]["training"]["optimizer"] == {"type": "SGD", "lr": 0.01}
-
-    def test_save_leaves_parameters_in_place(
-        self, tmp_path, make_config, fake_tracker, monkeypatch
-    ):
-        meta = _meta_with_move_recording_model("inplace-ckpt")
-        weight = meta.model.weight
-        ptr = weight.data_ptr()
-        values = weight.detach().clone()
-        lgr = Logger(
-            id2concept={},
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=1,
-        )
-        meta.model.moves.clear()
-        saved = _spy_torch_save(monkeypatch)
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.1})
-
-        assert meta.model.moves == []
-        assert meta.model.weight is weight
-        assert meta.model.weight.data_ptr() == ptr
-        checkpoint = saved[0][0]
-        for key, live in meta.model.state_dict().items():
-            assert checkpoint["model_state_dict"][key].data_ptr() != live.data_ptr()
-        path = tmp_path / "model_checkpoints" / "inplace-ckpt" / "model_epoch1"
-        ckpt = torch.load(path, weights_only=True)
-        saved_weight = ckpt["model_state_dict"]["weight"]
-        assert saved_weight.device.type == "cpu"
-        torch.testing.assert_close(saved_weight, values)
-
-    def test_atomic_checkpoint_leaves_no_partial(
-        self, tmp_path, make_config, fake_tracker, monkeypatch
-    ):
-        meta = FakeMetaModel(run_name="atomic-ckpt")
-        meta.global_step = 1000
-        lgr = Logger(
-            id2concept={}, config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path)
-        )
-        saved = _spy_torch_save(monkeypatch)
-        replaced = _spy_os_replace(monkeypatch)
-        lgr.save_model_checkpoint(
-            meta,
-            epoch=0,
-            metrics_dict={},
-            checkpoint_name="model_preempt1000",
-            epoch_complete=False,
-            atomic=True,
-        )
-        directory = tmp_path / "model_checkpoints" / "atomic-ckpt"
-        final = directory / "model_preempt1000"
-        partial = directory / "model_preempt1000.partial"
-        assert [target for _, target in saved] == [str(partial)]
-        assert replaced == [(str(partial), str(final))]
-        assert final.is_file()
-        assert not (directory / "model_preempt1000.partial").exists()
-        ckpt = torch.load(final, weights_only=True)
-        assert ckpt["global_step"] == 1000
-        assert ckpt["epoch_complete"] is False
-        assert ckpt["optimizer_state_dict"]
-        assert ckpt["scheduler_state_dict"]
-        assert ckpt["model_state_dict"]
-
-        (directory / "model_preempt500").write_bytes(b"stale")
-        (directory / "model_preempt500.partial").write_bytes(b"partial")
-        (directory / "model_step25000").write_bytes(b"keep")
-        (directory / "model_epoch0").write_bytes(b"keep")
-        prune_rolling_checkpoints(str(directory), keep_name="model_preempt1000")
-        assert final.is_file()
-        assert (directory / "model_step25000").is_file()
-        assert (directory / "model_epoch0").is_file()
-        assert not (directory / "model_preempt500").exists()
-        assert not (directory / "model_preempt500.partial").exists()
-
-
 # ===================================================================
 # Logger.end_run & context manager
 # ===================================================================
@@ -790,7 +546,7 @@ class TestLoggerLifecycle:
 
     def test_context_manager_sets_the_mlflow_run_status_failed(self, make_config, mlflow_store):
         config = make_config(logger={"tracker": "mlflow", "experiment_name": "exp-s"})
-        lgr = Logger(id2concept={}, config=config, meta_model=FakeMetaModel())
+        lgr = Logger(config=config, meta_model=FakeMetaModel())
         run_id = lgr.run_id
         assert run_id is not None
         with pytest.raises(ValueError, match="boom"), lgr:

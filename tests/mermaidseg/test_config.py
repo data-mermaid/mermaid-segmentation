@@ -69,6 +69,20 @@ def test_unknown_name_raises(tmp_path: Path, section: str, keys: tuple[str, ...]
         setup_config(paths)
 
 
+@pytest.mark.parametrize("steps", [0, -1])
+def test_a_non_positive_checkpoint_interval_raises_naming_the_file(tmp_path: Path, steps: int):
+    paths = _mutated(tmp_path, "training", _set("checkpoint_every_steps", value=steps))
+    with pytest.raises(
+        ValueError, match=r"(?s)training\.yaml.*checkpoint_every_steps.*greater than 0"
+    ):
+        setup_config(paths)
+
+
+def test_a_checkpoint_interval_of_one_validates(tmp_path: Path):
+    paths = _mutated(tmp_path, "training", _set("checkpoint_every_steps", value=1))
+    assert setup_config(paths).training.checkpoint_every_steps == 1
+
+
 def test_committed_sagemaker_logger_config_validates():
     cfg = setup_config({"logger": str(_CONFIGS / "logger_config_sagemaker.yaml")})
     assert cfg.logger.tracker == "mlflow"

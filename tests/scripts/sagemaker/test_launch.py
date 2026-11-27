@@ -95,6 +95,19 @@ def test_unknown_trainer_flag_fails_as_value_error():
         launch.validate_run(cfg, None)
 
 
+def test_a_value_the_trainer_checks_fails_as_value_error(monkeypatch):
+    real = launch.train_entrypoint.build_trainer_argv
+
+    def _zero_workers(*args, **kwargs):
+        argv = real(*args, **kwargs)
+        argv[argv.index("--num-workers") + 1] = "0"
+        return argv
+
+    monkeypatch.setattr(launch.train_entrypoint, "build_trainer_argv", _zero_workers)
+    with pytest.raises(ValueError, match=r"train\.args: --num-workers must be >= 1"):
+        launch.validate_run(_config(), None)
+
+
 def test_nonexistent_config_path_fails_naming_it():
     cfg = _config(args=["--data-config", "configs/missing.yaml", "--logger-config", "nope.yaml"])
     with pytest.raises(ValueError, match=r"configs/missing\.yaml.*nope\.yaml"):
@@ -117,7 +130,7 @@ def test_build_request_for_res768_points_the_channels_output_and_checkpoints_at_
         "config": "s3://fake-bucket/runs/mermaidseg-cbm-final-res768-job/config/",
         "init": (
             "s3://fake-bucket/runs/mermaidseg-cbm-final-20260101T000000Z-abc123/"
-            "checkpoints/model_checkpoints/cbm_final/model_step300000"
+            "checkpoints/model_checkpoints/cbm_final/model_final"
         ),
     }
     assert request["OutputDataConfig"] == {
@@ -329,7 +342,7 @@ def test_res768_with_a_completed_source_creates_the_job_with_the_init_channel(aw
     assert aws.s3.heads == [
         {
             "Bucket": "fake-bucket",
-            "Key": f"runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_step300000",
+            "Key": f"runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_final",
         }
     ]
     assert aws.calls == [
@@ -370,10 +383,7 @@ def test_unreadable_init_checkpoint_exits_naming_uri_and_code(aws):
     code = "404"
     aws.s3.head_error = _client_error(code)
     args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
-    uri = (
-        f"s3://fake-bucket/runs/{_SOURCE_JOB}/checkpoints/"
-        "model_checkpoints/cbm_final/model_step300000"
-    )
+    uri = f"s3://fake-bucket/runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_final"
 
     with pytest.raises(SystemExit, match=rf"^ERROR: .*{re.escape(uri)}.*{code}"):
         launch.main(args)

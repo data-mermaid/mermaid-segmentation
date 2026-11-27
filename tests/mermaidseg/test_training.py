@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import json
 import multiprocessing
 import os
@@ -12,10 +13,11 @@ import subprocess
 import sys
 import time
 import types
+import unittest.mock
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -29,8 +31,8 @@ import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.data.config import DataSection
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
-from mermaidseg.io import ConfigDict, load_config, resolve_repo_path
-from mermaidseg.logger import Logger
+from mermaidseg.io import ConfigDict, build_train_parser, load_section, resolve_repo_path
+from mermaidseg.lineage import data_version
 from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
@@ -42,7 +44,7 @@ from mermaidseg.training import (
     make_shuffled_loader,
     seed_run,
 )
-from scripts.train import build_parser
+from segdata_spec import stage as segdata_stage
 from tests.conftest import cbm_test_config, dinov3_encoder_mocker
 from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
 
@@ -128,11 +130,25 @@ SMOKE_RESOLUTION = 56
 SMOKE_RUN = "smoke"
 
 
+class _FrozenDatetime(datetime.datetime):
+    """``datetime`` whose ``now`` is fixed, so staged manifests (and their pins) repeat exactly."""
+
+    @classmethod
+    def now(cls, tz: datetime.tzinfo | None = None) -> Self:
+        return cls(2026, 1, 1, tzinfo=tz)
+
+
 def _write_smoke_versions(tmp_path: Path) -> dict[str, Any]:
     """Write a tiny coralscapes_v2 version and the taxonomy into ``<tmp_path>/cache``.
 
-    Each split holds two fully labelled images, one class each. Returns the data section.
+    Each split holds two fully labelled images, one class each. Returns the data section; the
+    pins are the same on every call, as a resume requires.
     """
+    with unittest.mock.patch.object(segdata_stage, "datetime", _FrozenDatetime):
+        return _stage_smoke_versions(tmp_path)
+
+
+def _stage_smoke_versions(tmp_path: Path) -> dict[str, Any]:
     size = (SMOKE_RESOLUTION, SMOKE_RESOLUTION)
     images = [
         ImageSpec(f"{split}{k}", group=split, mask=np.full(size, k + 1, np.uint8))
@@ -210,7 +226,9 @@ def _smoke_configs(
 
     The data config pins tiny versions written into ``<tmp_path>/cache``.
     """
-    training = load_config(resolve_repo_path("configs/training_config_cbm_final.yaml")).training
+    training = ConfigDict(
+        load_section(resolve_repo_path("configs/training_config_cbm_final.yaml"), "training")
+    )
     training.update(
         epochs=epochs,
         iterations_per_train_epoch=1,
@@ -222,7 +240,9 @@ def _smoke_configs(
     )
     training.scheduler.update(warmup_iters=0, total_iters=epochs)
     training.update(training_overrides or {})
-    model = load_config(resolve_repo_path("configs/model_config_cbm_dpt_lora_vitl.yaml")).model
+    model = ConfigDict(
+        load_section(resolve_repo_path("configs/model_config_cbm_dpt_lora_vitl.yaml"), "model")
+    )
     model.update(
         concept_feature_dim=8,
         neck_hidden_sizes=[8, 8, 8, 8],
@@ -231,7 +251,7 @@ def _smoke_configs(
         lora_alpha=4,
         lora_target_modules=["q_proj"],
     )
-    logger = load_config(resolve_repo_path("configs/logger_config.yaml")).logger
+    logger = ConfigDict(load_section(resolve_repo_path("configs/logger_config.yaml"), "logger"))
     data = _write_smoke_versions(tmp_path)
     return [
         "--training-config",
@@ -261,7 +281,7 @@ def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch,
     section = yaml.safe_load(training_path.read_text())
     section["training"]["world_size"] = 2
     training_path.write_text(yaml.safe_dump(section))
-    args = build_parser().parse_args(
+    args = build_train_parser().parse_args(
         [
             "--run-name",
             SMOKE_RUN,
@@ -306,7 +326,7 @@ def _smoke_args(
     training_overrides: dict[str, Any] | None = None,
 ) -> argparse.Namespace:
     checkpoint_cli = ["--checkpoint", str(checkpoint)] if checkpoint else []
-    return build_parser().parse_args(
+    return build_train_parser().parse_args(
         [
             "--run-name",
             SMOKE_RUN,
@@ -366,6 +386,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
     assert checkpoint["config"] == resolved
     assert checkpoint["lineage"]["seed"] == 7
+    assert checkpoint["config"] == checkpoint["lineage"]["resolved_config"]
     assert not (workdir / "model_checkpoints").exists()
     assert wandb_run.params["cli/num_workers"] == 1
     assert wandb_run.params["cli/output_dir"] == str(output_dir)
@@ -373,11 +394,11 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert wandb_run.exit_code == 0
 
 
-def _raise_boom(**_: Any) -> None:
+def _raise_boom(*_: Any, **__: Any) -> None:
     raise RuntimeError("boom")
 
 
-def _send_sigterm(**_: Any) -> None:
+def _send_sigterm(*_: Any, **__: Any) -> None:
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -397,7 +418,7 @@ def test_run_ends_the_tracker_run_as_failed_when_training_dies_mid_run(
     monkeypatch, tmp_path, mock_dinov3_encoder, train_step, expected_exit
 ):
     _, wandb_run = _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
-    monkeypatch.setattr(training, "train_model", train_step)
+    monkeypatch.setattr(training, "run_epoch", train_step)
     # Without run()'s handler, a self-sent SIGTERM would otherwise kill pytest.
     original_sigterm = signal.signal(signal.SIGTERM, _guard_sigterm)
     original_sigchld = signal.getsignal(signal.SIGCHLD)
@@ -480,9 +501,20 @@ def test_group_sigterm_lets_the_enclosing_exit_finish_despite_dying_dataloader_w
     assert scenario.exitcode == 143
 
 
-def _resume_checkpoint(meta) -> dict[str, Any]:
-    """A checkpoint with the keys ``Logger.save_model_checkpoint`` writes."""
+def _checkpoint_lineage(**overrides: Any) -> dict[str, Any]:
     return {
+        "git_sha": "abc123",
+        "git_dirty": False,
+        "seed": 1,
+        "data_version": {"datasets": {"ds": {"version": "v1"}}, "taxonomy": None},
+        **overrides,
+    }
+
+
+def _resume_checkpoint(meta) -> dict[str, Any]:
+    """A checkpoint with the keys ``write_checkpoint`` writes."""
+    return {
+        "lineage": _checkpoint_lineage(),
         "config": {},
         "model_state_dict": meta.model.state_dict(),
         "optimizer_state_dict": meta.optimizer.state_dict(),
@@ -629,6 +661,7 @@ def test_resumed_runs_propagate_a_dirty_ancestor_through_a_shallow_parent(
         assert lineage["parent"] == {
             "git_sha": first_lineage["git_sha"],
             "git_dirty": first_lineage["git_dirty"],
+            "data_version": first_lineage["data_version"],
         }
 
     # A clean third run still inherits the dirty verdict from its parent's own inherited flag.
@@ -637,27 +670,31 @@ def test_resumed_runs_propagate_a_dirty_ancestor_through_a_shallow_parent(
     )
     third = torch.load(run_dir / "model_step3", map_location="cpu", weights_only=True)["lineage"]
     assert third["git_dirty"] is True
-    assert third["parent"] == {"git_sha": resumed["git_sha"], "git_dirty": True}
+    assert third["parent"] == {
+        "git_sha": resumed["git_sha"],
+        "git_dirty": True,
+        "data_version": resumed["data_version"],
+    }
 
 
-def test_init_weights_run_from_a_checkpoint_without_lineage_is_untrusted(
-    run_scenario, marked_checkpoint
+@pytest.mark.parametrize("flag", ["--checkpoint", "--init-weights"])
+def test_a_checkpoint_without_lineage_is_refused_before_training(
+    flag, run_scenario, marked_checkpoint
 ):
-    assert "lineage" not in torch.load(marked_checkpoint.path, weights_only=True)
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        _patch_git_dirty(monkeypatch, False)
-        result = run_scenario(cli=["--init-weights", str(marked_checkpoint.path)])
+    saved = torch.load(marked_checkpoint.path, weights_only=True)
+    del saved["lineage"]
+    source_path = run_scenario.scratch_dir() / "no_lineage.pt"
+    torch.save(saved, source_path)
 
-    lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
-    assert lineage["git_dirty"] is None
-    assert "parent" in lineage and lineage["parent"] is None
+    with pytest.raises(RuntimeError, match="lineage"):
+        run_scenario(cli=[flag, str(source_path)])
 
 
 def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
     run_scenario, marked_checkpoint
 ):
     saved = torch.load(marked_checkpoint.path, weights_only=True)
-    saved["lineage"] = {"git_sha": "abc123", "git_dirty": False, "seed": 1}
+    saved["lineage"] = _checkpoint_lineage(git_sha="abc123")
     source_path = run_scenario.scratch_dir() / "with_lineage.pt"
     torch.save(saved, source_path)
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -666,7 +703,61 @@ def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
 
     lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
     assert lineage["git_dirty"] is False
-    assert lineage["parent"] == {"git_sha": "abc123", "git_dirty": False}
+    assert lineage["parent"] == {
+        "git_sha": "abc123",
+        "git_dirty": False,
+        "data_version": saved["lineage"]["data_version"],
+    }
+
+
+def _checkpoint_with_changed_data(first_checkpoint: Path, path: Path) -> dict[str, Any]:
+    """Save a copy of ``first_checkpoint`` that pins another version of its dataset."""
+    saved = torch.load(first_checkpoint, map_location="cpu", weights_only=True)
+    saved["lineage"]["data_version"]["datasets"]["coralscapes_v2"]["version"] = "other-version"
+    torch.save(saved, path)
+    return saved
+
+
+@_FORK_ONLY
+def test_resume_with_changed_data_pins_is_refused_before_building_datasets(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    output_dir, cache_dir = tmp_path / "out", tmp_path / "cache"
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    changed = tmp_path / "changed.pt"
+    _checkpoint_with_changed_data(
+        output_dir / "model_checkpoints" / SMOKE_RUN / "model_step1", changed
+    )
+
+    def _unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("run() built datasets before checking the data pins")
+
+    monkeypatch.setattr(training, "build_datasets", _unreachable)
+    with pytest.raises(ValueError, match="coralscapes_v2"):
+        training.run(_smoke_args(tmp_path, output_dir, cache_dir, epochs=2, checkpoint=changed))
+
+
+@_FORK_ONLY
+def test_init_weights_from_a_checkpoint_with_other_data_trains_and_records_its_pins(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    output_dir, cache_dir = tmp_path / "out", tmp_path / "cache"
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    changed = tmp_path / "changed.pt"
+    saved = _checkpoint_with_changed_data(
+        output_dir / "model_checkpoints" / SMOKE_RUN / "model_step1", changed
+    )
+
+    training.run(
+        _smoke_args(tmp_path, tmp_path / "out2", cache_dir, cli=["--init-weights", str(changed)])
+    )
+
+    sidecar = json.loads(
+        (tmp_path / "out2" / "model_checkpoints" / SMOKE_RUN / "model.json").read_text()
+    )
+    assert sidecar["lineage"]["parent"]["data_version"] == saved["lineage"]["data_version"]
 
 
 def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
@@ -755,26 +846,35 @@ def test_distributed_shuffled_loader_matches_single_process_over_two_passes(lock
         assert interleaved == expected[pass_index]
 
 
-# ---------- run() with a recording stand-in for train_model ----------
+# ---------- run() with a recording stand-in for run_epoch ----------
 # The loaders are built but never iterated, so none of these tests starts a DataLoader worker.
 
 
 class _RecordingTrainModel:
-    """Stands in for ``train_model``: records each call and fires ``on_optimizer_step`` at ``steps``."""
+    """Stands in for ``run_epoch``: records each call and fires ``on_optimizer_step`` at ``steps``."""
 
     def __init__(self, steps: Sequence[int] = (), validation_metrics: dict | None = None) -> None:
         self.steps = steps
         self.validation_metrics = validation_metrics or {}
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, **kwargs: Any) -> dict[int, dict]:
-        self.calls.append(kwargs)
-        meta = kwargs["meta_model"]
+    def __call__(
+        self,
+        meta_model: Any,
+        evaluator: Any,
+        train_loader: Any,
+        val_loader: Any,
+        logger: Any,
+        *,
+        epoch: int,
+        train_log_interval: int,
+        on_optimizer_step: Any,
+    ) -> dict[str, Any]:
+        self.calls.append({"meta_model": meta_model, "epoch": epoch})
         for step in self.steps:
-            meta.global_step = step
-            kwargs["on_optimizer_step"](meta)
-        epoch = kwargs["start_epoch"]
-        return {epoch: {"train_metrics": {}, "validation_metrics": self.validation_metrics}}
+            meta_model.global_step = step
+            on_optimizer_step(meta_model)
+        return {"train_metrics": {}, "validation_metrics": self.validation_metrics}
 
 
 @dataclasses.dataclass
@@ -824,7 +924,7 @@ class _ScenarioRunner:
             self._record_seeds(monkeypatch, result.seeds)
             if spy_saves:
                 self._spy_on_saves(monkeypatch, result.save_atomic)
-            monkeypatch.setattr(training, "train_model", result.recorder)
+            monkeypatch.setattr(training, "run_epoch", result.recorder)
             args = _smoke_args(tmp_path, output_dir, tmp_path / "cache", **args_kwargs)
             try:
                 training.run(args)
@@ -846,13 +946,13 @@ class _ScenarioRunner:
 
     @staticmethod
     def _spy_on_saves(monkeypatch: pytest.MonkeyPatch, atomic_by_name: dict[str, bool]) -> None:
-        real_save = Logger.save_model_checkpoint
+        real_write = training.write_checkpoint
 
-        def _record(self, meta, epoch, metrics, checkpoint_name=None, **kwargs):
-            atomic_by_name[checkpoint_name] = kwargs.get("atomic", False)
-            real_save(self, meta, epoch, metrics, checkpoint_name=checkpoint_name, **kwargs)
+        def _record(path, meta_model, **kwargs):
+            atomic_by_name[Path(path).name] = kwargs.get("atomic", False)
+            real_write(path, meta_model, **kwargs)
 
-        monkeypatch.setattr(Logger, "save_model_checkpoint", _record)
+        monkeypatch.setattr(training, "write_checkpoint", _record)
 
 
 @pytest.fixture(scope="module")
@@ -867,7 +967,10 @@ def fresh_run(run_scenario) -> _RunResult:
 
 
 def _save_resume_checkpoint(meta, path: Path, **overrides: Any) -> Path:
-    torch.save({**_resume_checkpoint(meta), **overrides}, path)
+    """A resumable checkpoint whose lineage pins the data the smoke runs use."""
+    smoke_data = data_version(DataSection.model_validate(_write_smoke_versions(path.parent)))
+    lineage = _checkpoint_lineage(data_version=smoke_data)
+    torch.save({**_resume_checkpoint(meta), "lineage": lineage, **overrides}, path)
     return path
 
 
@@ -875,14 +978,17 @@ def _save_resume_checkpoint(meta, path: Path, **overrides: Any) -> Path:
 
 
 def _weights_only_checkpoint(path: Path) -> Path:
-    torch.save({"model_state_dict": torch.nn.Linear(2, 2).state_dict()}, path)
+    torch.save(
+        {"model_state_dict": torch.nn.Linear(2, 2).state_dict(), "lineage": _checkpoint_lineage()},
+        path,
+    )
     return path
 
 
 def test_init_weights_reads_a_file_that_holds_only_model_weights(tmp_path):
     path = _weights_only_checkpoint(tmp_path / "weights.pt")
     args = SimpleNamespace(init_weights=str(path), checkpoint=None)
-    assert set(training._read_run_checkpoint(args)) == {"model_state_dict"}  # type: ignore[arg-type]
+    assert set(training._read_run_checkpoint(args)) == {"model_state_dict", "lineage"}  # type: ignore[arg-type]
 
 
 def test_resume_checkpoint_must_hold_the_optimizer_and_progress_keys(tmp_path):
@@ -930,7 +1036,7 @@ def test_init_weights_run_loads_the_weights_into_a_fresh_optimizer_at_epoch_zero
 
     call = init_weights_run.recorder.calls[0]
     meta = call["meta_model"]
-    assert (call["start_epoch"], call["end_epoch"]) == (0, 1)
+    assert call["epoch"] == 0
     assert (meta.global_step, meta.resuming_within_epoch) == (0, False)
     assert [g["lr"] for g in meta.optimizer.param_groups] == configured_lrs
     torch.testing.assert_close(
@@ -962,7 +1068,7 @@ def test_resumed_run_reseeds_with_the_run_seed_plus_its_progress(
     )
     resumed = run_scenario(epochs=epochs, checkpoint=checkpoint)
     assert resumed.seeds == [7, expected_resume_seed]
-    assert resumed.recorder.calls[0]["start_epoch"] == (1 if epoch_complete else 0)
+    assert resumed.recorder.calls[0]["epoch"] == (1 if epoch_complete else 0)
 
 
 def test_resuming_a_checkpoint_that_covers_every_epoch_exits_with_status_zero(
@@ -988,20 +1094,19 @@ def test_resuming_the_last_unfinished_epoch_still_trains_it(fresh_run, run_scena
         epoch_complete=False,
     )
     resumed = run_scenario(epochs=1, checkpoint=checkpoint)
-    assert [c["start_epoch"] for c in resumed.recorder.calls] == [0]
+    assert [c["epoch"] for c in resumed.recorder.calls] == [0]
 
 
 # ---------- config overrides ----------
 
 
-@pytest.mark.parametrize("kl_weight", [0])
-def test_a_non_positive_kl_weight_drops_the_taxonomic_loss_from_the_run(run_scenario, kl_weight):
-    result = run_scenario(training_overrides={"taxonomic_loss": {"kl_weight": kl_weight}})
-    assert "taxonomic_loss" not in result.resolved_config()["training"]
-    assert result.wandb_run.params["loss/kl_weight"] == 0.0
+def test_a_zero_kl_weight_keeps_the_taxonomic_section_and_logs_the_zero(run_scenario):
+    result = run_scenario(training_overrides={"taxonomic_loss": {"kl_weight": 0}})
+    assert result.resolved_config()["training"]["taxonomic_loss"]["kl_weight"] == 0
+    assert result.wandb_run.params["loss/kl_weight"] == 0
 
 
-def test_a_positive_kl_weight_keeps_the_taxonomic_loss(run_scenario):
+def test_a_positive_kl_weight_is_kept_and_logged(run_scenario):
     result = run_scenario(training_overrides={"taxonomic_loss": {"kl_weight": 0.25}})
     assert result.resolved_config()["training"]["taxonomic_loss"]["kl_weight"] == 0.25
     assert result.wandb_run.params["loss/kl_weight"] == 0.25
@@ -1016,31 +1121,6 @@ def test_the_grad_accum_flag_overrides_the_config_value(run_scenario):
 
 
 # ---------- checkpoints written by run() ----------
-
-
-@pytest.mark.parametrize(
-    ("checkpoint_every_steps", "iterations", "written"),
-    [
-        pytest.param(0, 1001, True, id="no-step-checkpoints-and-a-long-epoch"),
-        pytest.param(0, 1000, False, id="a-short-epoch-writes-none"),
-        pytest.param(10, 2000, False, id="step-checkpointed-runs-write-no-epoch-file"),
-    ],
-)
-def test_model_epoch_checkpoint_is_written_only_without_step_checkpoints_on_long_epochs(
-    run_scenario, checkpoint_every_steps, iterations, written
-):
-    result = run_scenario(
-        _RecordingTrainModel(validation_metrics={"accuracy": 0.5}),
-        training_overrides={
-            "checkpoint_every_steps": checkpoint_every_steps,
-            "iterations_per_train_epoch": iterations,
-        },
-    )
-    path = result.run_dir / "model_epoch0"
-    assert path.is_file() is written
-    assert result.recorder.calls[0]["save_best_checkpoint"] is (checkpoint_every_steps <= 0)
-    if written:
-        assert torch.load(path, weights_only=True)["metrics"] == {"accuracy": 0.5}
 
 
 def _checkpoint_flags(path: Path) -> tuple[int, bool]:
@@ -1059,6 +1139,29 @@ def test_a_step_checkpoint_marks_its_epoch_complete_only_at_the_last_update(run_
     ]
     assert _checkpoint_flags(result.run_dir / "model_step3") == (3, False)
     assert _checkpoint_flags(result.run_dir / "model_step4") == (4, True)
+
+
+@pytest.fixture(scope="module")
+def off_cadence_run(run_scenario) -> _RunResult:
+    """Three updates with a checkpoint cadence of four: no interval checkpoint is due."""
+    return run_scenario(
+        _RecordingTrainModel(steps=[1, 2, 3]),
+        training_overrides={"checkpoint_every_steps": 4, "iterations_per_train_epoch": 3},
+    )
+
+
+def test_a_run_always_ends_with_a_final_checkpoint_of_its_last_step(off_cadence_run):
+    assert list(off_cadence_run.run_dir.glob("model_step*")) == []
+    assert _checkpoint_flags(off_cadence_run.run_dir / "model_final") == (3, True)
+
+
+def test_resuming_the_final_checkpoint_exits_with_status_zero_without_training(
+    run_scenario, off_cadence_run
+):
+    resumed = run_scenario(checkpoint=off_cadence_run.run_dir / "model_final", catch_exit=True)
+    assert resumed.system_exit is not None
+    assert resumed.system_exit.code == 0
+    assert resumed.recorder.calls == []
 
 
 def test_steps_off_the_checkpoint_cadence_write_nothing(run_scenario):
@@ -1082,12 +1185,13 @@ def step_and_preempt_run(run_scenario) -> _RunResult:
     )
 
 
-def test_only_preempt_checkpoints_are_written_atomically(step_and_preempt_run):
+def test_only_preempt_and_final_checkpoints_are_written_atomically(step_and_preempt_run):
     assert step_and_preempt_run.save_atomic == {
         "model_step2": False,
         "model_preempt3": True,
         "model_step6": False,
         "model_preempt6": True,
+        "model_final": True,
     }
 
 
@@ -1105,7 +1209,7 @@ def test_preempt_checkpoints_roll_and_leave_step_checkpoints_alone(step_and_pree
 def test_preempt_checkpoints_are_written_without_interval_checkpoints(run_scenario):
     result = run_scenario(
         _RecordingTrainModel(steps=[3]),
-        training_overrides={"checkpoint_every_steps": 0, "iterations_per_train_epoch": 100},
+        training_overrides={"checkpoint_every_steps": 1000, "iterations_per_train_epoch": 100},
         cli=["--preempt-checkpoint-every-steps", "3"],
     )
     assert [p.name for p in result.run_dir.glob("model_preempt*")] == ["model_preempt3"]
@@ -1115,7 +1219,7 @@ def test_preempt_checkpoints_are_written_without_interval_checkpoints(run_scenar
 def test_the_preempt_checkpoint_of_the_last_update_marks_the_epoch_complete(run_scenario):
     result = run_scenario(
         _RecordingTrainModel(steps=[4]),
-        training_overrides={"checkpoint_every_steps": 0, "iterations_per_train_epoch": 4},
+        training_overrides={"checkpoint_every_steps": 1000, "iterations_per_train_epoch": 4},
         cli=["--preempt-checkpoint-every-steps", "2"],
     )
     assert _checkpoint_flags(result.run_dir / "model_preempt4") == (4, True)

@@ -240,6 +240,18 @@ def test_train_resumes_from_the_newest_checkpoint(job):
     assert _arg(argv, "--checkpoint") == str(newer)
 
 
+def test_train_resumes_from_the_final_checkpoint_when_it_is_the_newest(job):
+    ckpt_dir = job / "outputs" / "model_checkpoints" / "RUN"
+    older, final = ckpt_dir / "model_step2000", ckpt_dir / "model_final"
+    older.touch()
+    final.touch()
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(final, (2_000_000, 2_000_000))
+    result, argv = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    assert _arg(argv, "--checkpoint") == str(final)
+
+
 def test_train_exits_2_when_the_env_file_is_not_readable(job):
     env_file = job.parent / "job.env"
     env_file.unlink()
@@ -425,7 +437,7 @@ def test_final_runs_the_768_fine_tune_after_the_final_run(repo):
     assert _opt(final, "dependency") is None
     assert _opt(hires, "dependency") == "afterok:100001"
     assert _opt(hires, "gres") == "gpu:4"
-    assert _arg(hires, "--init-weights") == "outputs/model_checkpoints/cbm_final/model_step300000"
+    assert _arg(hires, "--init-weights") == "outputs/model_checkpoints/cbm_final/model_final"
     assert _arg(hires, "--resolution") == "768"
     assert _arg(hires, "--training-config") == "configs/training_config_cbm_final_hires.yaml"
     assert int(_arg(hires, "--batch-size")) * int(_arg(hires, "--grad-accum-steps")) == 32
@@ -637,7 +649,7 @@ def test_768_batch_and_accum_must_multiply_to_32(repo):
 # ---------- lib_launch.sh ----------
 
 _HIRES = "cbm_final_res768"
-_HIRES_SOURCE = "outputs/model_checkpoints/cbm_final/model_step300000"
+_HIRES_SOURCE = "outputs/model_checkpoints/cbm_final/model_final"
 
 
 def _age_checkpoint(repo: Path, minutes: float) -> Path:

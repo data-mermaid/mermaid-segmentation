@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
-from mermaidseg.io import resolve_repo_path
+from mermaidseg.io import build_train_parser, check_train_args, resolve_repo_path
 from scripts.sagemaker import train_entrypoint
 from scripts.sagemaker.run_config import RunConfig, load_run_config
 
@@ -111,14 +111,14 @@ def _parse_trainer_args(cfg: RunConfig) -> argparse.Namespace:
     Raises:
         ValueError: If ``train.args`` sets an owned flag or the trainer parser rejects them.
     """
-    from scripts.train import build_parser
-
     argv = train_entrypoint.build_trainer_argv(
         cfg.train, ngpu=1, cpus=_VALIDATION_CPUS, python="python"
     )
-    parser = build_parser()
+    parser = build_train_parser()
     parser.error = _raise_parse_error  # type: ignore[method-assign]
-    return parser.parse_args(argv[argv.index(train_entrypoint.TRAINER_SCRIPT) + 1 :])
+    args = parser.parse_args(argv[argv.index(train_entrypoint.TRAINER_SCRIPT) + 1 :])
+    check_train_args(parser, args)
+    return args
 
 
 def _missing_config_paths(namespace: argparse.Namespace) -> list[str]:
