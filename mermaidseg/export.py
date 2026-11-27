@@ -35,6 +35,8 @@ from segdata_spec.errors import ManifestNotFound, PinMismatch
 from segdata_spec.manifest import Pin
 from segdata_spec.sync import check_published_manifest
 
+LABEL_SPACE_DIR = "label_space"
+
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 # Sections that must not change when a run resumes into an existing sidecar.
@@ -257,6 +259,18 @@ def _require_empty_out_dir(out_dir: Path) -> None:
         raise ValueError(f"output directory {out_dir} exists and is not empty")
 
 
+def _require_label_space(source: Path, listed: Mapping[str, str]) -> None:
+    """Raise ValueError unless ``source`` holds every file of ``listed`` with its sha256."""
+    if not source.is_dir():
+        raise ValueError(f"label space directory not found: {source}")
+    for name, expected in listed.items():
+        path = source / name
+        if name != Path(name).name or not path.is_file():
+            raise ValueError(f"label space file {name!r} listed in {MODEL_JSON} is missing: {path}")
+        if sha256_file(path) != expected:
+            raise ValueError(f"label space file {name!r} differs from the sha256 in {MODEL_JSON}")
+
+
 def _require_parent_exists(out_dir: Path) -> None:
     if not out_dir.parent.is_dir():
         raise FileNotFoundError(f"parent directory of {out_dir} does not exist: {out_dir.parent}")
@@ -288,9 +302,16 @@ def _current_umask() -> int:
 
 
 def _write_bundle_dir(
-    out_dir: Path, state_dict: Mapping[str, torch.Tensor], metadata: dict[str, Any]
+    out_dir: Path,
+    state_dict: Mapping[str, torch.Tensor],
+    metadata: dict[str, Any],
+    label_space_source: Path,
 ) -> None:
-    """Write the bundle into a fresh temporary sibling of ``out_dir`` and rename it onto ``out_dir``."""
+    """Write the bundle into a fresh temporary sibling of ``out_dir`` and rename it onto ``out_dir``.
+
+    The bundle's ``label_space/`` holds the files that ``metadata['label_space']`` lists,
+    copied from ``label_space_source``.
+    """
     staging = Path(
         tempfile.mkdtemp(prefix=out_dir.name + ".", suffix=".partial", dir=out_dir.parent)
     )
@@ -300,6 +321,9 @@ def _write_bundle_dir(
         (staging / MODEL_JSON).write_text(
             json.dumps({**metadata, WEIGHTS_SHA256: digest}, indent=2)
         )
+        (staging / LABEL_SPACE_DIR).mkdir()
+        for name in metadata["label_space"]:
+            shutil.copy2(label_space_source / name, staging / LABEL_SPACE_DIR / name)
         os.chmod(staging, 0o777 & ~_current_umask())
         os.replace(staging, out_dir)
     except BaseException:
@@ -313,7 +337,8 @@ def export_bundle(
     """Export ``checkpoint`` into a bundle directory at ``out_dir`` and return it.
 
     The sidecar ``model.json`` beside the checkpoint supplies the architecture, label maps
-    and preprocessing; the lineage is the checkpoint's own, from the session that wrote it.
+    and preprocessing, and the ``label_space/`` directory beside it supplies the label space
+    files that the bundle carries; the lineage is the checkpoint's own, from the session that wrote it.
     ``s3_client`` reads the pinned manifests; ``repo_dir`` (default: the working directory)
     is the git checkout whose ``origin/*`` refs must contain the lineage's commit.
 
@@ -321,7 +346,10 @@ def export_bundle(
         FileNotFoundError: The sidecar is missing or ``out_dir``'s parent does not exist.
         RuntimeError: The checkpoint cannot be loaded or lacks a required key, ``lineage``
             included; the message names its path.
-        ValueError: The checkpoint's tree was dirty or unknown, ``out_dir`` is not empty, or
+        ValueError: The sidecar has no ``label_space`` section, the label space directory
+            beside the checkpoint is missing, lacks a file
+            the sidecar lists, or holds one whose sha256 differs, the checkpoint's tree was
+            dirty or unknown, ``out_dir`` is not empty, or
             the checkpoint's config differs from its ``lineage.resolved_config``, the lineage
             pins no datasets or no taxonomy in ``data_version``, a pinned
             manifest is missing from the bucket or has another sha256, the lineage's
@@ -335,6 +363,13 @@ def export_bundle(
     sidecar = json.loads(sidecar_path.read_text())
     _require_empty_out_dir(out_dir)
     _require_parent_exists(out_dir)
+    if "label_space" not in sidecar:
+        raise ValueError(
+            f"{sidecar_path} has no label_space section; "
+            "the checkpoint was trained before label spaces existed, so retrain it"
+        )
+    label_space_source = checkpoint.parent / LABEL_SPACE_DIR
+    _require_label_space(label_space_source, sidecar["label_space"])
     ckpt = read_checkpoint(
         checkpoint,
         required_keys=("config", "model_state_dict", "epoch", "global_step", "lineage"),
@@ -349,5 +384,5 @@ def export_bundle(
         "weights": WEIGHTS,
         "checkpoint": {"epoch": ckpt["epoch"], "global_step": ckpt["global_step"]},
     }
-    _write_bundle_dir(out_dir, ckpt["model_state_dict"], metadata)
+    _write_bundle_dir(out_dir, ckpt["model_state_dict"], metadata, label_space_source)
     return out_dir

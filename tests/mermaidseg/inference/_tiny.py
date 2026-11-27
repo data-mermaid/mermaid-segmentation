@@ -15,6 +15,7 @@ from transformers import AutoConfig, AutoModel
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.export import write_sidecar
+from mermaidseg.inference.bundle import sha256_file
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.model.models import MODEL_CLASSES
 
@@ -111,6 +112,17 @@ def resolved_config() -> dict[str, Any]:
     }
 
 
+LABEL_SPACE_FILES = {"classes.csv": "id,name\n1,acropora\n", "concepts.csv": "id,name\n0,live\n"}
+
+
+def _write_label_space_dir(directory: Path) -> dict[str, str]:
+    """Write the stand-in label space files into ``directory``; the sha256 of each."""
+    directory.mkdir(exist_ok=True)
+    for name, text in LABEL_SPACE_FILES.items():
+        (directory / name).write_text(text)
+    return {name: sha256_file(directory / name) for name in LABEL_SPACE_FILES}
+
+
 def write_run(
     run_dir: Path,
     *,
@@ -132,6 +144,7 @@ def write_run(
         if k not in ENV_ENCODER_KEYS
     }
     run_dir.mkdir(parents=True, exist_ok=True)
+    label_space = _write_label_space_dir(run_dir / "label_space")
     lineage = {
         "git_sha": "abc123",
         "git_dirty": git_dirty,
@@ -148,7 +161,7 @@ def write_run(
         input_size=INPUT_SIZE,
         mean=mean,
         std=std,
-        label_space={},
+        label_space=label_space,
         lineage=lineage,
     )
     checkpoint = run_dir / "model_step1"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -104,9 +105,77 @@ def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, over
     assert (tmp_path / MODEL_JSON).read_text() == before
 
 
-def test_bundle_directory_holds_only_the_sidecar_and_weights(bundle_dir):
-    assert sorted(p.name for p in bundle_dir.iterdir()) == [MODEL_JSON, WEIGHTS]
-    assert [p.name for p in bundle_dir.parent.iterdir()] == [bundle_dir.name]
+def test_bundle_directory_holds_the_sidecar_weights_and_label_space(deployable, tmp_path):
+    checkpoint, repo, _ = deployable
+    run_dir = tmp_path / "run"
+    shutil.copytree(checkpoint.parent, run_dir)
+    run_space = run_dir / "label_space"
+    (run_space / "extra.csv").write_text("unlisted\n")
+    bundle_dir = export_ckpt(run_dir / checkpoint.name, tmp_path / "bundle", repo_dir=repo)
+    assert sorted(p.name for p in bundle_dir.iterdir()) == ["label_space", MODEL_JSON, WEIGHTS]
+    assert sorted(p.name for p in (bundle_dir / "label_space").iterdir()) == [
+        "classes.csv",
+        "concepts.csv",
+    ]
+    assert [p.name for p in bundle_dir.parent.iterdir()] == [bundle_dir.name, "run"] or sorted(
+        p.name for p in bundle_dir.parent.iterdir()
+    ) == ["bundle", "run"]
+    for name in ("classes.csv", "concepts.csv"):
+        assert (bundle_dir / "label_space" / name).read_bytes() == (run_space / name).read_bytes()
+
+
+def _remove_label_space_dir(space: Path) -> None:
+    shutil.rmtree(space)
+
+
+def _remove_listed_file(space: Path) -> None:
+    (space / "concepts.csv").unlink()
+
+
+def _change_listed_file(space: Path) -> None:
+    (space / "classes.csv").write_text("id,name\n1,changed\n")
+
+
+def _rewrite_sidecar(space: Path, edit) -> None:
+    sidecar_path = space.parent / MODEL_JSON
+    sidecar = json.loads(sidecar_path.read_text())
+    edit(sidecar)
+    sidecar_path.write_text(json.dumps(sidecar))
+
+
+def _drop_label_space_section(space: Path) -> None:
+    _rewrite_sidecar(space, lambda sidecar: sidecar.pop("label_space"))
+
+
+def _list_a_file_outside_the_directory(space: Path) -> None:
+    (space.parent / "outside.csv").write_text("outside\n")
+    _rewrite_sidecar(space, lambda sidecar: sidecar.update(label_space={"../outside.csv": "aa"}))
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        (_remove_label_space_dir, r"label space directory not found: .*run/label_space"),
+        (_remove_listed_file, r"label space file 'concepts.csv' .* is missing"),
+        (_change_listed_file, r"label space file 'classes.csv' differs"),
+        (_drop_label_space_section, r"model.json has no label_space section; .*retrain it"),
+        (
+            _list_a_file_outside_the_directory,
+            r"label space file '\.\./outside.csv' .* is missing",
+        ),
+    ],
+)
+def test_export_refuses_a_label_space_that_the_sidecar_does_not_describe(
+    deployable, tmp_path, damage, message
+):
+    checkpoint, repo, _ = deployable
+    run_dir = tmp_path / "run"
+    shutil.copytree(checkpoint.parent, run_dir)
+    damage(run_dir / "label_space")
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match=message):
+        export_ckpt(run_dir / checkpoint.name, out, repo_dir=repo)
+    assert not out.exists()
 
 
 def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(deployable, bundle_dir):
@@ -172,7 +241,7 @@ def test_export_accepts_an_existing_empty_output_directory(run, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     export_ckpt(run[0], out, repo_dir=run[1])
-    assert sorted(p.name for p in out.iterdir()) == sorted([MODEL_JSON, WEIGHTS])
+    assert sorted(p.name for p in out.iterdir()) == sorted(["label_space", MODEL_JSON, WEIGHTS])
 
 
 def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_naming_the_key(
