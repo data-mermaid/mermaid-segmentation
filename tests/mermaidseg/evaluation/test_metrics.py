@@ -6,13 +6,13 @@ import numpy as np
 import pytest
 
 from mermaidseg.evaluation.metrics import (
-    BinaryConceptScore,
     BinaryConceptStats,
     ClassConfusion,
     ConceptLayout,
     MetricBundle,
     TaxonomicRankAccuracy,
     concept_block_from_binary,
+    require_reported_concepts,
 )
 
 
@@ -121,24 +121,39 @@ def test_concept_block_is_copied_per_concept_and_missing_raises():
         concept_block_from_binary(binary, "sand")
 
 
-def test_binary_concept_score_separates_true_false_not_given_and_unannotated():
-    score = BinaryConceptScore(threshold=0.5)
-    # code 2 / 0.9 -> TP; code 2 / 0.5 -> FN (exactly 0.5 is negative)
-    # code 1 / 0.9 -> FP; code 1 / 0.1 -> TN
-    # code 0, annotated -> not_given; code 0, unannotated -> not a negative
-    codes = np.array([2, 2, 1, 1, 0, 0])
-    probs = np.array([0.9, 0.5, 0.9, 0.1, 0.99, 0.01])
-    unannotated = np.array([False, False, False, False, False, True])
-    score.update(codes, probs, unannotated)
-    got = score.to_dict()
-    assert (got["tp"], got["fn"], got["fp"], got["tn"]) == (1, 1, 1, 1)
-    assert got["n_true"] == 2
-    assert got["n_false"] == 2
+def test_binary_stats_excludes_unannotated_rows_from_every_count():
+    stats = BinaryConceptStats(["a"], [0])
+    # Annotated: code 2 / 0.9 -> TP, code 1 / 0.1 -> TN, code 0 -> not_given.
+    # Unannotated: two code-0 rows with confident probabilities count nowhere else.
+    codes = np.array([[2], [1], [0], [0], [0]])
+    probs = np.array([[0.9], [0.1], [0.99], [0.99], [0.01]])
+    unannotated = np.array([False, False, False, True, True])
+    stats.update(codes, probs, unannotated=unannotated)
+    got = stats.per_concept()["a"]
+    assert (got["tp"], got["fp"], got["fn"], got["tn"]) == (1, 0, 0, 1)
     assert got["n_not_given"] == 1
-    assert got["n_unannotated"] == 1
-    assert got["precision"] == 0.5
-    assert got["recall"] == 0.5
-    assert abs(got["accuracy"] - 0.5) < 1e-9
+    assert got["n_unannotated"] == 2
+
+
+def test_binary_stats_rejects_an_unannotated_row_with_a_given_code():
+    stats = BinaryConceptStats(["a", "b"], [0, 1])
+    with pytest.raises(ValueError, match="unannotated"):
+        stats.update(np.array([[0, 2]]), np.array([[0.9, 0.9]]), unannotated=np.array([True]))
+
+
+def test_binary_stats_rejects_an_unannotated_mask_that_does_not_match_the_rows():
+    stats = BinaryConceptStats(["a"], [0])
+    with pytest.raises(ValueError, match="unannotated has 1 entries but there are 2 rows"):
+        stats.update(np.array([[0], [0]]), np.array([[0.9], [0.9]]), unannotated=np.array([True]))
+
+
+def test_binary_stats_merge_sums_unannotated_counts():
+    a = BinaryConceptStats(["c"], [0])
+    b = BinaryConceptStats(["c"], [0])
+    a.update(np.array([[0]]), np.array([[0.9]]), unannotated=np.array([True]))
+    b.update(np.array([[0], [0]]), np.array([[0.9], [0.9]]), unannotated=np.array([True, True]))
+    a.merge(b)
+    assert a.per_concept()["c"]["n_unannotated"] == 3
 
 
 def test_bundle_merge_pools_class_taxonomic_and_binary_counts():
@@ -410,3 +425,19 @@ def test_binary_stats_rejects_codes_outside_0_1_2(bad_code):
     stats = BinaryConceptStats(["a"], [0])
     with pytest.raises(ValueError, match=rf"found \[{bad_code}\]"):
         stats.update(np.array([[2], [bad_code]]), np.array([[0.9], [0.9]]))
+
+
+@pytest.mark.parametrize(
+    ("concept_names", "missing"),
+    [
+        (["sand", "bleached"], r"\['anthropogenic'\]"),
+        (["sand"], r"\['bleached', 'anthropogenic'\]"),
+    ],
+)
+def test_require_reported_concepts_names_the_missing_ones(concept_names, missing):
+    with pytest.raises(RuntimeError, match=missing):
+        require_reported_concepts(concept_names)
+
+
+def test_require_reported_concepts_accepts_names_holding_every_reported_concept():
+    assert require_reported_concepts(["anthropogenic", "sand", "bleached"]) is None

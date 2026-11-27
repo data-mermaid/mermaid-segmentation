@@ -14,6 +14,7 @@ the pooled accumulator.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,20 @@ from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 #: Binary concepts reported explicitly (accuracy / precision / recall / F1) next to
 #: the macro binary scores.
 REPORTED_BINARY_CONCEPTS: tuple[str, ...] = ("bleached", "anthropogenic")
+
+
+def require_reported_concepts(concept_names: Sequence[str]) -> None:
+    """Check that ``concept_names`` holds every name in ``REPORTED_BINARY_CONCEPTS``.
+
+    Raises:
+        RuntimeError: A reported binary concept is missing; the message names each one.
+    """
+    missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concept_names]
+    if missing:
+        raise RuntimeError(
+            f"the evaluation requires concept channels named exactly {missing}, "
+            f"which concept_names ({len(concept_names)} entries) does not have."
+        )
 
 
 def _safe_div(num: float, den: float) -> float:
@@ -409,8 +424,9 @@ class BinaryConceptStats:
 
     Concept channels use ``0=not_given, 1=False, 2=True``. Only pixels with GT in
     ``{1, 2}`` (given) are scored. Code 0 is counted in ``n_not_given`` and is not
-    a true negative. Prediction is ``prob > threshold`` (exactly 0.5 is negative).
-    ``True`` (code 2) is the positive class.
+    a true negative. Rows marked ``unannotated`` (pixels with no class label) are
+    counted only in ``n_unannotated``. Prediction is ``prob > threshold`` (exactly
+    0.5 is negative). ``True`` (code 2) is the positive class.
     """
 
     def __init__(self, names: list[str], channel_indices: list[int], threshold: float = 0.5):
@@ -437,16 +453,26 @@ class BinaryConceptStats:
         # Code 0 (not_given, or a label missing from the concept table) is excluded
         # from the four counts above and tracked here so it is not mistaken for False.
         self.n_not_given = np.zeros(n, dtype=np.int64)
+        self.n_unannotated = np.zeros(n, dtype=np.int64)
 
-    def update(self, gt_rows: NDArray[np.integer], pred_probs: NDArray[np.floating]) -> None:
+    def update(
+        self,
+        gt_rows: NDArray[np.integer],
+        pred_probs: NDArray[np.floating],
+        unannotated: NDArray[np.bool_] | None = None,
+    ) -> None:
         """Accumulate points.
 
         Args:
             gt_rows: Ground-truth concept codes, shape ``(points, channels)``.
             pred_probs: Predicted probabilities, same shape as ``gt_rows``.
+            unannotated: Per-row mask of unannotated points, shape ``(points,)``. Those
+                rows must carry code 0 and are excluded from every count but
+                ``n_unannotated``.
 
         Raises:
-            ValueError: If a ground-truth code is outside ``{0, 1, 2}``.
+            ValueError: If a ground-truth code is outside ``{0, 1, 2}``, ``unannotated``
+                does not have one entry per row, or an unannotated row has a non-zero code.
         """
         if not self.channel_indices:
             return
@@ -458,14 +484,25 @@ class BinaryConceptStats:
                 f"found {bad.tolist()}"
             )
         p = np.asarray(pred_probs)[:, self.channel_indices] > self.threshold
-        valid = g > 0
+        annotated = np.ones((g.shape[0], 1), dtype=bool)
+        if unannotated is not None:
+            unlabeled = np.asarray(unannotated, dtype=bool).reshape(-1, 1)
+            if unlabeled.shape[0] != g.shape[0]:
+                raise ValueError(
+                    f"unannotated has {unlabeled.shape[0]} entries but there are {g.shape[0]} rows"
+                )
+            if np.any(unlabeled & (g != 0)):
+                raise ValueError("unannotated rows must have concept code 0, not TRUE or FALSE")
+            annotated = ~unlabeled
+            self.n_unannotated += int(unlabeled.sum())
+        valid = annotated & (g > 0)
         gt_true = g == 2
         gt_false = g == 1
         self.tp += (valid & gt_true & p).sum(axis=0).astype(np.int64)
         self.fp += (valid & gt_false & p).sum(axis=0).astype(np.int64)
         self.fn += (valid & gt_true & ~p).sum(axis=0).astype(np.int64)
         self.tn += (valid & gt_false & ~p).sum(axis=0).astype(np.int64)
-        self.n_not_given += (g == 0).sum(axis=0).astype(np.int64)
+        self.n_not_given += (annotated & (g == 0)).sum(axis=0).astype(np.int64)
 
     def merge(self, other: BinaryConceptStats) -> None:
         """Add another accumulator's counts into this one.
@@ -480,6 +517,7 @@ class BinaryConceptStats:
         self.fn += other.fn
         self.tn += other.tn
         self.n_not_given += other.n_not_given
+        self.n_unannotated += other.n_unannotated
 
     def clone(self) -> BinaryConceptStats:
         """Return an independent copy."""
@@ -489,6 +527,7 @@ class BinaryConceptStats:
         out.fn = self.fn.copy()
         out.tn = self.tn.copy()
         out.n_not_given = self.n_not_given.copy()
+        out.n_unannotated = self.n_unannotated.copy()
         return out
 
     def per_concept(self) -> dict[str, dict]:
@@ -512,6 +551,7 @@ class BinaryConceptStats:
                 "n_true": n_true,
                 "n_false": n_false,
                 "n_not_given": int(self.n_not_given[i]),
+                "n_unannotated": int(self.n_unannotated[i]),
                 "tp": tp,
                 "fp": fp,
                 "fn": fn,
@@ -535,8 +575,9 @@ class BinaryConceptStats:
 def concept_block_from_binary(binary: dict, concept: str, threshold: float = 0.5) -> dict:
     """Copy one concept's entry out of a ``BinaryConceptStats.to_dict()`` payload.
 
-    Raises if the channel is missing. ``not_given`` points are already excluded
-    from the four confusion counts and are reported as ``n_not_given``.
+    Raises if the channel is missing. ``not_given`` and unannotated points are
+    already excluded from the four confusion counts and are reported as
+    ``n_not_given`` and ``n_unannotated``.
     """
     per = binary.get("per_concept") if isinstance(binary, dict) else None
     if not isinstance(per, dict) or concept not in per:
@@ -557,107 +598,11 @@ def concept_block_from_binary(binary: dict, concept: str, threshold: float = 0.5
         "n_true",
         "n_false",
         "n_not_given",
+        "n_unannotated",
     )
     block = {key: stats[key] for key in required}
     block["threshold"] = float(threshold)
     return block
-
-
-class BinaryConceptScore:
-    """Confusion counts for one binary concept (e.g. ``bleached``).
-
-    Ground-truth codes are ``2=TRUE`` (positive), ``1=FALSE`` (negative), and
-    ``0=not_given`` (excluded). Unannotated Coralscapes pixels (mask id 0) are
-    passed separately via ``unannotated`` and are not counted as ``not_given``
-    or as ``FALSE``. A prediction is positive only when ``probability > threshold``
-    (exactly 0.5 is negative).
-    """
-
-    def __init__(self, threshold: float = 0.5):
-        """Create zeroed counters.
-
-        Args:
-            threshold: Probabilities strictly above this are predicted positive.
-        """
-        self.threshold = float(threshold)
-        self.tp = 0
-        self.fp = 0
-        self.fn = 0
-        self.tn = 0
-        self.n_not_given = 0
-        self.n_unannotated = 0
-
-    def update(
-        self,
-        codes: NDArray[np.integer],
-        probabilities: NDArray[np.floating],
-        unannotated: NDArray[np.bool_] | None = None,
-    ) -> None:
-        """Accumulate pixels.
-
-        Args:
-            codes: Ground-truth concept codes in ``{0, 1, 2}``.
-            probabilities: Predicted probabilities, same size as ``codes``.
-            unannotated: Mask of unannotated pixels, which must carry code 0.
-
-        Raises:
-            ValueError: On shape mismatch, an invalid code, or an unannotated pixel with a
-                non-zero code.
-        """
-        gt = np.asarray(codes).reshape(-1)
-        prob = np.asarray(probabilities).reshape(-1)
-        if gt.shape != prob.shape:
-            raise ValueError(f"codes/probabilities shape mismatch: {gt.shape} vs {prob.shape}")
-        bad = ~np.isin(gt, (0, 1, 2))
-        if np.any(bad):
-            found = np.unique(gt[bad]).tolist()
-            raise ValueError(
-                f"binary concept codes must be 0 (not_given), 1 (False), or 2 (True); found {found}"
-            )
-        if unannotated is None:
-            unlabeled = np.zeros(gt.shape, dtype=bool)
-        else:
-            unlabeled = np.asarray(unannotated).reshape(-1).astype(bool)
-            if unlabeled.shape != gt.shape:
-                raise ValueError(
-                    f"unannotated shape {unlabeled.shape} does not match codes {gt.shape}"
-                )
-        if np.any(unlabeled & (gt != 0)):
-            raise ValueError("unannotated pixels must have concept code 0, not TRUE or FALSE")
-
-        predicted_positive = prob > self.threshold
-        annotated = ~unlabeled
-        gt_true = annotated & (gt == 2)
-        gt_false = annotated & (gt == 1)
-        self.tp += int((gt_true & predicted_positive).sum())
-        self.fn += int((gt_true & ~predicted_positive).sum())
-        self.fp += int((gt_false & predicted_positive).sum())
-        self.tn += int((gt_false & ~predicted_positive).sum())
-        self.n_not_given += int((annotated & (gt == 0)).sum())
-        self.n_unannotated += int(unlabeled.sum())
-
-    def to_dict(self) -> dict:
-        """Return the confusion counts and derived metrics for this concept."""
-        tp, fp, fn, tn = self.tp, self.fp, self.fn, self.tn
-        n_true = tp + fn
-        n_false = fp + tn
-        n_valid = n_true + n_false
-        return {
-            "accuracy": _safe_div(tp + tn, n_valid),
-            "precision": _safe_div(tp, tp + fp),
-            "recall": _safe_div(tp, n_true),
-            "f1": _safe_div(2 * tp, 2 * tp + fp + fn),
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
-            "tn": tn,
-            "n_true": n_true,
-            "n_false": n_false,
-            "n_not_given": self.n_not_given,
-            "n_unannotated": self.n_unannotated,
-            "n_valid": n_valid,
-            "threshold": self.threshold,
-        }
 
 
 @dataclass

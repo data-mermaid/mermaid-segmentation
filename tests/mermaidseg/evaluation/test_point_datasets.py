@@ -20,16 +20,19 @@ from PIL import Image
 
 from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.evaluation import point_datasets
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup, build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.point_datasets import (
     PointEvalDataset,
+    evaluate_point_dataset,
     run_point_evaluation,
-    unit_scalar_keys,
     unit_scalars,
 )
+from mermaidseg.evaluation.point_sources import coralnet_reader, pacific_reader
 from mermaidseg.inference.predictor import CBMPredictor
+from tests.mermaidseg.evaluation.conftest import write_eval_cache
 
 _REPO = Path(__file__).resolve().parents[3]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
@@ -185,11 +188,9 @@ def both(tmp_path_factory):
 
 
 def test_macro_is_the_mean_of_unit_values(both):
-    keys = unit_scalar_keys(
-        list(both["pooled"]["taxonomic"]), REPORTED_BINARY_CONCEPTS, with_hier=True
-    )
-    assert set(both["macro"]) == set(keys)
     per_unit = [unit_scalars(d, REPORTED_BINARY_CONCEPTS) for d in both["units"].values()]
+    keys = list(per_unit[0])
+    assert set(both["macro"]) == set(keys)
     for key in keys:
         values = [u[key] for u in per_unit if not math.isnan(u[key])]
         expected = float(np.mean(values)) if values else float("nan")
@@ -451,14 +452,74 @@ def test_unmapped_labels_are_reported_per_lookup_and_written_to_metrics_json(tmp
     assert payload["unmapped_concept_labels"] == ["mystery", "sand"]
 
 
-def test_progress_callback_reports_images_processed_after_each_batch(tmp_path):
-    ids = ["a", "b", "c", "d", "e"]
-    annotations = [row for i in ids for row in _tiny_annotations(i, [(0, 0, "coral")])]
-    calls: list[tuple[int, int]] = []
-    _tiny_run(
-        tmp_path,
-        tiny_reader(tmp_path / "images", _tiny_images(*ids), annotations),
-        batch_size=2,
-        progress_cb=lambda done, total: calls.append((done, total)),
+def _evaluate_with_stubbed_runner(monkeypatch, name, reader, source_name, tmp_path, **extra):
+    """Call evaluate_point_dataset with the runner replaced; return its result and the runner's kwargs."""
+    seen: dict = {}
+
+    def run(**kwargs):
+        seen.update(kwargs)
+        return {"ran": True}
+
+    monkeypatch.setattr(point_datasets, "run_point_evaluation", run)
+    result = evaluate_point_dataset(
+        name,
+        reader,
+        source_name=source_name,
+        predictor="predictor",  # type: ignore[arg-type]
+        id2label={0: "ignore", 1: "porites", 2: "sand"},
+        concept_names=[],
+        taxonomy_csv=_CSV,
+        hierarchy=None,
+        output_dir="out",
+        **extra,
     )
-    assert calls == [(2, 5), (4, 5), (5, 5)]
+    return result, seen
+
+
+def test_groups_are_unique_and_sorted_when_a_group_has_several_images(tmp_path, monkeypatch):
+    cache = write_eval_cache(tmp_path)
+    reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s1", "s3"], split="val")
+    # Images arrive in descending group order, so only the explicit sort yields ["s1", "s3"].
+    reader.images = reader.images.sort_values("group", ascending=False)
+
+    result, _ = _evaluate_with_stubbed_runner(
+        monkeypatch, "coralnet_val", reader, "coralnet", tmp_path
+    )
+
+    assert result["groups"] == ["s1", "s3"]
+
+
+def test_the_runner_gets_the_eval_name_lookups_and_options(tmp_path, monkeypatch):
+    cache = write_eval_cache(tmp_path)
+    reader = pacific_reader(cache.section, cache.cache_dir, tmp_path)
+
+    result, seen = _evaluate_with_stubbed_runner(
+        monkeypatch,
+        "pacific_val",
+        reader,
+        "pacific_labeled_corals",
+        tmp_path,
+        batch_size=3,
+        num_workers=0,
+        max_images_per_unit=2,
+        removed_concepts=["genus__x"],
+    )
+
+    assert result["ran"] is True
+    assert seen.pop("class_lookup").name_to_class_id == {"porites": 1, "sand": 2}
+    assert sorted(seen.pop("concept_lookup").name_to_row) == ["porites", "sand"]
+    assert seen.pop("reader") is reader
+    assert seen == {
+        "eval_name": "pacific_val",
+        "unit_col": "group",
+        "predictor": "predictor",
+        "concept_names": [],
+        "id2label": {0: "ignore", 1: "porites", 2: "sand"},
+        "output_dir": "out",
+        "binary_concepts": REPORTED_BINARY_CONCEPTS,
+        "taxonomy_csv": _CSV,
+        "batch_size": 3,
+        "num_workers": 0,
+        "max_images_per_unit": 2,
+        "removed_concepts": ["genus__x"],
+    }

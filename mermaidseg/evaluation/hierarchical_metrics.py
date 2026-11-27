@@ -6,20 +6,18 @@
 * calibration: ECE of the top-1 confidence, per rank.
 * rare taxon: macro accuracy per rank, split into head and tail taxa by support.
 
-:class:`HierarchicalMetrics` is a :class:`~mermaidseg.model.rank_outputs.RankOutputConsumer`
-that accumulates counts per batch, so memory does not grow with the dataset
-(see :mod:`mermaidseg.evaluation.hierarchical`).
+:class:`HierarchicalMetrics` accumulates counts per batch of
+:class:`~mermaidseg.evaluation.rank_outputs.RankBatch`, so memory does not grow with the
+dataset (see :mod:`mermaidseg.evaluation.hierarchical`).
 
-The concept-bottleneck model already applies a per-rank softmax, so
-the default ``score_transform="none"`` is correct. Use ``"softmax"`` for raw logits, or
-``"renormalize"`` for positive scores that do not sum to 1. Only ECE depends on this.
+The concept-bottleneck model applies a per-rank softmax, so ``RankBatch.scores`` are
+probabilities and ECE reads their per-pixel maximum as the confidence.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from itertools import pairwise
-from typing import Literal
 
 import numpy as np
 import torch
@@ -31,9 +29,7 @@ from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     rank_distance_matrix,
     taxon_channel_mask,
 )
-from mermaidseg.model.rank_outputs import RankBatch
-
-ScoreTransform = Literal["none", "softmax", "renormalize"]
+from mermaidseg.evaluation.rank_outputs import RankBatch
 
 #: Four-way split of labelled pixels by whether GT and prediction are a taxon or 'none'
 #: (taxon GT is further split into correct and wrong-taxon).
@@ -57,16 +53,6 @@ def _accumulator_dtype(device: torch.device) -> torch.dtype:
     return torch.float32 if device.type == "mps" else torch.float64
 
 
-def _to_probabilities(scores: torch.Tensor, transform: ScoreTransform) -> torch.Tensor:
-    """Normalise a rank's scores to a distribution over its channels (dim 1)."""
-    if transform == "softmax":
-        return torch.softmax(scores, dim=1)
-    if transform == "renormalize":
-        total = scores.sum(dim=1, keepdim=True).clamp(min=1e-12)
-        return scores / total
-    return scores
-
-
 class HierarchicalMetrics:
     """Accumulate the hierarchical metrics over an evaluation run.
 
@@ -76,7 +62,6 @@ class HierarchicalMetrics:
             the tree with ``"exclude"`` to drop such taxa instead.
         ranks: Ranks to score. Defaults to every rank in ``tree``.
         n_bins: Number of equal-width confidence bins for ECE.
-        score_transform: See module docstring.
         tail_quantile: Taxa below this quantile of support form the "tail" stratum.
         head_quantile: Taxa above this quantile of support form the "head" stratum.
         min_support: Taxa with fewer than this many ground-truth pixels are ignored
@@ -88,7 +73,6 @@ class HierarchicalMetrics:
         tree: TaxonomyTree,
         ranks: tuple[str, ...] | None = None,
         n_bins: int = 15,
-        score_transform: ScoreTransform = "none",
         tail_quantile: float = 0.5,
         head_quantile: float = 0.8,
         min_support: int = 1,
@@ -97,7 +81,6 @@ class HierarchicalMetrics:
         self.tree = tree
         self.ranks = tuple(ranks) if ranks is not None else tuple(tree.ranks)
         self.n_bins = int(n_bins)
-        self.score_transform: ScoreTransform = score_transform
         self.tail_quantile = float(tail_quantile)
         self.head_quantile = float(head_quantile)
         self.min_support = int(min_support)
@@ -190,7 +173,9 @@ class HierarchicalMetrics:
     def update(self, ranks: dict[str, RankBatch]) -> None:
         """Accumulate one batch.
 
-        See :class:`RankOutputConsumer`.
+        Args:
+            ranks: All taxonomic ranks for this batch, keyed by rank name. Passed together
+                so the consistency metric sees the joint assignment.
         """
         present = {r: b for r, b in ranks.items() if r in self.ranks}
         if not present:
@@ -254,7 +239,7 @@ class HierarchicalMetrics:
             split["none_as_none"] += int((scored & target_none & pred_none).sum().item())
 
         # --- calibration: confidence-binned accuracy ------------------------------
-        probs = _to_probabilities(batch.scores, self.score_transform)
+        probs = batch.scores
         dtype = _accumulator_dtype(probs.device)
         confidence = probs.amax(dim=1).reshape(-1)[valid].to(dtype)
         bin_idx = torch.clamp((confidence * self.n_bins).long(), 0, self.n_bins - 1)

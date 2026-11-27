@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 import scripts.build_coralscapes_v2_probe_points as builder_script
+from mermaidseg.evaluation.coralscapes_probe import CORALSCAPES39
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
 
@@ -56,7 +57,7 @@ def test_main_opens_the_pinned_version_and_forwards_the_cli_flags(
             "--exclusion-radius",
             "9",
             "--label-space",
-            "legacy39",
+            "coralscapes39",
         ]
     )
 
@@ -67,5 +68,5 @@ def test_main_opens_the_pinned_version_and_forwards_the_cli_flags(
         "per_class": 50,
         "min_component_size": 7,
         "exclusion_radius": 9,
-        "label_space": "legacy39",
+        "label_space": CORALSCAPES39,
     }

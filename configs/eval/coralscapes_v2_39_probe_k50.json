@@ -2,7 +2,7 @@
   "dataset": "josauder/coralscapesV2",
   "split": "train",
   "algorithm": "full_train_component_census_v2",
-  "label_space": "coralscapes_legacy39",
+  "label_space": "coralscapes39",
   "num_classes": 39,
   "points_per_class_target": 50,
   "min_component_size": 4,
@@ -13,7 +13,7 @@
   "image_height": 1024,
   "image_width": 2048,
   "source": "local_mirror:/Users/jonathan/mit/coralscapes_v2",
-  "command": "uv run python scripts/build_coralscapes_v2_probe_points.py --local-root /Users/jonathan/mit/coralscapes_v2 --output configs/eval/coralscapes_v2_39_probe_k50.json --per-class 50 --min-component-size 4 --exclusion-radius 16 --label-space legacy39",
+  "command": "uv run python scripts/build_coralscapes_v2_probe_points.py --local-root /Users/jonathan/mit/coralscapes_v2 --output configs/eval/coralscapes_v2_39_probe_k50.json --per-class 50 --min-component-size 4 --exclusion-radius 16 --label-space coralscapes39",
   "id2label": {
     "1": "seagrass",
     "2": "trash",

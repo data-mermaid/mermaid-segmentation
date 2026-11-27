@@ -9,9 +9,12 @@ computed):
 - Pacific Labeled Corals validation (per region + aggregate)
 - CoralscapesV2 linear probes, 95-class and the published 39-class map
   (dense val / test accuracy / mIoU)
-- Validation loss on the val splits of the training data config
+- Loss on the blocks of the chosen ``--split``: val, test, or the CoralNet split-file
+  train groups under the concept source mask (train)
 
-The command-line entry point is ``scripts/evaluate.py``.
+``run`` holds the registry of these evaluations and runs the selected ones; ``summary``
+writes their ``summary.json`` and ``summary.md``. The command-line entry point is
+``scripts/evaluate.py``.
 """
 
 from __future__ import annotations
@@ -21,9 +24,12 @@ __all__ = [
     "hierarchical",
     "gt_mapping",
     "point_datasets",
-    "coralnet_eval",
-    "pacific_eval",
+    "point_sources",
+    "rank_outputs",
+    "hierarchical_metrics",
     "coralscapes_probe",
     "coralscapes_probe_points",
     "val_loss",
+    "run",
+    "summary",
 ]

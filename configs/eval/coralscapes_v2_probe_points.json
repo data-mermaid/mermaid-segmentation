@@ -2,6 +2,7 @@
   "dataset": "josauder/coralscapesV2",
   "split": "train",
   "algorithm": "full_train_component_census_v2",
+  "label_space": "coralscapes_v2",
   "num_classes": 95,
   "points_per_class_target": 10,
   "min_component_size": 4,

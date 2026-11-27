@@ -15,7 +15,7 @@ Usage:
         --cache-dir /path/to/cache \
         --output configs/eval/coralscapes_v2_39_probe_k50.json \
         --per-class 50 \
-        --label-space legacy39
+        --label-space coralscapes39
 """
 
 from __future__ import annotations
@@ -26,11 +26,13 @@ from pathlib import Path
 
 from mermaidseg.data.config import DataSection
 from mermaidseg.data.factory import open_dataset_version
+from mermaidseg.evaluation.coralscapes_probe import CORALSCAPES39, CORALSCAPES_V2
 from mermaidseg.evaluation.coralscapes_probe_points import build_probe_points
 from mermaidseg.io import load_section
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET = "coralscapes_v2"
+_LABEL_SPACES = {"v2": CORALSCAPES_V2, "coralscapes39": CORALSCAPES39}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -61,9 +63,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--exclusion-radius", type=int, default=16)
     parser.add_argument(
         "--label-space",
-        choices=("v2", "legacy39"),
+        choices=tuple(_LABEL_SPACES),
         default="v2",
-        help="v2 keeps native ids 1..95. legacy39 remaps masks onto the original 39 classes "
+        help="v2 keeps native ids 1..95. coralscapes39 remaps masks onto the original 39 classes "
         "before selecting components. label_md5 stays the hash of the original mask.",
     )
     args = parser.parse_args(argv)
@@ -74,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
         per_class=args.per_class,
         min_component_size=args.min_component_size,
         exclusion_radius=args.exclusion_radius,
-        label_space=args.label_space,
+        label_space=_LABEL_SPACES[args.label_space],
     )
 
 

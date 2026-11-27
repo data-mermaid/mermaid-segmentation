@@ -43,7 +43,7 @@ Algorithm (full train census, target ``K`` points per class, default ``K=10``):
 5. The image list is exactly the images that own at least one point, sorted by
    site then stem.
 
-``--label-space legacy39`` remaps each mask through the published 95-to-39
+``--label-space coralscapes39`` remaps each mask through the published 95-to-39
 table before the census, and stores V1 class ids. ``label_md5`` is still the
 hash of the original 95-class mask. Each ``--per-class`` value is selected on
 its own; a smaller k is not a prefix of a larger one.
@@ -72,14 +72,15 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
-from PIL import Image
 from scipy import ndimage
 
+from mermaidseg.data.dense_read import read_label_mask
 from mermaidseg.evaluation.coralscapes_probe import (
-    CORALSCAPES_ID2NAME,
+    CORALSCAPES_V2,
     CORALSCAPES_V2_ID2NAME,
+    NATIVE_IDS,
     PROBE_GROUP,
-    coralscapes_v2_to_legacy_lut,
+    LabelSpace,
     label_md5,
     legacy_label,
 )
@@ -139,13 +140,6 @@ def train_records(version: DatasetVersion) -> list[ImageRecord]:
             )
         )
     return sorted(records, key=lambda record: (record.site, record.stem))
-
-
-def _load_label(path: Path) -> np.ndarray:
-    arr = np.asarray(Image.open(path))
-    if arr.ndim == 3:
-        arr = arr[..., 0]
-    return arr.astype(np.uint8, copy=False)
 
 
 def _class_name(class_id: int, id2name: dict[int, str] | None = None) -> str:
@@ -363,7 +357,7 @@ def census_train_components(
     by_class: dict[int, list[Component]] = defaultdict(list)
     n_images = len(records)
     for image_index, record in enumerate(records):
-        label = _load_label(Path(record.path))
+        label = read_label_mask(Path(record.path), NATIVE_IDS)
         if label.shape != (record.height, record.width):
             raise ProbeSelectionError(
                 f"{record.site}/{record.stem} label shape {label.shape} "
@@ -461,28 +455,19 @@ def _points_for_image(
     return points, errors, shortfalls
 
 
-def _resolve_label_space(
-    label_space: str,
-) -> tuple[int, dict[int, str], np.ndarray | None, str]:
-    if label_space == "v2":
-        return NUM_CLASSES, CORALSCAPES_V2_ID2NAME, None, "coralscapes_v2"
-    if label_space == "legacy39":
-        return 39, dict(CORALSCAPES_ID2NAME), coralscapes_v2_to_legacy_lut(), "coralscapes_legacy39"
-    raise ValueError(f"label_space must be 'v2' or 'legacy39', got {label_space!r}")
-
-
 def build_probe_points(
     version: DatasetVersion,
     output: Path,
     per_class: int,
     min_component_size: int,
     exclusion_radius: int,
-    label_space: str = "v2",
-    label_lut: np.ndarray | None = None,
-    id2name: dict[int, str] | None = None,
-    class_ids: list[int] | None = None,
+    label_space: LabelSpace = CORALSCAPES_V2,
 ) -> None:
-    """Select probe pixels from the train masks and write the probe JSON."""
+    """Select probe pixels from the train masks and write the probe JSON.
+
+    Masks are mapped through ``label_space.lut`` before the census, and every id of
+    ``label_space.id2name`` is probed.
+    """
     if per_class < 1:
         raise ValueError(f"--per-class must be >= 1, got {per_class}")
     if min_component_size < 1:
@@ -490,14 +475,9 @@ def build_probe_points(
     if exclusion_radius < 0:
         raise ValueError(f"--exclusion-radius must be >= 0, got {exclusion_radius}")
 
-    spec_classes, spec_names, spec_lut, json_label_space = _resolve_label_space(label_space)
-    lut = spec_lut if label_lut is None else np.asarray(label_lut, dtype=np.uint8)
-    names = spec_names if id2name is None else id2name
-    probed_ids = (
-        list(range(1, spec_classes + 1)) if class_ids is None else [int(i) for i in class_ids]
-    )
-    if not probed_ids:
-        raise ValueError("class_ids must contain at least one class")
+    lut = label_space.lut
+    names = label_space.id2name
+    probed_ids = sorted(names)
     component_classes = max(probed_ids)
 
     manifest = version.manifest
@@ -511,7 +491,7 @@ def build_probe_points(
         len(records),
         manifest.dataset,
         manifest.version,
-        json_label_space,
+        label_space.name,
         len(probed_ids),
         per_class,
     )
@@ -551,15 +531,14 @@ def build_probe_points(
                 f"expected {EXPECTED_HEIGHT}x{EXPECTED_WIDTH}"
             )
             continue
-        label = _load_label(Path(record.path))
+        label = read_label_mask(Path(record.path), NATIVE_IDS)
         if label.shape != (EXPECTED_HEIGHT, EXPECTED_WIDTH):
             placement_errors.append(
                 f"{record.site}/{record.stem} label shape {label.shape} is not "
                 f"{EXPECTED_HEIGHT}x{EXPECTED_WIDTH}"
             )
             continue
-        if lut is not None:
-            label = legacy_label(label, lut)
+        label = legacy_label(label, lut)
         points, errors, shortfalls = _points_for_image(
             label,
             jobs_by_image[image_index],
@@ -668,7 +647,7 @@ def build_probe_points(
     total_points = 0
     for image_index in ordered_image_indexes:
         record = records[image_index]
-        label = _load_label(Path(record.path))
+        label = read_label_mask(Path(record.path), NATIVE_IDS)
         points = sorted(
             image_points[image_index],
             key=lambda point: (
@@ -717,14 +696,14 @@ def build_probe_points(
         f"--per-class {per_class} "
         f"--min-component-size {min_component_size} "
         f"--exclusion-radius {exclusion_radius}"
-        + ("" if label_space == "v2" else f" --label-space {label_space}")
+        + ("" if label_space is CORALSCAPES_V2 else f" --label-space {label_space.name}")
     )
     payload = {
         "dataset": "josauder/coralscapesV2",
         "split": "train",
         "algorithm": "full_train_component_census_v2",
-        "label_space": json_label_space,
-        "num_classes": spec_classes if class_ids is None else component_classes,
+        "label_space": label_space.name,
+        "num_classes": label_space.num_classes,
         "points_per_class_target": per_class,
         "min_component_size": min_component_size,
         "connectivity": 8,

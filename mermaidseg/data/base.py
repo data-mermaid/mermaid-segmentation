@@ -10,9 +10,9 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from PIL import Image
 from torch.utils.data import Dataset
 
+from mermaidseg.data.dense_read import read_rgb
 from segdata_spec.read import DatasetVersion
 
 _MAX_LISTED_PATHS = 5
@@ -204,8 +204,7 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
 
     def _load(self, idx: int) -> tuple[Any, Any]:
         row = self.images.iloc[idx].to_dict()
-        with Image.open(self.version.image_path(row)) as handle:
-            image = np.asarray(handle.convert("RGB"))
+        image = read_rgb(self.version.image_path(row))
         mask = self._read_mask(row, (image.shape[0], image.shape[1]))
         if self.transform is not None:
             transformed = self.transform(image=image, mask=mask)

@@ -8,18 +8,17 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import yaml
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from mermaidseg.data.config import DataSection
+from mermaidseg.data.config import DataSection, SplitSelection
 from mermaidseg.evaluation import val_loss
 from mermaidseg.evaluation.val_loss import (
     _Accumulator,
     _bundle_config,
     _check_layout,
     evaluate_val_loss,
-    val_blocks_only,
+    split_blocks_only,
 )
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.loss import build_loss
@@ -28,6 +27,9 @@ from tests.conftest import IMAGE_SIZE, NUM_CLASSES
 from tests.mermaidseg.conftest import cbm_mask_config, cbm_meta, concept_keep, source_lookup
 
 NAMES = ["bleached", "anthropogenic", "sand"]
+_VAL_SECTION = DataSection.model_validate(
+    {"datasets": {"ds": {"version": "v", "manifest_sha256": "x", "val": {"groups": "all"}}}}
+)
 
 
 def test_accumulator_averages_each_key_over_the_batches_it_appears_in():
@@ -59,29 +61,18 @@ def test_layout_check_names_what_differs(registry_classes, concept_names, match)
         _check_layout(bundle, registry, concept_names)
 
 
-def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file(tmp_path):
-    data_yaml = tmp_path / "data.yaml"
-    data_yaml.write_text(
-        yaml.safe_dump(
-            {
-                "data": {
-                    "datasets": {
-                        "ds": {"version": "v1", "manifest_sha256": "x", "val": {"groups": "all"}}
-                    }
-                }
-            }
-        )
-    )
+def test_bundle_config_takes_the_model_and_training_sections_from_the_bundle():
     run = {
+        "data": {"datasets": {}},
         "model": {"name": "dpt", "input_size": [8, 8]},
         "training": {"batch_size": 2, "taxonomic_loss": {"kl_weight": 1.0}, "loss": {"a": 1}},
     }
     bundle = SimpleNamespace(config=run, input_size=(32, 64))
-    cfg = _bundle_config(data_yaml, bundle)
+    cfg = _bundle_config(bundle)
+    assert sorted(cfg) == ["model", "training"]
     assert cfg.model.name == "dpt"
     assert cfg.model.input_size == [32, 64]
     assert cfg.training.batch_size == 2
-    assert cfg.data.datasets.ds.version == "v1"
     cfg.training.pop("taxonomic_loss")
     cfg.training.loss.a = 9
     assert "taxonomic_loss" in run["training"]
@@ -89,28 +80,59 @@ def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file
     assert run["model"]["input_size"] == [8, 8]
 
 
-def test_val_blocks_only_keeps_the_val_block_of_each_dataset_that_has_one():
-    section = DataSection.model_validate(
+def _split_section() -> DataSection:
+    """``a`` has all three blocks; ``b`` only a train block, with transform and repeat."""
+    return DataSection.model_validate(
         {
             "datasets": {
                 "a": {
                     "version": "v",
                     "manifest_sha256": "x",
                     "train": {"groups": "all"},
-                    "val": {"groups": ["g1"]},
+                    "val": {"groups": ["g1"], "annotators": ["host"]},
                     "test": {"groups": ["g2"]},
                 },
-                "b": {"version": "v", "manifest_sha256": "x", "train": {"groups": "all"}},
+                "b": {
+                    "version": "v",
+                    "manifest_sha256": "x",
+                    "train": {
+                        "groups": ["g3"],
+                        "annotators": ["archived"],
+                        "transform": {"HorizontalFlip": {}},
+                        "repeat": 2,
+                    },
+                },
+                "c": {"version": "v", "manifest_sha256": "x", "test": {"groups": ["g4"]}},
             }
         }
     )
 
-    kept = val_blocks_only(section)
+
+def test_split_blocks_only_keeps_the_val_block_of_each_dataset_that_has_one():
+    kept = split_blocks_only(_split_section(), "val")
 
     assert list(kept.datasets) == ["a"]
     entry = kept.datasets["a"]
     assert (entry.train, entry.test) == (None, None)
-    assert entry.val is not None and entry.val.groups == ["g1"]
+    assert entry.val == SplitSelection(groups=["g1"], annotators=["host"])
+
+
+def test_split_blocks_only_moves_the_train_block_into_val_without_transform_or_repeat():
+    kept = split_blocks_only(_split_section(), "train")
+
+    assert list(kept.datasets) == ["a", "b"]
+    entry = kept.datasets["b"]
+    assert (entry.train, entry.test) == (None, None)
+    assert entry.val == SplitSelection(groups=["g3"], annotators=["archived"])
+    assert kept.datasets["a"].val == SplitSelection(groups="all")
+
+
+def test_val_loss_raises_when_no_dataset_has_the_split(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    with pytest.raises(ValueError, match="data section has no train split"):
+        harness.run(
+            tmp_path, section=_split_section().model_copy(update={"datasets": {}}), split="train"
+        )
 
 
 class _EchoModel(nn.Module):
@@ -139,7 +161,6 @@ class _Harness:
     def __init__(self, monkeypatch, datasets: dict):
         self.cfg = ConfigDict(
             {
-                "data": {"datasets": {}},
                 "model": {"input_size": [8, 8]},
                 "training": {"padding": 0, "taxonomic_loss": {"w": 1}, "loss": {}},
             }
@@ -183,7 +204,8 @@ class _Harness:
     def run(self, tmp_path, **kwargs):
         return evaluate_val_loss(
             bundle=self.bundle,  # type: ignore[arg-type]
-            data_config="data.yaml",
+            section=kwargs.pop("section", _VAL_SECTION),
+            split=kwargs.pop("split", "val"),
             cache_dir=kwargs.pop("cache_dir", "/cache"),
             output_dir=tmp_path,
             device=torch.device("cpu"),
@@ -277,7 +299,7 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
     assert harness.build_args["cache_dir"] == Path("/the/cache")
     assert harness.build_args["image_ids"] == {("ds", "val"): ["i1"]}
     assert result["settings"] == {
-        "data_config": "data.yaml",
+        "split": "val",
         "bundle": "bundle/path",
         "resolution": 8,
         "max_images_per_dataset": 1000,
@@ -289,17 +311,11 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
     assert (tmp_path / "scored" / "metrics.json").is_file()
 
 
-def test_val_loss_raises_when_the_data_config_has_no_val_split(tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="data.yaml has no val split"):
-        _Harness(monkeypatch, {}).run(tmp_path)
-
-
 def _cbm_scoring_config(schema) -> ConfigDict:
     """The CBM run config as ``evaluate_val_loss`` scores it: 0.5/0.5 reduction, named binaries."""
     cfg = cbm_mask_config()
     cfg.training.loss.binary_concept_names = schema.binary_names()
     cfg.training.padding = 0
-    cfg.data = {"datasets": {}}
     return cfg
 
 
@@ -341,7 +357,8 @@ def _run_real_val_loss(monkeypatch, tmp_path, schema, model, dataset, **kwargs):
     )
     result = evaluate_val_loss(
         bundle=bundle,  # type: ignore[arg-type]
-        data_config="data.yaml",
+        section=_VAL_SECTION,
+        split="val",
         cache_dir="/cache",
         output_dir=tmp_path,
         device=torch.device("cpu"),
