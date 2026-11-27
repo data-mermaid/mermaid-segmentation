@@ -52,7 +52,6 @@ class CoralNetSession:
         self.media = self.sessions.media()
         self.logged_in = False
         self._login_lock = threading.Lock()
-        self._cookie_gen = 0
         self._thread_local = threading.local()
         self._export_thread_local = threading.local()
 
@@ -122,8 +121,6 @@ class CoralNetSession:
             logger.warning("CoralNet session expired; logging in again")
             session.cookies.clear()
             self._perform_login(session)
-            if session is self.session:
-                self._cookie_gen += 1
 
     def login(self) -> bool:
         """Log the main session in to CoralNet.
@@ -134,7 +131,6 @@ class CoralNetSession:
         try:
             with self._login_lock:
                 self._perform_login(self.session)
-                self._cookie_gen += 1
             self.logged_in = True
             logger.info("CoralNet login successful for %s", self.username)
             return True
@@ -146,8 +142,7 @@ class CoralNetSession:
         """Return this thread's own session, with cookies copied from the main session.
 
         The session is created on first call and reused for later calls from the same
-        thread. Its cookies are copied from the main session at creation and copied again,
-        into the same session object, after each later login of the main session.
+        thread; the cookies are copied once, at creation.
 
         Safe for read-only requests (e.g. image URL resolution) where threads only
         consume server state. NOT safe for ``export_prep``-style endpoints that write to
@@ -157,14 +152,8 @@ class CoralNetSession:
         s = getattr(self._thread_local, "session", None)
         if s is None:
             s = self.sessions.coralnet()
+            s.cookies.update(self.session.cookies)
             self._thread_local.session = s
-            self._thread_local.cookie_gen = -1
-        if self._thread_local.cookie_gen != self._cookie_gen:
-            # The lock keeps the copy from seeing the main jar mid-relogin (cleared, not yet filled).
-            with self._login_lock:
-                s.cookies.clear()
-                s.cookies.update(self.session.cookies)
-                self._thread_local.cookie_gen = self._cookie_gen
         return s
 
     def _new_logged_in_session(self) -> requests.Session:
