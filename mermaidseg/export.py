@@ -259,7 +259,17 @@ def _require_empty_out_dir(out_dir: Path) -> None:
         raise ValueError(f"output directory {out_dir} exists and is not empty")
 
 
-def _require_label_space(source: Path, listed: Mapping[str, str]) -> None:
+def require_sidecar_label_space(run_dir: str | Path) -> None:
+    """Raise ValueError if ``run_dir``'s sidecar exists without a ``label_space`` section."""
+    path = Path(run_dir) / MODEL_JSON
+    if path.is_file() and "label_space" not in json.loads(path.read_text()):
+        raise ValueError(
+            f"{path} has no label_space section; "
+            "the run was trained before label spaces existed, so retrain it"
+        )
+
+
+def require_label_space(source: Path, listed: Mapping[str, str]) -> None:
     """Raise ValueError unless ``source`` holds every file of ``listed`` with its sha256."""
     if not source.is_dir():
         raise ValueError(f"label space directory not found: {source}")
@@ -369,7 +379,7 @@ def export_bundle(
             "the checkpoint was trained before label spaces existed, so retrain it"
         )
     label_space_source = checkpoint.parent / LABEL_SPACE_DIR
-    _require_label_space(label_space_source, sidecar["label_space"])
+    require_label_space(label_space_source, sidecar["label_space"])
     ckpt = read_checkpoint(
         checkpoint,
         required_keys=("config", "model_state_dict", "epoch", "global_step", "lineage"),

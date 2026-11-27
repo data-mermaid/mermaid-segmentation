@@ -45,6 +45,7 @@ from mermaidseg.run_setup import (
 )
 from mermaidseg.training import (
     _assemble_train_datasets,
+    _check_label_space_copy,
     _copy_label_space,
     _encoder_config,
     _lineage_params,
@@ -162,6 +163,28 @@ def test_copy_label_space_refuses_an_existing_copy_that_differs_naming_the_file(
 
     with pytest.raises(ValueError, match=r"\['meta\.yaml'\]"):
         _copy_label_space(files, target)
+
+
+def test_check_label_space_copy_accepts_an_absent_target(tmp_path):
+    _check_label_space_copy(_source_files(tmp_path), tmp_path / "label_space")
+
+
+def test_check_label_space_copy_accepts_a_matching_copy(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    _copy_label_space(files, target)
+
+    _check_label_space_copy(files, target)
+
+
+def test_check_label_space_copy_refuses_a_differing_copy_naming_the_file(tmp_path):
+    files = _source_files(tmp_path)
+    target = tmp_path / "label_space"
+    _copy_label_space(files, target)
+    (target / "classes.csv").write_text("changed")
+
+    with pytest.raises(ValueError, match=r"\['classes\.csv'\]"):
+        _check_label_space_copy(files, target)
 
 
 def _order(generator: torch.Generator) -> list[int]:

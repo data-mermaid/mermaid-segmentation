@@ -14,7 +14,11 @@ from botocore.exceptions import ClientError
 from safetensors.torch import load_file, save_file
 
 from mermaidseg import export
-from mermaidseg.export import _untied_cpu_state, write_sidecar
+from mermaidseg.export import (
+    _untied_cpu_state,
+    require_sidecar_label_space,
+    write_sidecar,
+)
 from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS
 from tests.mermaidseg.conftest import (
     DS_A,
@@ -415,3 +419,20 @@ def test_export_refuses_a_git_sha_that_is_not_40_lowercase_hex_without_calling_g
     monkeypatch.setattr(export.subprocess, "run", no_git)
     with pytest.raises(ValueError, match="40"):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+
+
+def test_resume_of_a_sidecar_without_a_label_space_section_says_to_retrain(tmp_path):
+    (tmp_path / MODEL_JSON).write_text(json.dumps({"architecture": "x"}))
+
+    with pytest.raises(ValueError, match=r"model.json has no label_space section; .*retrain it"):
+        require_sidecar_label_space(tmp_path)
+
+
+def test_resume_accepts_a_sidecar_with_a_label_space_section(tmp_path):
+    (tmp_path / MODEL_JSON).write_text(json.dumps({"label_space": {"classes.csv": "aa"}}))
+
+    require_sidecar_label_space(tmp_path)
+
+
+def test_resume_accepts_a_run_directory_without_a_sidecar(tmp_path):
+    require_sidecar_label_space(tmp_path)

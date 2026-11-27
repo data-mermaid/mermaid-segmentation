@@ -27,7 +27,7 @@ from mermaidseg.dataset_reconciliation.label_space import (
     META_YAML,
     SOURCE_LABELS_CSV,
 )
-from mermaidseg.export import write_sidecar
+from mermaidseg.export import require_sidecar_label_space, write_sidecar
 from mermaidseg.inference.bundle import sha256_file
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config, update_config_with_args
@@ -177,6 +177,25 @@ def _label_space_files(source: Path) -> list[Path]:
     return files + [acknowledged] if acknowledged.is_file() else files
 
 
+def _check_label_space_copy(files: list[Path], target: Path) -> None:
+    """Raise ValueError if the existing directory ``target`` differs from the label space ``files``.
+
+    An absent ``target`` passes. Reads only.
+    """
+    if not target.exists():
+        return
+    differing = [
+        p.name
+        for p in files
+        if not (target / p.name).is_file() or sha256_file(target / p.name) != sha256_file(p)
+    ]
+    if differing:
+        raise ValueError(
+            f"the run's label space copy {target} differs from the configured label space "
+            f"in {differing}; remove the copy or restore the label space"
+        )
+
+
 def _copy_label_space(files: list[Path], target: Path) -> dict[str, str]:
     """Copy the label space ``files`` into the directory ``target``; the sha256 of each copy.
 
@@ -187,18 +206,9 @@ def _copy_label_space(files: list[Path], target: Path) -> dict[str, str]:
     Raises:
         ValueError: An existing ``target`` differs from ``files``; the message names the files.
     """
+    _check_label_space_copy(files, target)
     if target.exists():
-        hashes = {
-            path.name: sha256_file(target / path.name) if (target / path.name).is_file() else ""
-            for path in files
-        }
-        differing = [p.name for p in files if hashes[p.name] != sha256_file(p)]
-        if differing:
-            raise ValueError(
-                f"the run's label space copy {target} differs from the configured label space "
-                f"in {differing}; remove the copy or restore the label space"
-            )
-        return hashes
+        return {path.name: sha256_file(target / path.name) for path in files}
     staging = target.with_name(f".{target.name}.partial")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir()
@@ -413,10 +423,12 @@ def run(args: argparse.Namespace) -> None:
     concept_id2name = schema.channel_id2name()
     run_dir = checkpoint_dir(args.output_dir, cfg.run_name)
     label_space_sha256: dict[str, str] = {}
+    label_space_files = _label_space_files(resolve_repo_path(cfg.training.label_space))
+    require_sidecar_label_space(run_dir)
+    _check_label_space_copy(label_space_files, run_dir / _RUN_LABEL_SPACE)
     if dist_ctx.is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
         write_resolved_config(cfg_logger, run_dir)
-        label_space_files = _label_space_files(resolve_repo_path(cfg.training.label_space))
         label_space_sha256 = _copy_label_space(label_space_files, run_dir / _RUN_LABEL_SPACE)
 
     meta_model = build_meta_model(cfg, registry, device)

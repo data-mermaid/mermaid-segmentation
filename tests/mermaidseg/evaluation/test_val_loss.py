@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -205,6 +206,7 @@ class _Harness:
             input_size=(8, 8),
             path="bundle/path",
             model=_EchoModel(),
+            metadata={"label_space": {}},
         )
 
     def run(self, tmp_path, *, label_space: bool = True, **kwargs):
@@ -343,6 +345,28 @@ def test_val_loss_refuses_a_bundle_without_a_label_space(tmp_path, monkeypatch):
     )
 
 
+def test_val_loss_refuses_a_bundle_whose_label_space_was_edited_after_export(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    space = tmp_path / "bundle" / "label_space"
+    space.mkdir(parents=True)
+    (space / "classes.csv").write_text("exported\n")
+    harness.bundle.metadata = {
+        "label_space": {"classes.csv": hashlib.sha256(b"exported\n").hexdigest()}
+    }
+    (space / "classes.csv").write_text("edited\n")
+
+    with pytest.raises(ValueError, match="differs from the sha256"):
+        harness.run(tmp_path)
+
+
+def test_val_loss_refuses_a_bundle_whose_metadata_has_no_label_space(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    harness.bundle.metadata = {}
+
+    with pytest.raises(ValueError, match="exported before label spaces existed"):
+        harness.run(tmp_path)
+
+
 def _cbm_scoring_config(schema) -> ConfigDict:
     """The CBM run config as ``evaluate_val_loss`` scores it: 0.5/0.5 reduction, named binaries."""
     cfg = cbm_mask_config()
@@ -386,6 +410,7 @@ def _run_real_val_loss(monkeypatch, tmp_path, schema, model, dataset, **kwargs):
         input_size=tuple(IMAGE_SIZE),
         path=tmp_path / "bundle",
         model=model,
+        metadata={"label_space": {}},
     )
     (tmp_path / "bundle" / "label_space").mkdir(parents=True)
     result = evaluate_val_loss(

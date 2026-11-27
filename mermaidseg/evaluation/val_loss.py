@@ -43,7 +43,7 @@ from mermaidseg.data.config import DataSection, DatasetEntry, Split, SplitSelect
 from mermaidseg.data.factory import build_datasets
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.evaluation.reporting import write_json
-from mermaidseg.export import LABEL_SPACE_DIR
+from mermaidseg.export import LABEL_SPACE_DIR, require_label_space
 from mermaidseg.inference.bundle import ModelBundle
 from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.data_parallel import build_step
@@ -168,16 +168,18 @@ def evaluate_val_loss(
     ``(dataset, "val")``, only those images (see :func:`mermaidseg.data.factory.build_datasets`).
 
     Raises:
-        ValueError: No dataset of ``section`` has a ``split`` block, or ``bundle`` has no
-            ``label_space/``.
+        ValueError: No dataset of ``section`` has a ``split`` block, ``bundle`` has no
+            ``label_space/`` or lists none in its metadata, or a file of ``label_space/``
+            is missing or differs from its sha256 in the metadata.
     """
     t0 = time.time()
     label_space_dir = Path(bundle.path) / LABEL_SPACE_DIR
-    if not label_space_dir.is_dir():
+    if not label_space_dir.is_dir() or "label_space" not in bundle.metadata:
         raise ValueError(
             f"bundle {bundle.path} has no label_space/; it was exported before label spaces "
             "existed, so re-export it from a retrained run"
         )
+    require_label_space(label_space_dir, bundle.metadata["label_space"])
     cfg = _bundle_config(bundle)
     resolution = bundle.input_size[0]
     cfg.run_name = name
