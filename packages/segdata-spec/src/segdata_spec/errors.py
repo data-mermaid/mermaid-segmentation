@@ -11,6 +11,10 @@ class PublishRefused(SegdataError):
     """Staging or publishing is refused: dirty or unpushed tree, or the version already exists."""
 
 
+class DirtyTree(SegdataError):
+    """Tracked files differ from HEAD, so the git sha does not describe the code that ran."""
+
+
 class ObjectExists(SegdataError):
     """A write-once staged file already exists with different bytes."""
 

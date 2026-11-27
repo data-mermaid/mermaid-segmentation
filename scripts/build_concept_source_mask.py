@@ -40,8 +40,8 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
 )
 from mermaidseg.dataset_reconciliation.concepts import DEFAULT_CLASS_TO_CONCEPTS_CSV
 from mermaidseg.io import REPO_ROOT, load_section
-from mermaidseg.lineage import git_state
 from mermaidseg.run_setup import DEFAULT_SCHEMA_CONFIG
+from segdata_spec.git import clean_git_state
 
 DATASET = "coralnet"
 
@@ -75,7 +75,9 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     split: Split = args.split
 
-    git = git_state()
+    git = clean_git_state(
+        Path(__file__).resolve().parent, inputs=(args.data_config, args.schema_config)
+    )
 
     section = DataSection.model_validate(load_section(args.data_config, "data"))
     annotations, dataset_version = section_point_annotations(
@@ -101,7 +103,7 @@ def main(argv: list[str] | None = None) -> None:
         "dataset": DATASET,
         "dataset_version": dataset_version,
         "split": split,
-        **concept_sidecar_meta(args.data_config, args.concepts, args.schema_config, git),
+        **concept_sidecar_meta(args.data_config, args.concepts, args.schema_config, git.sha),
         "n_sources": n_sources,
         "n_binary_concepts": n_concepts,
         "n_pairs": n_sources * n_concepts,

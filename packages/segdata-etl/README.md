@@ -301,11 +301,11 @@ Outputs, all in `--out-dir`:
 | File | Content |
 |---|---|
 | `coralnet.csv` | The split file: `group`, `source_id`, `split_group`, `split`. `group` is `s<source_id>`. `split` is `train`, `val`, `test` or `excluded`. An `excluded` row has a blank `split_group`, and a blank `split_group` means none. An id in `--exclude-sources` that is not in the curated version has no row. |
-| `coralnet.meta.yaml` | Pins, input file paths and sha256, excluded sources, parameters, git SHA and a summary. |
+| `coralnet.meta.yaml` | Pins, input file paths and sha256, excluded sources, parameters, git SHA (`git: {sha}`) and a summary. |
 | `class_distribution.csv` | Points per class in each split. |
 | `summary.json` | Sources, groups, images and points per split, plus classes missing from or thin in val and test. |
 
-`build` writes its outputs only to `--out-dir` and the synced tables to `--cache-dir`. Point `--out-dir` at a scratch directory, not `configs/splits/`, then copy the reviewed output in by hand. The change is then reviewed in git.
+`build` refuses a tree where tracked files differ from `HEAD` before it writes anything, and needs no push. It writes its outputs only to `--out-dir` and the synced tables to `--cache-dir`. Point `--out-dir` at a scratch directory, not `configs/splits/`, then copy the reviewed output in by hand. The change is then reviewed in git.
 
 ```bash
 uv run --package segdata-etl segdata split build \

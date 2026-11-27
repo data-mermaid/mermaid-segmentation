@@ -11,7 +11,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from mermaidseg.data import PointDataset
-from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path
+from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.concept_removal import CoverageRule, concept_coverage
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
@@ -30,7 +30,6 @@ BLEACHED = CHANNELS.index("bleached")
 def _write_mask(
     tmp_path,
     rows: list[tuple[str, str]],
-    concepts_csv=None,
     source_ids: list[str] | None = None,
 ) -> Any:
     """Write a mask CSV and sidecar; ``source_ids`` (the counted sources) default to the rows'."""
@@ -43,8 +42,6 @@ def _write_mask(
         "rule": "only_false",
         "source_ids": source_ids if source_ids is not None else sorted({s for s, _ in rows}),
     }
-    if concepts_csv is not None:
-        meta["concepts_csv_sha1"] = file_sha1(concepts_csv)
     meta_path(path).write_text(yaml.safe_dump(meta))
     return path
 
@@ -77,16 +74,6 @@ def test_mask_skips_removed_concepts(tmp_path):
         load_concept_source_mask(path, _schema())
     mask = load_concept_source_mask(path, _schema(), removed_concepts=["tubular"])
     assert mask.num_masked == 1
-
-
-def test_mask_checks_the_concept_table_sha1(tmp_path):
-    table = tmp_path / "concepts.csv"
-    table.write_text("a,b\n1,2\n")
-    path = _write_mask(tmp_path, [("1", "bleached")], concepts_csv=table)
-    load_concept_source_mask(path, _schema(), concepts_csv=table)
-    table.write_text("a,b\n1,3\n")
-    with pytest.raises(ValueError, match="sha1"):
-        load_concept_source_mask(path, _schema(), concepts_csv=table)
 
 
 def test_apply_zeroes_only_masked_channels():

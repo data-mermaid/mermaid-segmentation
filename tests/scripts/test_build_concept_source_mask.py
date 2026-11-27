@@ -11,6 +11,8 @@ import pytest
 import yaml
 
 import scripts.build_concept_source_mask as script
+from segdata_spec.errors import DirtyTree
+from segdata_spec.git import GitState
 from segdata_spec.manifest import Pin
 from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
@@ -31,6 +33,19 @@ POINTS = [
     ("b1", 1, 1, 5),
     ("c1", 0, 0, 4),
 ]
+
+
+@pytest.fixture(autouse=True)
+def clean_tree(monkeypatch) -> list[tuple[Path, ...]]:
+    """The builders record the sha of a clean tree; return the ``inputs`` each check received."""
+    checked: list[tuple[Path, ...]] = []
+
+    def clean(_start, *, inputs=()):
+        checked.append(tuple(inputs))
+        return GitState("abc", False, True)
+
+    monkeypatch.setattr(script, "clean_git_state", clean)
+    return checked
 
 
 @pytest.fixture
@@ -112,7 +127,8 @@ def test_the_mask_lists_the_pairs_with_false_points_and_no_true_points(inputs, t
     ]
     meta = yaml.safe_load((tmp_path / "mask.meta.yaml").read_text())
     assert meta["source_ids"] == ["7", "30"]
-    assert {"git_sha", "git_dirty"} <= set(meta)
+    assert meta["git_sha"] == "abc"
+    assert not {"git_dirty", "data_config_sha1"} & set(meta)
     assert "git_commit" not in meta
     assert (meta["split"], meta["n_points"], meta["n_masked"]) == ("train", 5, 2)
 
@@ -180,15 +196,21 @@ def test_main_refuses_a_dense_version_without_points(tmp_path):
         _run(_inputs(tmp_path, cache_dir, pin, {"groups": ["s99"]}), tmp_path / "mask.csv")
 
 
-def test_git_state_is_read_before_the_output_is_written(inputs, tmp_path, monkeypatch):
+def test_a_dirty_tree_refuses_before_any_output_is_written(inputs, tmp_path, monkeypatch):
     out = tmp_path / "new_dir" / "mask.csv"
-    monkeypatch.setattr(
-        script,
-        "git_state",
-        lambda: {"git_sha": "x", "git_dirty": out.exists()},
-    )
 
-    _run(inputs, out)
+    def refuse(_start, *, inputs=()):
+        raise DirtyTree("dirty")
 
-    meta = yaml.safe_load((out.parent / "mask.meta.yaml").read_text())
-    assert (meta["git_sha"], meta["git_dirty"]) == ("x", False)
+    monkeypatch.setattr(script, "clean_git_state", refuse)
+
+    with pytest.raises(DirtyTree):
+        _run(inputs, out)
+
+    assert not out.parent.exists()
+
+
+def test_the_data_and_schema_configs_are_checked_as_tracked_inputs(inputs, tmp_path, clean_tree):
+    _run(inputs, tmp_path / "mask.csv")
+
+    assert clean_tree == [(inputs["data_config"], inputs["data_config"])]

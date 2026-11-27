@@ -44,7 +44,7 @@ from segdata_etl.splits.inputs import (
     require_crc64nvme,
     sync_tables,
 )
-from segdata_spec.git import GitState, probe_git
+from segdata_spec.git import GitState, clean_git_state
 from segdata_spec.manifest import Manifest, Pin
 from segdata_spec.read import open_taxonomy
 from segdata_spec.splits import read_split_file
@@ -383,7 +383,7 @@ def _meta(
         },
         "excluded_sources": sorted(excluded),
         "parameters": asdict(params),
-        "git": {"sha": git.sha, "dirty": git.dirty},
+        "git": {"sha": git.sha},
         "summary": summary,
     }
 
@@ -427,7 +427,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         ValueError: The raw pin is not a parent of the curated version, or a raw image of a
             universe source has no CRC64NVME.
     """
-    git = probe_git(Path(__file__).resolve().parent)
+    git = clean_git_state(Path(__file__).resolve().parent)
     datasets, taxonomy = _pins(args)
     versions = sync_tables(client, datasets, args.cache_dir, args.bucket, taxonomy)
     curated = versions[DATASET]

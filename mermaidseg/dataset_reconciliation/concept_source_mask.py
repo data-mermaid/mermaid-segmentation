@@ -28,7 +28,6 @@ from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.data.point_dataset import select_points
 from mermaidseg.dataset_reconciliation.artifact_meta import (
     check_label_keys,
-    file_sha1,
     read_sidecar,
     select_groups,
     source_id_of_group,
@@ -206,7 +205,6 @@ def load_concept_source_mask(
     path: str | Path,
     schema: ConceptSchema,
     *,
-    concepts_csv: str | Path | None = None,
     removed_concepts: Iterable[str] = (),
 ) -> ConceptSourceMask:
     """Read a mask CSV from ``scripts/build_concept_source_mask.py`` into a keep table.
@@ -214,17 +212,9 @@ def load_concept_source_mask(
     Checks, before training starts:
     - every concept is a binary channel of ``schema``; concepts in ``removed_concepts`` (removed
       from the run by ``training.concept_removal``) are skipped, anything else is an error;
-    - with ``concepts_csv``, its sha1 matches the one recorded in the ``.meta.yaml`` sidecar, so a
-      mask built for another concept table is refused;
     """
     path = Path(path)
     meta = read_sidecar(path, artifact="concept source mask")
-    if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
-        raise ValueError(
-            f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
-            f"but this run uses {concepts_csv} (sha1 {file_sha1(concepts_csv)}). "
-            "Rebuild it with scripts/build_concept_source_mask.py."
-        )
 
     df = pd.read_csv(path, dtype={"source_id": str, "concept": str})
 

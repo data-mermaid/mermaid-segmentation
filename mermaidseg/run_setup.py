@@ -53,12 +53,12 @@ def target_labels(training_cfg: Any) -> list[str]:
     return sorted(dict.fromkeys(str(label).lower() for label in training_cfg.class_subset))
 
 
-def concept_removal_list(training_cfg: Any, mapping_path: str | Path) -> list[str]:
+def concept_removal_list(training_cfg: Any) -> list[str]:
     """Channel names listed by ``training.concept_removal`` (a CSV path), or none."""
     path = training_cfg["concept_removal"]
     if not path:
         return []
-    return load_concept_removal(resolve_repo_path(path), concepts_csv=mapping_path)
+    return load_concept_removal(resolve_repo_path(path))
 
 
 def load_run_concept_source_mask(
@@ -68,12 +68,10 @@ def load_run_concept_source_mask(
     path = training_cfg.concept_source_mask
     if not path:
         return None
-    mapping_path = concept_mapping_path(training_cfg)
     return load_concept_source_mask(
         resolve_repo_path(path),
         schema,
-        concepts_csv=mapping_path,
-        removed_concepts=concept_removal_list(training_cfg, mapping_path),
+        removed_concepts=concept_removal_list(training_cfg),
     )
 
 
@@ -117,7 +115,7 @@ def build_registry(
             f"({schema_config})"
         )
     mapping_path = concept_mapping_path(training_cfg)
-    removed = concept_removal_list(training_cfg, mapping_path)
+    removed = concept_removal_list(training_cfg)
     schema = ConceptSchema.from_csv(mapping_path, sources=schema_sources, removed_concepts=removed)
     if removed:
         print(

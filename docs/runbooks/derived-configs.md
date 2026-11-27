@@ -18,7 +18,7 @@ Two committed configs are built by scripts from `configs/data_config.yaml`, the 
 
 Both training configs (`configs/training_config_cbm_final.yaml` and `configs/training_config_cbm_final_hires.yaml`) point at the removal list and the source mask.
 
-Each CSV has a `.meta.yaml` sidecar beside it. It records the inputs, their sha1 hashes, the dataset versions, the full commit sha that built it (`git_sha`) and whether tracked files differed from that commit (`git_dirty`). To see whether a CSV is stale, compare its recorded inputs with the current files.
+Each CSV has a `.meta.yaml` sidecar beside it. It records the inputs, the sha1 hash of the concept table (`concepts_csv_sha1`), the dataset versions and the full commit sha that built it (`git_sha`). To see whether a CSV is stale, compare its recorded inputs with the current files. A test in CI, `tests/configs/test_derived_configs.py`, checks each committed training config. For every `training.concept_removal` and `training.concept_source_mask` CSV it names, the sidecar's `concepts_csv_sha1` must match the file at that config's `training.concept_mapping_path`. A missing sidecar fails the test.
 
 The CoralscapesV2 probe point sets are derived too. They belong to evaluation; see [Rebuild the probe point sets](evaluate-a-model.md#rebuild-the-probe-point-sets).
 
@@ -66,9 +66,9 @@ The `.meta.yaml` sidecar lists the CoralNet sources that the mask was built from
 
 ## After a rebuild
 
-1. Build from a clean, committed tree. A dirty tree is recorded in the sidecar, not refused. Each builder reads the git state before it writes, so its own CSV and sidecar do not mark the tree dirty. If you rebuild both configs, write the first one outside the repo (or commit it) before you build the second; otherwise the second build sees a dirty tree. Before you commit, check that each sidecar says `git_dirty: false`.
+1. Commit the input change first (for example `configs/class_to_concepts.csv`), then build from that clean tree. Each builder refuses a tree where tracked files differ from `HEAD` before it writes anything, and it refuses a `--data-config` or `--schema-config` that is not a git-tracked file of the repo (`DirtyTree`). The sidecar's `git_sha` is the input commit. If you rebuild both configs, commit the first one's output before you build the second, or write it outside the repo; otherwise the second build sees a dirty tree.
 2. Review the diff of each CSV and its `.meta.yaml`.
-3. Commit the derived configs together with the input change that caused them.
+3. Commit the derived CSVs and their sidecars.
 4. For SageMaker, merge and build the image again. A job reads `configs/` from its image. See [Build the training image](train-on-sagemaker.md#build-the-training-image).
 
 A change to the derived configs changes model outputs. Run the evaluation and put the metrics in the PR. See [Compare two models](evaluate-a-model.md#compare-two-models).
@@ -79,4 +79,5 @@ A change to the derived configs changes model outputs. Run the evaluation and pu
 |---|---|---|
 | `NotSynced` from a builder | `--cache-dir` has no sync marker for a version that the data config selects. | Run `scripts/sync_data.py` with the same data config and `--cache-dir`. |
 | `FileNotFoundError` for a manifest or table | The cache is empty, or was synced from a different data config. | Run `scripts/sync_data.py` with the same data config and `--cache-dir`. |
-| At training start, `ValueError: <path> was built for a concept table with sha1 ..., but this run uses ... (sha1 ...)` from `load_concept_removal` or `load_concept_source_mask` | `configs/class_to_concepts.csv` changed after the CSV was built. | Rebuild both derived configs, in the order of this page. |
+| `DirtyTree` from a builder | Tracked files differ from `HEAD`, or a `--data-config` or `--schema-config` is not a git-tracked file. | Commit or stash the changes, then build again. If the dirt is the first config's output, commit it before you build the second. For an untracked input, commit the input or pass a tracked file. |
+| `tests/configs/test_derived_configs.py` fails in CI | `configs/class_to_concepts.csv` changed after a sidecar was built, so its `concepts_csv_sha1` no longer matches. | Rebuild both derived configs, in the order of this page. |

@@ -44,15 +44,6 @@ def _git_dirty() -> bool:
     return True if out is None else bool(out.strip())
 
 
-def git_state() -> dict[str, str | bool | None]:
-    """``{"git_sha", "git_dirty"}`` of the checkout.
-
-    ``git_sha`` is None when git is unavailable; ``git_dirty`` is a bool and counts an unreadable
-    tree as dirty.
-    """
-    return {"git_sha": _git_sha(), "git_dirty": _git_dirty()}
-
-
 def _uv_lock_sha256() -> str | None:
     lock = Path(REPO_ROOT) / UV_LOCK
     if not lock.is_file():

@@ -69,7 +69,7 @@ def test_read_checkpoint_names_the_file_and_the_missing_key(tmp_path):
 
 @pytest.mark.parametrize("path", [None])
 def test_concept_removal_list_is_empty_without_a_removal_file(path):
-    assert concept_removal_list({"concept_removal": path}, "unused.csv") == []
+    assert concept_removal_list({"concept_removal": path}) == []
 
 
 @pytest.mark.parametrize("path", [None])

@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from mermaidseg.data.config import DataSection
-from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path
+from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.concept_removal import (
     concept_coverage,
     load_concept_removal,
@@ -22,11 +22,10 @@ from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
 
-def _write_removal(tmp_path, concepts: list[str], *, sha1: str | None = None):
+def _write_removal(tmp_path, concepts: list[str]):
     path = tmp_path / "removal.csv"
     pd.DataFrame({"concept": concepts, "kind": "x"}).to_csv(path, index=False)
-    meta = {} if sha1 is None else {"concepts_csv_sha1": sha1}
-    meta_path(path).write_text(yaml.safe_dump(meta))
+    meta_path(path).write_text(yaml.safe_dump({}))
     return path
 
 
@@ -45,24 +44,6 @@ def test_load_without_a_sidecar_raises_file_not_found(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="no sidecar"):
         load_concept_removal(path)
-
-
-def test_load_accepts_a_matching_concept_table_sha1_and_refuses_a_changed_table(tmp_path):
-    table = tmp_path / "concepts.csv"
-    table.write_text("a,b\n1,2\n")
-    path = _write_removal(tmp_path, ["tubular"], sha1=file_sha1(table))
-
-    assert load_concept_removal(path, concepts_csv=table) == ["tubular"]
-
-    table.write_text("a,b\n1,3\n")
-    with pytest.raises(ValueError, match="sha1"):
-        load_concept_removal(path, concepts_csv=table)
-
-
-def test_load_ignores_the_sha1_when_no_concept_table_is_given(tmp_path):
-    path = _write_removal(tmp_path, ["tubular"], sha1="not-a-real-digest")
-
-    assert load_concept_removal(path) == ["tubular"]
 
 
 # ---------- removed_concepts ----------

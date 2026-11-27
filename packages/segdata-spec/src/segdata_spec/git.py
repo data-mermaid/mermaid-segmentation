@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from segdata_spec.errors import PublishRefused
+from segdata_spec.errors import DirtyTree, PublishRefused
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,38 @@ def find_repo_root(start: Path) -> Path:
         if (directory / ".git").exists() and (directory / "uv.lock").is_file():
             return directory
     raise FileNotFoundError(f"no git root holding uv.lock at or above {start}")
+
+
+def _is_tracked(repo_dir: Path, path: Path) -> bool:
+    """Whether ``path`` is a file tracked by the repo at ``repo_dir``; False outside it."""
+    result = subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo_dir), "ls-files", "--error-unmatch", "--", str(path.resolve())],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def clean_git_state(start: Path, *, inputs: Sequence[Path] = ()) -> GitState:
+    """Probe the repo root above ``start``; require tracked files to match HEAD and ``inputs`` tracked.
+
+    Untracked files do not make the tree dirty, so an input file the recorded sha must pin is
+    checked to be tracked in the repo. Relative ``inputs`` resolve against the current directory.
+
+    Raises:
+        FileNotFoundError: No repo root holding ``uv.lock`` is found.
+        DirtyTree: Tracked files differ from HEAD, or an input is not a tracked file of the repo
+            (untracked, or outside it).
+    """
+    root = find_repo_root(start)
+    git = probe_git(root)
+    if git.dirty:
+        raise DirtyTree("working tree has uncommitted changes to tracked files")
+    for path in inputs:
+        if not _is_tracked(root, path):
+            raise DirtyTree(f"{path} is not a git-tracked file of {root}")
+    return git
 
 
 @dataclass(frozen=True)
