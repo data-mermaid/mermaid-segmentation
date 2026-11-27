@@ -15,11 +15,10 @@ from typing import Any
 
 from segdata_etl.common.cli_flags import pin_flags
 from segdata_etl.common.featurevector import gather_features, read_extractor_spec, stage_features
-from segdata_etl.common.stage import DEFAULT_CACHE_DIR
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR, Publishable, publishable_repo
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.features import check_claimed_extractor
-from segdata_spec.git import GitState, probe_git, refuse_unpublishable
 from segdata_spec.layout import MANIFEST_NAME, feature_set_prefix
 from segdata_spec.manifest import FeatureSetPin, Pin
 from segdata_spec.read import open_tables
@@ -27,9 +26,6 @@ from segdata_spec.s3 import exists
 from segdata_spec.sync import sync_tables
 
 logger = logging.getLogger(__name__)
-
-# The repo root, which holds ``uv.lock`` and the git checkout that stages the features.
-REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -78,7 +74,7 @@ def attach(
     workers: int,
     allow_missing: bool,
     command: str,
-    git: GitState,
+    repo: Publishable,
 ) -> FeatureSetPin:
     """Stage the existing vectors of a published version as feature set ``family``; write nothing to S3.
 
@@ -129,8 +125,8 @@ def attach(
         extractor=extractor,
         allow_missing=allow_missing,
         command=command,
-        repo_dir=REPO_ROOT,
-        git=git,
+        repo_dir=repo.root,
+        git=repo.git,
     )
     logger.info(
         "staged %s of %s %s (set manifest sha256 %s): %d to copy, %d adopted, %d missing",
@@ -164,12 +160,12 @@ def run(args: argparse.Namespace, client: Any) -> int:
     """Run ``segdata features attach`` from parsed arguments.
 
     Raises:
+        FileNotFoundError: No repo root holding ``uv.lock`` is found.
         PublishRefused: The git tree is dirty or unpushed, or has no ``uv.lock``; raised before
             any S3 call.
     """
     extractor = read_extractor_spec(args.extractor_spec)
-    git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git, REPO_ROOT)
+    repo = publishable_repo()
     attach(
         client,
         Pin(name=args.dataset, version=args.version, manifest_sha256=args.manifest_sha256),
@@ -181,6 +177,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         workers=args.workers,
         allow_missing=args.allow_missing,
         command=_command_line(args),
-        git=git,
+        repo=repo,
     )
     return 0

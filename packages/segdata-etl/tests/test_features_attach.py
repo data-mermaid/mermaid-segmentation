@@ -13,7 +13,7 @@ import pytest
 from common.test_featurevector import featurevector_bytes
 from s3_fake import FakeS3, client_error, crc64nvme, md5_hex
 
-from segdata_etl import cli, features
+from segdata_etl import cli
 from segdata_etl.common.featurevector import FeatureVectorsInvalid, FeatureVectorsMissing
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ExtractorMismatch, PinMismatch, PublishRefused
@@ -45,8 +45,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_bytes(b"lock")
-    monkeypatch.setattr(features, "REPO_ROOT", root)
-    monkeypatch.setattr(features, "probe_git", lambda _: CLEAN_GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
