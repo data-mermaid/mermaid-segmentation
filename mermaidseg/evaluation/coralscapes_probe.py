@@ -42,17 +42,18 @@ import hashlib
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
-from PIL import Image
 from tqdm import tqdm
 
+from mermaidseg.data.dense_read import read_label_mask, read_rgb
 from mermaidseg.dataset_reconciliation.concepts import parse_concept_cell, read_class_to_concepts
 from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
@@ -349,14 +350,7 @@ def coralscapes_v2_to_legacy_lut() -> NDArray[np.uint8]:
     return lut
 
 
-def _to_label(arr_like: Any) -> NDArray[np.uint8]:
-    arr = np.asarray(arr_like)
-    if arr.ndim == 3:
-        arr = arr[..., 0]
-    return arr.astype(np.uint8, copy=False)
-
-
-def label_md5(arr: NDArray[np.uint8]) -> str:
+def label_md5(arr: NDArray[np.integer]) -> str:
     """Return the md5 hex digest of a label mask as uint8 bytes."""
     return hashlib.md5(np.ascontiguousarray(arr, dtype=np.uint8).tobytes()).hexdigest()
 
@@ -509,84 +503,67 @@ def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArr
 # --------------------------------------------------------------------------- #
 # Image source.
 # --------------------------------------------------------------------------- #
-def _read_rgb(path: Path) -> NDArray[np.uint8]:
-    with Image.open(path) as handle:
-        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
+_NATIVE_IDS = NUM_CLASSES + 1  # native Coralscapes v2 ids 0..95
 
 
-def _read_label(path: Path) -> NDArray[np.uint8]:
-    with Image.open(path) as handle:
-        return _to_label(handle)
+def dense_images(version: DatasetVersion) -> pd.DataFrame:
+    """Return the images of a dense ``coralscapes_v2`` version sorted by ``image_id``.
 
-
-class VersionSource:
-    """Images and native label masks of a synced ``coralscapes_v2`` dataset version."""
-
-    def __init__(self, version: DatasetVersion):
-        """Index the version's images by group.
-
-        Args:
-            version: The opened ``coralscapes_v2`` version (a dense version).
-
-        Raises:
-            ValueError: The version is not dense.
-        """
-        if version.manifest.kind != "dense":
-            raise ValueError(
-                f"Coralscapes probes read a dense version; {version.manifest.dataset} "
-                f"{version.manifest.version} is {version.manifest.kind!r}"
-            )
-        self.version = version
-        self.images = version.images.to_pandas().sort_values("image_id").reset_index(drop=True)
-
-    def _rows(self, group: str) -> list[dict[str, Any]]:
-        return self.images[self.images["group"] == group].to_dict("records")
-
-    def _load(self, row: Mapping[str, Any]) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
-        return (
-            _read_rgb(self.version.image_path(row)),
-            _read_label(self.version.mask_path(row)),
+    Raises:
+        ValueError: The version is not dense.
+    """
+    if version.manifest.kind != "dense":
+        raise ValueError(
+            f"Coralscapes probes read a dense version; {version.manifest.dataset} "
+            f"{version.manifest.version} is {version.manifest.kind!r}"
         )
+    return version.images.to_pandas().sort_values("image_id").reset_index(drop=True)
 
-    def train_image_label(self, entry: dict) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
-        """Load the train image and label of a probe-set entry.
 
-        Args:
-            entry: Probe image entry with ``site``, ``stem`` and ``label_md5``.
+def split_rows(images: pd.DataFrame, split: str) -> list[dict[str, Any]]:
+    """Return the rows of a split's group, in ``image_id`` order."""
+    return images[images["group"] == _SPLIT_GROUPS[split]].to_dict("records")
 
-        Returns:
-            The RGB image and the label map.
 
-        Raises:
-            KeyError: No ``train`` group image has the entry's ``stem`` as ``image_id``.
-            ValueError: The version's label md5 differs from the entry's ``label_md5``.
-        """
-        match = self.images[
-            (self.images["group"] == PROBE_GROUP) & (self.images["image_id"] == entry["stem"])
-        ]
-        if match.empty:
-            raise KeyError(
-                f"Probe image {entry['site']}/{entry['stem']} is not a {PROBE_GROUP!r} image of "
-                f"{self.version.manifest.dataset} {self.version.manifest.version}"
-            )
-        img, lab = self._load(match.iloc[0].to_dict())
-        actual = label_md5(lab)
-        if actual != entry["label_md5"]:
-            raise ValueError(
-                f"Label md5 mismatch for {entry['site']}/{entry['stem']}: the probe set has "
-                f"{entry['label_md5']}, the version's mask has {actual}"
-            )
-        return img, lab
+def load_row(version: DatasetVersion, row: Mapping[str, Any]) -> tuple[NDArray, NDArray]:
+    """Load the RGB image and native label mask of an image row."""
+    return (
+        read_rgb(version.image_path(row)),
+        read_label_mask(version.mask_path(row), _NATIVE_IDS),
+    )
 
-    def iter_split(self, split: str) -> Iterator[tuple[str, NDArray[np.uint8], NDArray[np.uint8]]]:
-        """Yield ``(image_id, image, label)`` for every image of a split, by ``image_id``."""
-        for row in self._rows(_SPLIT_GROUPS[split]):
-            img, lab = self._load(row)
-            yield str(row["image_id"]), img, lab
 
-    def num_split(self, split: str) -> int:
-        """Return the number of images in a split."""
-        return len(self._rows(_SPLIT_GROUPS[split]))
+def load_probe_entry(
+    version: DatasetVersion, frame: pd.DataFrame, entry: dict
+) -> tuple[NDArray, NDArray]:
+    """Load the train image and label of a probe-set entry.
+
+    Args:
+        version: The opened dense ``coralscapes_v2`` version.
+        frame: The version's images, from :func:`dense_images`.
+        entry: Probe image entry with ``site``, ``stem`` and ``label_md5``.
+
+    Returns:
+        The RGB image and the native label map.
+
+    Raises:
+        KeyError: No ``train`` group image has the entry's ``stem`` as ``image_id``.
+        ValueError: The version's label md5 differs from the entry's ``label_md5``.
+    """
+    match = frame[(frame["group"] == PROBE_GROUP) & (frame["image_id"] == entry["stem"])]
+    if match.empty:
+        raise KeyError(
+            f"Probe image {entry['site']}/{entry['stem']} is not a {PROBE_GROUP!r} image of "
+            f"{version.manifest.dataset} {version.manifest.version}"
+        )
+    img, lab = load_row(version, match.iloc[0].to_dict())
+    actual = label_md5(lab)
+    if actual != entry["label_md5"]:
+        raise ValueError(
+            f"Label md5 mismatch for {entry['site']}/{entry['stem']}: the probe set has "
+            f"{entry['label_md5']}, the version's mask has {actual}"
+        )
+    return img, lab
 
 
 # --------------------------------------------------------------------------- #
@@ -616,7 +593,7 @@ def _sample_activated(
 
 
 def _extract_probe_features(
-    predictor: CBMPredictor, source: VersionSource, images: list[dict]
+    predictor: CBMPredictor, version: DatasetVersion, frame: pd.DataFrame, images: list[dict]
 ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
     feats: list[NDArray[np.float32]] = []
     labels: list[int] = []
@@ -624,7 +601,7 @@ def _extract_probe_features(
         pts = entry["points"]
         if not pts:
             continue
-        image_np, label_np = source.train_image_label(entry)
+        image_np, label_np = load_probe_entry(version, frame, entry)
         what = f"{entry.get('site')}/{entry.get('stem')}"
         _require_rgb(image_np, what)
         _require_label(label_np, what)
@@ -717,7 +694,8 @@ def _evaluate_split(
     *,
     split: str,
     predictor: CBMPredictor,
-    source: VersionSource,
+    version: DatasetVersion,
+    frame: pd.DataFrame,
     weff: torch.Tensor,
     beff: torch.Tensor,
     classes: torch.Tensor,
@@ -759,24 +737,18 @@ def _evaluate_split(
         write_json(out_dir / "metrics.json", results)
         return scores
 
-    n_images = source.num_split(split)
+    n_images = len(split_rows(frame, split))
     if max_images is not None:
         n_images = min(n_images, max_images)
     t0 = time.time()
     processed = 0
-    for _key, image_np, label_np in tqdm(
-        source.iter_split(split), total=n_images, desc=f"dense {split} (concepts)"
-    ):
+    for row in tqdm(split_rows(frame, split), total=n_images, desc=f"dense {split} (concepts)"):
+        image_np, label_np = load_row(version, row)
         if max_images is not None and processed >= max_images:
             break
         what = f"{split} image {processed}"
         _require_rgb(image_np, what)
         _require_label(label_np, what)
-        if int(label_np.min()) < 0 or int(label_np.max()) > NUM_CLASSES:
-            raise RuntimeError(
-                f"{what} has label ids outside 0..{NUM_CLASSES} "
-                f"(min={int(label_np.min())}, max={int(label_np.max())})"
-            )
         activated = _activated_concepts(predictor, image_np)
         if int(activated.shape[0]) != len(concept_names):
             raise RuntimeError(
@@ -877,10 +849,10 @@ def evaluate_coralscapes_probe(
         for concept in REPORTED_BINARY_CONCEPTS
     }
 
-    source = VersionSource(version)
+    frame = dense_images(version)
     kind = "concepts"
     logger.info("=== CoralscapesV2 linear probe: feature kind = %s ===", kind)
-    X, y = _extract_probe_features(predictor, source, images)
+    X, y = _extract_probe_features(predictor, version, frame, images)
     classes_present = sorted({int(c) for c in y})
     logger.info(
         "[coralscapes/%s] probe features: X=%s, %d classes present",
@@ -903,7 +875,8 @@ def evaluate_coralscapes_probe(
         split: _evaluate_split(
             split=split,
             predictor=predictor,
-            source=source,
+            version=version,
+            frame=frame,
             weff=weff,
             beff=beff,
             classes=classes,
@@ -927,12 +900,6 @@ def legacy_label(label_v2: NDArray[np.integer], lut: NDArray[np.uint8]) -> NDArr
     label = np.asarray(label_v2)
     if label.size == 0:
         return np.asarray(label, dtype=np.uint8)
-    max_id = int(label.max())
-    min_id = int(label.min())
-    if min_id < 0 or max_id >= len(lut):
-        raise RuntimeError(
-            f"CoralscapesV2 label ids must be in 0..{len(lut) - 1}, got {min_id}..{max_id}"
-        )
     return np.asarray(lut, dtype=np.uint8)[label]
 
 
@@ -996,13 +963,13 @@ def union_probe_images(probes: Mapping[int, dict]) -> list[dict]:
 
 
 def _extract_legacy_probe_features(
-    predictor: CBMPredictor, source: VersionSource, images: list[dict]
+    predictor: CBMPredictor, version: DatasetVersion, frame: pd.DataFrame, images: list[dict]
 ) -> dict[int, tuple[NDArray[np.float32], NDArray[np.int64]]]:
     """Sample every k's pixels from one activated map per train image."""
     feats: dict[int, list[NDArray[np.float32]]] = defaultdict(list)
     labels: dict[int, list[int]] = defaultdict(list)
     for entry in tqdm(images, desc="probe features (legacy 39)"):
-        image_np, label_np = source.train_image_label(entry)
+        image_np, label_np = load_probe_entry(version, frame, entry)
         what = f"{entry.get('site')}/{entry.get('stem')}"
         _require_rgb(image_np, what)
         _require_label(label_np, what)
@@ -1074,7 +1041,8 @@ def _evaluate_legacy_split(
     *,
     split: str,
     predictor: CBMPredictor,
-    source: VersionSource,
+    version: DatasetVersion,
+    frame: pd.DataFrame,
     lut: NDArray[np.uint8],
     heads: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     probe_infos: dict[int, dict],
@@ -1106,14 +1074,13 @@ def _evaluate_legacy_split(
             results["by_k"][str(k)][split] = scores
         write_json(out_dir / "metrics.json", results)
 
-    n_images = source.num_split(split)
+    n_images = len(split_rows(frame, split))
     if max_images is not None:
         n_images = min(n_images, max_images)
     t0 = time.time()
     processed = 0
-    for _key, image_np, label_np in tqdm(
-        source.iter_split(split), total=n_images, desc=f"dense {split} (legacy 39)"
-    ):
+    for row in tqdm(split_rows(frame, split), total=n_images, desc=f"dense {split} (legacy 39)"):
+        image_np, label_np = load_row(version, row)
         if max_images is not None and processed >= max_images:
             break
         what = f"{split} image {processed}"
@@ -1170,9 +1137,9 @@ def evaluate_coralscapes39_probe(
     if unknown:
         raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
 
-    source = VersionSource(version)
+    frame = dense_images(version)
     images = union_probe_images(probes)
-    features = _extract_legacy_probe_features(predictor, source, images)
+    features = _extract_legacy_probe_features(predictor, version, frame, images)
     missing = sorted(set(probes) - set(features))
     if missing:
         raise RuntimeError(f"probe budgets with no extracted pixels: {missing}")
@@ -1201,7 +1168,8 @@ def evaluate_coralscapes39_probe(
         split: _evaluate_legacy_split(
             split=split,
             predictor=predictor,
-            source=source,
+            version=version,
+            frame=frame,
             lut=lut,
             heads=heads,
             probe_infos=probe_infos,

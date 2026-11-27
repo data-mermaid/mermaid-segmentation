@@ -8,9 +8,9 @@ from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image
 
 from mermaidseg.data.base import VersionDataset
+from mermaidseg.data.dense_read import read_label_mask
 from segdata_spec.read import DatasetVersion
 
 
@@ -56,13 +56,5 @@ class DenseDataset(VersionDataset):
         return [self.version.image_path(row), self.version.mask_path(row)]
 
     def _read_mask(self, row: Mapping[str, Any], image_shape: tuple[int, int]) -> NDArray[np.int32]:
-        with Image.open(self.version.mask_path(row)) as handle:
-            native = np.asarray(handle)
-        if native.ndim == 3:
-            native = native[..., 0]
-        if native.size and int(native.max()) >= len(self._lut):
-            raise ValueError(
-                f"mask of image {row['image_id']} has label {int(native.max())}, "
-                f"above the largest label_id {len(self._lut) - 1}"
-            )
+        native = read_label_mask(self.version.mask_path(row), len(self._lut))
         return self._lut[native]

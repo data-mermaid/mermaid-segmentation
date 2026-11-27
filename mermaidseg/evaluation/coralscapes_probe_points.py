@@ -72,9 +72,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
-from PIL import Image
 from scipy import ndimage
 
+from mermaidseg.data.dense_read import read_label_mask
 from mermaidseg.evaluation.coralscapes_probe import (
     CORALSCAPES_ID2NAME,
     CORALSCAPES_V2_ID2NAME,
@@ -88,6 +88,7 @@ from segdata_spec.read import DatasetVersion
 logger = logging.getLogger(__name__)
 
 NUM_CLASSES = 95  # native ids 1..95 (0 = unlabeled / ignore)
+NATIVE_IDS = NUM_CLASSES + 1
 EXPECTED_HEIGHT = 1024
 EXPECTED_WIDTH = 2048
 _STRUCT8 = np.ones((3, 3), dtype=bool)
@@ -139,13 +140,6 @@ def train_records(version: DatasetVersion) -> list[ImageRecord]:
             )
         )
     return sorted(records, key=lambda record: (record.site, record.stem))
-
-
-def _load_label(path: Path) -> np.ndarray:
-    arr = np.asarray(Image.open(path))
-    if arr.ndim == 3:
-        arr = arr[..., 0]
-    return arr.astype(np.uint8, copy=False)
 
 
 def _class_name(class_id: int, id2name: dict[int, str] | None = None) -> str:
@@ -367,7 +361,7 @@ def census_train_components(
     by_class: dict[int, list[Component]] = defaultdict(list)
     n_images = len(records)
     for image_index, record in enumerate(records):
-        label = _load_label(Path(record.path))
+        label = read_label_mask(Path(record.path), NATIVE_IDS)
         if label.shape != (record.height, record.width):
             raise ProbeSelectionError(
                 f"{record.site}/{record.stem} label shape {label.shape} "
@@ -555,7 +549,7 @@ def build_probe_points(
                 f"expected {EXPECTED_HEIGHT}x{EXPECTED_WIDTH}"
             )
             continue
-        label = _load_label(Path(record.path))
+        label = read_label_mask(Path(record.path), NATIVE_IDS)
         if label.shape != (EXPECTED_HEIGHT, EXPECTED_WIDTH):
             placement_errors.append(
                 f"{record.site}/{record.stem} label shape {label.shape} is not "
@@ -672,7 +666,7 @@ def build_probe_points(
     total_points = 0
     for image_index in ordered_image_indexes:
         record = records[image_index]
-        label = _load_label(Path(record.path))
+        label = read_label_mask(Path(record.path), NATIVE_IDS)
         points = sorted(
             image_points[image_index],
             key=lambda point: (

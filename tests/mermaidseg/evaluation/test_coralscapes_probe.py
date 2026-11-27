@@ -16,7 +16,6 @@ from mermaidseg.evaluation import coralscapes_probe
 from mermaidseg.evaluation.coralscapes_probe import (
     CORALSCAPES_V2_ID2NAME,
     LEGACY_NUM_CLASSES,
-    VersionSource,
     _class_taxonomy_targets,
     _predict_classes_from_activated,
     _require_label,
@@ -26,13 +25,15 @@ from mermaidseg.evaluation.coralscapes_probe import (
     build_coralscapes_concept_codes,
     coralscapes_v2_to_legacy_lut,
     coralscapes_windows,
+    dense_images,
     evaluate_coralscapes39_probe,
     evaluate_coralscapes_probe,
     label_md5,
-    legacy_label,
     load_legacy_probes,
+    load_probe_entry,
     reassemble_concept_logits,
     score_legacy_activated,
+    split_rows,
     union_probe_images,
 )
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
@@ -160,12 +161,6 @@ def test_one_activated_map_updates_every_budget():
     assert np.array_equal(confusions[50].cm, confusions[10].cm)
     # The ignored pixel (legacy id 0) is not a counted ground-truth class.
     assert int(confusions[5].cm[0].sum()) == 0
-
-
-def test_legacy_label_rejects_ids_outside_the_lut():
-    lut = np.zeros(96, dtype=np.uint8)
-    with pytest.raises(RuntimeError, match="0..95"):
-        legacy_label(np.array([[96]], dtype=np.uint8), lut)
 
 
 def test_score_legacy_requires_a_confusion_per_head():
@@ -480,22 +475,6 @@ def test_score_legacy_rejects_a_lut_that_emits_an_id_beyond_the_legacy_classes()
     assert confusion.total == 0
 
 
-class _FakeSource:
-    """One train image and one val image, both 1024x2048."""
-
-    def __init__(self, label: np.ndarray):
-        self.label = label
-
-    def train_image_label(self, _entry):
-        return _banded_image(), self.label
-
-    def iter_split(self, _split):
-        yield "0", _banded_image(), self.label
-
-    def num_split(self, _split):
-        return 1
-
-
 def test_legacy_probe_run_fits_one_svm_per_budget_and_scores_each_in_one_forward(
     tmp_path, monkeypatch
 ):
@@ -505,7 +484,12 @@ def test_legacy_probe_run_fits_one_svm_per_budget_and_scores_each_in_one_forward
     label = np.full((HEIGHT, WIDTH), v2_for[1], dtype=np.uint8)
     label[:, 512:1024] = v2_for[2]
     label[:, 1536:] = v2_for[3]
-    monkeypatch.setattr(coralscapes_probe, "VersionSource", lambda *_a: _FakeSource(label))
+    monkeypatch.setattr(coralscapes_probe, "dense_images", lambda _version: None)
+    monkeypatch.setattr(coralscapes_probe, "split_rows", lambda _frame, _split: [{}])
+    monkeypatch.setattr(coralscapes_probe, "load_row", lambda _v, _row: (_banded_image(), label))
+    monkeypatch.setattr(
+        coralscapes_probe, "load_probe_entry", lambda _v, _f, _e: (_banded_image(), label)
+    )
 
     def points(class_id, cols):
         return [
@@ -582,10 +566,10 @@ def _two_band_label(top: int, bottom: int) -> np.ndarray:
 
 
 @pytest.fixture
-def version_source(tmp_path: Path) -> VersionSource:
+def version(tmp_path: Path):
     """A train image (labels 2 over 5), a validation image (7 over 9) and a test image (all 3)."""
     site = '{"site": "site1"}'
-    version = open_written(
+    return open_written(
         tmp_path,
         kind="dense",
         images=[
@@ -596,13 +580,12 @@ def version_source(tmp_path: Path) -> VersionSource:
         labels={i: CORALSCAPES_V2_ID2NAME[i] for i in (2, 3, 5, 7, 9)},
         name="coralscapes_v2",
     )
-    return VersionSource(version)
 
 
-def test_a_probe_entry_reads_the_train_image_with_its_stem_as_image_id(version_source):
+def test_a_probe_entry_reads_the_train_image_with_its_stem_as_image_id(version):
     entry = {"site": "site1", "stem": "site1_a", "label_md5": label_md5(_two_band_label(2, 5))}
 
-    image, label = version_source.train_image_label(entry)
+    image, label = load_probe_entry(version, dense_images(version), entry)
 
     assert image.shape == (HEIGHT, WIDTH, 3)
     assert [int(label[r, c]) for r, c in [(0, 0), (511, 2047), (512, 0), (1023, 1000)]] == [
@@ -613,28 +596,31 @@ def test_a_probe_entry_reads_the_train_image_with_its_stem_as_image_id(version_s
     ]
 
 
-def test_a_probe_stem_that_is_not_a_train_image_raises(version_source):
+def test_a_probe_stem_that_is_not_a_train_image_raises(version):
     with pytest.raises(KeyError, match="site1_b"):
-        version_source.train_image_label({"site": "site1", "stem": "site1_b", "label_md5": "m"})
+        load_probe_entry(
+            version,
+            dense_images(version),
+            {"site": "site1", "stem": "site1_b", "label_md5": "m"},
+        )
 
 
-def test_a_probe_label_md5_that_differs_from_the_version_mask_raises(version_source):
+def test_a_probe_label_md5_that_differs_from_the_version_mask_raises(version):
     actual = label_md5(_two_band_label(2, 5))
     entry = {"site": "site1", "stem": "site1_a", "label_md5": "0" * 32}
 
     with pytest.raises(ValueError, match=f"site1_a.*{'0' * 32}.*{actual}"):
-        version_source.train_image_label(entry)
+        load_probe_entry(version, dense_images(version), entry)
 
 
 @pytest.mark.parametrize(
     ("split", "image_id", "top", "bottom"), [("val", "site1_b", 7, 9), ("test", "site1_c", 3, 3)]
 )
-def test_a_split_iterates_its_group_with_the_native_label_ids(
-    version_source, split, image_id, top, bottom
+def test_a_split_selects_its_group_rows_with_the_native_label_ids(
+    version, split, image_id, top, bottom
 ):
-    items = list(version_source.iter_split(split))
+    rows = split_rows(dense_images(version), split)
 
-    assert version_source.num_split(split) == 1
-    assert [key for key, _, _ in items] == [image_id]
-    label = items[0][2]
+    assert [row["image_id"] for row in rows] == [image_id]
+    _, label = coralscapes_probe.load_row(version, rows[0])
     assert (int(label[0, 0]), int(label[HEIGHT - 1, WIDTH - 1])) == (top, bottom)
