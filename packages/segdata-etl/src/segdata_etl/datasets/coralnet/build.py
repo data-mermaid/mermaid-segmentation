@@ -29,6 +29,7 @@ from .config import (
 )
 from .images import build_images
 from .io import compute_version_tag, upload_to_s3, write_parquet_deterministic
+from .markers import pinned_parents
 from .schemas import (
     ANNOTATIONS_PRIMARY_KEY,
     ANNOTATIONS_SCHEMA,
@@ -150,18 +151,36 @@ def _step_build_annotations(run: _Run, source_ids: list[int] | None) -> int:
     return 1 if summary else 0
 
 
-def _log_header_statuses(images_df: pd.DataFrame) -> bool:
-    """Log the image count per ``header_status``; return whether every image has dimensions."""
+def _log_header_statuses(images_df: pd.DataFrame, pinned_sources: frozenset[int]) -> bool:
+    """Log the image count per ``header_status``; return whether every image is accounted for.
+
+    An image is accounted for when it has dimensions, or is ``not_found`` in a pinned source,
+    whose images may live only in the pinned parent version. Those are logged as their own count;
+    ``build coralnet raw`` checks them against the parent pin, this step does not.
+    """
     counts = images_df["header_status"].astype(str).value_counts().sort_index()
     for status, count in counts.items():
         logger.info("header_status %s: %d", status, count)
-    return set(counts.index) <= STATUSES_WITH_DIMENSIONS
+    status = images_df["header_status"].astype(str)
+    no_dimensions = ~status.isin(STATUSES_WITH_DIMENSIONS)
+    expected = (status == "not_found") & images_df["source_id"].isin(pinned_sources)
+    if expected.any():
+        logger.info(
+            "not_found in pinned sources: %d (checked against the parent by the raw build)",
+            int(expected.sum()),
+        )
+    return not (no_dimensions & ~expected).any()
 
 
 def _step_build_images(run: _Run, annotations_path: Path) -> int:
-    """Write the images parquet; return 1 when any image has no dimensions.
+    """Write the images parquet; return 1 when any image has no dimensions, else 0.
 
-    Those images have statuses such as ``not_found`` or ``corrupt``.
+    Those images have statuses such as ``not_found`` or ``corrupt``. A ``not_found`` image in a
+    pinned source (see ``pinned_parents``) is expected and does not count; ``build coralnet raw``
+    checks those images against the parent pin, not this step.
+
+    Raises:
+        RuntimeError: A source's completion marker is unreadable.
     """
     annotations_df = pd.read_parquet(annotations_path)
     images_df = build_images(
@@ -171,7 +190,14 @@ def _step_build_images(run: _Run, annotations_path: Path) -> int:
     write_parquet_deterministic(images_df, out_path, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
     logger.info("Wrote images parquet: %s (%d rows)", out_path, len(images_df))
     _maybe_upload(run, out_path)
-    return 0 if _log_header_statuses(images_df) else 1
+    pinned = pinned_parents(
+        make_s3_client(workers=run.workers),
+        run.bucket,
+        run.prefix,
+        sorted(int(sid) for sid in images_df["source_id"].unique()),
+        workers=run.workers,
+    )
+    return 0 if _log_header_statuses(images_df, frozenset(pinned)) else 1
 
 
 def _cmd_build_annotations(args: argparse.Namespace) -> int:

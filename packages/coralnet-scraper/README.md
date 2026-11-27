@@ -53,13 +53,15 @@ Flags:
 | `--dry-run` | off | With `--prune`, log each orphan image key as `Source <id>: would prune orphan image object <key>` and delete nothing. Verification runs as usual. A source that passes logs `Source <id> verified but left unmarked because of the dry run`, gets no `_complete.json` and keeps `_partial/`, so the real `--prune` run can follow directly. A source that fails verification is handled as in a normal run. Without `--prune`, the run exits with code 2. Default run only; a subcommand rejects it with exit code 2. |
 | `--breaker-cooldown SECONDS` | `600` | Pause after the [circuit breaker](#retries-and-circuit-breaker) trips, before the run probes the next source. `0` stops the run at the trip. A negative or non-finite value exits with code 2. Default run only; a subcommand rejects it with exit code 2. |
 | `--allow-source-drop` | off | Continue when CoralNet lists fewer than 95% of the sources of the previous run. See [Discovery guard](#discovery-guard). Default run only; a subcommand rejects it with exit code 2. |
+| `--parent-version`, `--parent-manifest-sha256` | none | Pin a published `coralnet-raw` version in `mermaid-ic-datasets`. An image that has no scrape object and that the pinned version holds counts as present: [verification](#verification) passes without a scrape object for it, and the run does not download it. A zero-byte scrape object counts as missing even when pinned, and the run downloads it again. Give both or neither; one without the other exits with code 2. Valid on the default run and `verify-existing`, before the subcommand name: `coralnet-scrape --parent-version <v> --parent-manifest-sha256 <sha> verify-existing`. `invalidate` rejects them with exit code 2. The run syncs the version's tables into `--cache-dir` before it starts, so it needs S3 read access to `mermaid-ic-datasets`. |
+| `--cache-dir` | `outputs/segdata-cache` | Local cache of the pinned version's tables. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 Every run flag is safe to repeat: running the same command again after a failure or a kill resumes the work. Operations that change state are subcommands:
 
 | Command | Effect |
 |---|---|
-| `coralnet-scrape verify-existing [--source-ids <ids>]` | Verifies each source that has no marker against CoralNet's live image count, and writes the marker for each source that passes. Without `--source-ids`, it checks every discovered source that has no marker. Reports `overview_total_missing` for a source whose overview page shows no image count. A source with zero Confirmed images or zero images is logged as `Source <id> skipped: no confirmed images` or `... no images`, gets no marker, and does not fail the command. Used to adopt a bucket scraped before markers existed. Reads no credentials and does not log in. |
+| `coralnet-scrape verify-existing [--source-ids <ids>]` | Verifies each source that has no marker against CoralNet's live image count, and writes the marker for each source that passes. Without `--source-ids`, it checks every discovered source that has no marker. Reports `overview_total_missing` for a source whose overview page shows no image count. A source with zero Confirmed images or zero images is logged as `Source <id> skipped: no confirmed images` or `... no images`, gets no marker, and does not fail the command. With `--parent-version` and `--parent-manifest-sha256`, an image that has no scrape object and that the pinned version holds counts as present. Reads no CoralNet credentials and does not log in. |
 | `coralnet-scrape invalidate --source-ids <ids>` | Deletes the marker and `_partial/` of the listed sources. |
 | `coralnet-scrape invalidate --all --yes` | Deletes the marker and `_partial/` of every source. The next plain run exports every source again. Without `--yes` or `--dry-run`, `--all` exits with code 2. |
 | `coralnet-scrape invalidate --changed` | Deletes the marker and `_partial/` of each marked source whose live CoralNet image count differs from the count in its marker. |
@@ -68,8 +70,6 @@ Every run flag is safe to repeat: running the same command again after a failure
 `invalidate` changes state only. Run the plain command afterwards to download. `invalidate` reads no credentials and does not log in. It deletes the marker and `_partial/`, which cannot be undone unless the bucket has S3 versioning enabled. Run it with `--dry-run` first and check the sources it lists.
 
 There is no `--force` flag.
-
-A plain run on a bucket that has source folders but no marker in any of them logs a warning at the start. The warning points to `verify-existing`; without it every source downloads again. See [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket).
 
 The run logs in to CoralNet, discovers the public source ids from `https://coralnet.ucsd.edu/source/about/`, and downloads each source. A failed login ends the run with exit code 1. CoralNet overview pages are public, so `verify-existing` and `invalidate` do not log in.
 
@@ -148,7 +148,7 @@ After the batch loop finishes or the circuit breaker stops it, the run writes a 
 
 | Field | Content |
 |---|---|
-| `settings` | `scraper_workers`, `export_workers`, `requests_per_second` (`null` = no limit), `source_ids` (`null` = every public source), `prune`, `dry_run` and `allow_source_drop` (booleans), `breaker_cooldown_s` (seconds). |
+| `settings` | `scraper_workers`, `export_workers`, `requests_per_second` (`null` = no limit), `source_ids` (`null` = every public source), `prune`, `dry_run` and `allow_source_drop` (booleans), `breaker_cooldown_s` (seconds), `parent_version` and `parent_manifest_sha256` (`null` = no pin). |
 | `started_at`, `finished_at` | Run start and end, ISO 8601 UTC. |
 | `duration_s` | Run time in seconds. |
 | `sources` | Per attempted source id: `{"ok": bool, "errors": [codes]}`. Skipped sources are absent. |
@@ -192,6 +192,7 @@ S3 access uses the default boto3 credential chain, for example `AWS_PROFILE`.
   - `page-<n>.csv`: one chunk for each exported page of a source with more than 5000 images.
 - The next run reuses `_partial/` and skips the finished stages, the walked pages, and the exported pages. A saved `page-<n>.csv` that cannot be read, has no `Name` column, or has no rows for a page with a Confirmed image is deleted, and its page is exported again. If CoralNet's image count for the source changed since `_partial/` was started, the next run discards `_partial/` and starts the source again.
 - Recovery from any failure or kill is to run the same command again. Image objects already on S3 are skipped.
+- With `--parent-version` and `--parent-manifest-sha256`, images that have no scrape object and that the pinned `coralnet-raw` version holds are skipped too. A zero-byte object is downloaded again even when pinned. The log line `Source <id>: <n> of <total> images already on S3, <m> pinned` counts them.
 - A source with a failed stage, for example an image that could not be downloaded, keeps its progress and is not verified. The next run redoes the failed stage and every stage after it. Finished earlier stages, saved walk pages, saved export pages and images already on S3 are kept.
 - Verification runs only when every stage succeeded. A source that fails verification has its `_partial/` discarded and no marker. The next run redoes the walk and the export. Image objects already on S3 are skipped.
 - A source with zero Confirmed images, or zero images, gets no marker and nothing is written for it. The next run checks it again, and the run report lists it under `skipped`.
@@ -210,17 +211,19 @@ Before the marker is written, the scraper reads the source back from S3 and comp
 | `annotations_bad_columns` | `annotations.csv` has no `Name` column, or has an HTML or `Unnamed` column. |
 | `annotations_null_name` | An annotation row has no `Name`. |
 | `annotations_name_not_in_list:N` | N image names in `annotations.csv` are not in the image list. |
-| `image_objects_missing:N` | N listed images have no object on S3, or a 0-byte object. |
+| `image_objects_missing:N` | N listed images have no object on S3, or a 0-byte object, and are not in the pinned `coralnet-raw` version. Without a pin, no image is exempt. |
 
 These warnings are recorded in the marker and do not block it:
 
 | Code | Meaning |
 |---|---|
 | `confirmed_without_annotations:N` | N Confirmed images have no annotation rows. A header-only export is exported again (see [Response checks](#response-checks)), so this warning counts Confirmed images missing from an export that has rows. |
-| `orphan_image_objects:N` | N image objects on S3 are not in the image list. `--prune` deletes them. |
+| `orphan_image_objects:N` | N image objects on S3 are not in the image list. `--prune` deletes them. The check reads the scrape only, not the pinned version. |
 | `duplicate_names:N` | N image names occur more than once. |
 
-The marker holds the scraper version, the completion time, the counts `total_images`, `annotation_rows`, `annotated_images` and `image_objects`, and the warnings.
+The marker holds the source id, the scraper version, the completion time, the counts `total_images`, `annotation_rows`, `annotated_images`, `image_objects` and `pinned_images`, and the warnings. `pinned_images` counts the listed images that are present only through the pinned version; it is 0 without a pin.
+
+When `pinned_images` is more than 0, the marker also holds `parent`: `{"dataset": "coralnet-raw", "version": <v>, "manifest_sha256": <sha>}`. A source with `parent` is complete only together with that version. `segdata build coralnet raw` refuses such a source unless you give it a parent pin; see the [segdata-etl README](../segdata-etl/README.md#stage-coralnet-raw).
 
 ### Discovery guard
 

@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -63,6 +64,7 @@ from segdata_spec.sync import sync_tables
 from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
 from .io import CsvReader, make_csv_reader_s3
+from .markers import pinned_parents
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,39 @@ _OBJECT_COLUMNS = [
     "crc64nvme",
     "source_fingerprint",
 ]
+
+
+class ParentRequired(ValueError):
+    """A build includes pinned sources but no parent version was given."""
+
+
+class PinnedImageLost(ValueError):
+    """A pinned source has an image that is in neither the scrape bucket nor the parent."""
+
+
+def _marker_records(source_id: int, parent: Mapping[str, Any]) -> str:
+    """One lost source's marker parent, e.g. ``s12 marker records coralnet-raw@v1 (...)``."""
+    return (
+        f"s{source_id} marker records {parent['dataset']}@{parent['version']} "
+        f"(manifest_sha256 {parent['manifest_sha256']})"
+    )
+
+
+def _pinned_loss(
+    kind: str,
+    image_ids: list[str],
+    source_ids: list[int],
+    pinned: Mapping[int, Mapping[str, Any]],
+) -> PinnedImageLost:
+    """The error for ``image_ids`` of one ``kind`` lost from pinned ``source_ids``.
+
+    The message names the parent each lost source's marker recorded.
+    """
+    records = "; ".join(_marker_records(sid, pinned[sid]) for sid in sorted(source_ids))
+    return PinnedImageLost(
+        f"{kind}: {len(image_ids)} images in pinned sources {source_ids} are in neither the "
+        f"scrape bucket nor the parent version; first 10: {image_ids[:10]}; {records}"
+    )
 
 
 @dataclass(frozen=True)
@@ -140,12 +175,18 @@ def labels_table(id2name: dict[str, Any]) -> pa.Table:
 
 
 def _select_images(
-    build: BuildTables, parent_ids: frozenset[str]
+    build: BuildTables,
+    parent_ids: frozenset[str],
+    pinned_sources: Mapping[int, Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[str]]:
     """Return the annotated images with dimensions, their annotations, the dropped counts and carries.
 
     An annotated image the build reads as ``not_found`` that ``parent_ids`` holds is carried: its
     points stay and it is not counted as ``no_dimensions``.
+
+    Raises:
+        PinnedImageLost: An annotated ``not_found`` image in a pinned source that ``parent_ids``
+            lacks.
     """
     images, annotations = build.images, build.annotations
     status = images["header_status"].astype(str)
@@ -157,6 +198,15 @@ def _select_images(
     lost = (status == _NOT_FOUND) & images["image_id"].astype(str).isin(parent_ids) & annotated
     with_dims = images[has_dims]
     kept = with_dims[with_dims["image_id"].isin(annotations["image_id"][with_image])]
+    in_pinned = (status == _NOT_FOUND) & annotated & images["source_id"].isin(list(pinned_sources))
+    gone = in_pinned & ~lost
+    if gone.any():
+        raise _pinned_loss(
+            _NOT_FOUND,
+            sorted(images["image_id"][gone].astype(str)),
+            sorted(int(sid) for sid in images["source_id"][gone].unique()),
+            pinned_sources,
+        )
     carried = sorted(images["image_id"][lost].astype(str))
     wanted = annotations["image_id"].isin(kept["image_id"]) | annotations["image_id"].isin(carried)
     points = annotations[wanted & with_image]
@@ -204,9 +254,27 @@ def _parent_ids(parent_images: pa.Table | None) -> frozenset[str]:
     )
 
 
-def _split_carried(missing: list[str], held: frozenset[str]) -> tuple[list[str], list[str]]:
-    """Split the ids absent from the listing into those the parent holds and those it lacks."""
-    return [i for i in missing if i in held], [i for i in missing if i not in held]
+def _split_carried(
+    missing: list[str],
+    held: frozenset[str],
+    pinned_sources: Mapping[int, Mapping[str, Any]],
+    source_of: Mapping[str, int],
+) -> tuple[list[str], list[str]]:
+    """Split the ids absent from the listing into those the parent holds and those it lacks.
+
+    ``source_of`` maps each id in ``missing`` to its source id.
+
+    Raises:
+        PinnedImageLost: An id the parent lacks belongs to a pinned source.
+    """
+    carried = [i for i in missing if i in held]
+    lacking = [i for i in missing if i not in held]
+    lost = [i for i in lacking if source_of[i] in pinned_sources]
+    if lost:
+        raise _pinned_loss(
+            _SOURCE_MISSING, lost, sorted({source_of[i] for i in lost}), pinned_sources
+        )
+    return carried, lacking
 
 
 def _check_carried_sizes(
@@ -535,6 +603,7 @@ def _select_rows(
     workers: int,
     csv_reader: CsvReader | None,
     parent_images: pa.Table | None,
+    pinned_sources: Mapping[int, Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[int], list[str]]:
     """Return the kept rows with source fingerprint and name, their points, drops, unlisted, carried.
 
@@ -545,15 +614,18 @@ def _select_rows(
     Raises:
         ValueError: A carried image's build size differs from the parent's, or a not_found carried
             image has a point outside the parent's size.
+        PinnedImageLost: A pinned source has a ``not_found`` or listing-absent image that the
+            parent lacks.
     """
     held = _parent_ids(parent_images)
-    kept, points, dropped, lost = _select_images(build, held)
+    kept, points, dropped, lost = _select_images(build, held, pinned_sources)
     source_ids = sorted(int(sid) for sid in kept["source_id"].unique())
     etags, names, unlisted = _gather_sources(
         client, source_bucket, prefix, source_ids, workers=workers, csv_reader=csv_reader
     )
     rows, absent = _attach_sources(kept, etags, names)
-    listed_out, missing = _split_carried(absent, held)
+    source_of = dict(zip(kept["image_id"].astype(str), kept["source_id"].astype(int), strict=True))
+    listed_out, missing = _split_carried(absent, held, pinned_sources, source_of)
     _check_carried_sizes(kept, parent_images, listed_out)
     _check_carried_points(points, parent_images, lost)
     carried = sorted([*lost, *listed_out])
@@ -592,6 +664,7 @@ def build_raw(
     workers: int,
     checkpoint: Path,
     parent_images: pa.Table | None = None,
+    pinned_sources: Mapping[int, Mapping[str, Any]] = MappingProxyType({}),
     csv_reader: CsvReader | None = None,
 ) -> RawTables:
     """Probe the kept originals and return the ``coralnet-raw`` tables.
@@ -602,12 +675,14 @@ def build_raw(
     ``dropped["carried_from_parent"]``; an image the parent lacks too is ``source_missing``. An
     image the build reads as ``not_found`` whose id the parent holds is carried the same way: the
     parent's row, the build's points, counted in ``carried_from_parent`` and not in
-    ``no_dimensions``.
+    ``no_dimensions``. In a source of ``pinned_sources``, a ``not_found`` annotated image or a
+    listing-absent image that the parent lacks is an error, not a drop.
 
     Raises:
         ValueError: A label name is not a string, an image_list names an image twice, or a carried
             image's build size differs from the parent's or a not_found carried image has a point
             outside the parent's size.
+        PinnedImageLost: A pinned source has an image in neither the scrape bucket nor the parent.
         SourceChanged: An original was replaced between its HEAD and its read.
     """
     rows, points, dropped, unlisted, carried = _select_rows(
@@ -618,6 +693,7 @@ def build_raw(
         workers=workers,
         csv_reader=csv_reader,
         parent_images=parent_images,
+        pinned_sources=pinned_sources,
     )
     done = _read_checkpoint(checkpoint)
     reused, pending = _split_known(rows, _known_rows(parent_images, done))
@@ -748,6 +824,9 @@ def run_raw(args: argparse.Namespace) -> int:
         ValueError: ``MERMAID_CORALNET_BUCKET`` is unset.
         PinMismatch: The staged or synced parent's manifest differs from its pin.
         SourceChanged: An original was replaced between its HEAD and its read.
+        RuntimeError: A source's completion marker is unreadable.
+        ParentRequired: A source's marker pins a parent version and no parent was given.
+        PinnedImageLost: A pinned source has an image in neither the scrape bucket nor the parent.
     """
     repo = publishable_repo()
     parent = _parent_ref(args)
@@ -755,6 +834,18 @@ def run_raw(args: argparse.Namespace) -> int:
     source_bucket, prefix = _source_bucket(), get_prefix()
     client = make_s3_client(workers=workers)
     build = read_build(client, source_bucket, args.build_run, args.source_ids)
+    pinned = pinned_parents(
+        client,
+        source_bucket,
+        prefix,
+        sorted(int(sid) for sid in build.images["source_id"].unique()),
+        workers=workers,
+    )
+    if pinned and parent is None:
+        raise ParentRequired(
+            f"sources {sorted(pinned)} are complete only given a parent version; "
+            "pass --parent-version and --parent-manifest-sha256"
+        )
     parent_images = (
         None
         if parent is None
@@ -770,6 +861,7 @@ def run_raw(args: argparse.Namespace) -> int:
         workers=workers,
         checkpoint=checkpoint_path(args.stage_dir, args.build_run, repo.git.sha),
         parent_images=parent_images,
+        pinned_sources=pinned,
     )
     stage_version(
         args.stage_dir,

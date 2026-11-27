@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,8 @@ from conftest import FakeS3
 from coralnet_scraper import scrape_coralnet_s3 as cli
 from coralnet_scraper.batch_download import BatchOutcome
 from coralnet_scraper.models import DownloadResult, ImageFailures
+from coralnet_scraper.pin import RawPin
+from segdata_spec.errors import PinMismatch
 
 _MOD = "coralnet_scraper.scrape_coralnet_s3"
 
@@ -37,7 +40,9 @@ class _FakeDownloader:
         export_workers: int | None,
         requests_per_second: float | None,
         login_ok: bool = True,
+        pin: RawPin | None = None,
     ) -> None:
+        self.pin = pin
         self.max_workers = max_workers if max_workers is not None else 4
         self.export_workers = export_workers if export_workers is not None else 3
         self.requests_per_second = requests_per_second
@@ -78,6 +83,10 @@ def test_main_raises_before_any_network_call_when_bucket_unset(monkeypatch):
     downloader_cls.assert_not_called()
 
 
+def _no_pin(*args, **kwargs):
+    raise AssertionError("load_raw_pin must not be called without pin flags")
+
+
 def _run_main(
     monkeypatch,
     argv,
@@ -87,8 +96,12 @@ def _run_main(
     stopped=None,
     discovered=(1,),
     fake_s3=None,
+    load_pin=None,
 ):
-    """Run ``main`` with the network pieces faked; return (downloader_cls, run_batch, discover)."""
+    """Run ``main`` with the network pieces faked; return (downloader_cls, run_batch, discover).
+
+    ``load_pin`` replaces ``load_raw_pin`` when given.
+    """
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", "my-bucket")
     monkeypatch.setenv("MERMAID_CORALNET_PREFIX", "my-prefix")
     outcome = BatchOutcome(results=results or {}, stopped=stopped)
@@ -98,6 +111,7 @@ def _run_main(
         patch(f"{_MOD}.boto3.client", return_value=fake_s3 if fake_s3 is not None else FakeS3()),
         patch(f"{_MOD}.discover_public_source_ids", return_value=list(discovered)) as discover,
         patch(f"{_MOD}.run_batch_download", return_value=outcome) as run,
+        patch(f"{_MOD}.load_raw_pin", new=load_pin if load_pin is not None else _no_pin),
     ):
         assert cli.main(argv) == expected_code
     return downloader_cls, run, discover
@@ -235,6 +249,8 @@ def test_main_reports_a_circuit_breaker_stop(monkeypatch, caplog, fake_s3):
         "dry_run": False,
         "allow_source_drop": True,
         "breaker_cooldown_s": 600.0,
+        "parent_version": None,
+        "parent_manifest_sha256": None,
     }
     assert report["transport"] == _TRANSPORT
     assert report["sources"] == {"5": {"ok": False, "errors": ["annotations_failed"]}}
@@ -355,6 +371,17 @@ def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
         ["--breaker-cooldown", "-1"],
         ["--breaker-cooldown", "nan"],
         ["--breaker-cooldown", "inf"],
+        ["--parent-version", "v1"],
+        ["--parent-manifest-sha256", "abc"],
+        [
+            "--parent-version",
+            "v1",
+            "--parent-manifest-sha256",
+            "abc",
+            "invalidate",
+            "--all",
+            "--yes",
+        ],
     ],
 )
 def test_batch_only_flags_are_rejected_with_a_subcommand_or_a_negative_value(argv):
@@ -369,36 +396,6 @@ def test_batch_dry_run_without_prune_is_rejected():
         cli._parse_args(["--dry-run"])
 
     assert exc.value.code == 2
-
-
-def _legacy_warnings(caplog) -> list[str]:
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.levelname == "WARNING" and "verify-existing" in r.getMessage()
-    ]
-
-
-def test_a_bucket_of_folders_without_markers_warns_once_and_the_run_proceeds(
-    monkeypatch, fake_s3, caplog
-):
-    fake_s3.put("my-bucket", "my-prefix/s1/annotations.csv", b"Name\n")
-    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
-
-    _, run, _ = _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
-
-    (warning,) = _legacy_warnings(caplog)
-    assert "2" in warning
-    run.assert_called_once()
-
-
-def test_no_legacy_warning_when_any_stored_source_has_a_marker(monkeypatch, fake_s3, caplog):
-    _store_source(fake_s3, 1, 5)
-    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
-
-    _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
-
-    assert _legacy_warnings(caplog) == []
 
 
 def test_main_reports_the_skipped_sources(monkeypatch, fake_s3):
@@ -435,6 +432,7 @@ def _run_command(
     discovered=(),
     totals=None,
     verify_results=None,
+    load_pin=None,
 ) -> tuple[int, _FakeDownloader, MagicMock]:
     """Run a subcommand of ``main`` with no CoralNet credentials anywhere.
 
@@ -459,6 +457,7 @@ def _run_command(
         patch(f"{_MOD}.boto3.client", return_value=fake_s3),
         patch(f"{_MOD}.discover_public_source_ids", return_value=list(discovered)),
         patch(f"{_MOD}.run_batch_download") as run,
+        patch(f"{_MOD}.load_raw_pin", new=load_pin if load_pin is not None else _no_pin),
     ):
         code = cli.main(argv)
     credentials.assert_not_called()
@@ -660,3 +659,72 @@ def test_verify_existing_reports_a_raising_source_by_exception_name_and_goes_on(
     assert dl.verified == [2, 3]
     errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert "Source 2 not verified: ValueError" in errors
+
+
+_RAW_PIN = RawPin("20261124-abc", "deadbeef", {1: frozenset({7})})
+_PIN_FLAGS = ["--parent-version", "20261124-abc", "--parent-manifest-sha256", "deadbeef"]
+
+
+def test_a_default_run_with_pin_flags_loads_the_pin_and_reports_it(monkeypatch, fake_s3, tmp_path):
+    load_pin = MagicMock(return_value=_RAW_PIN)
+    argv = [*_PIN_FLAGS, "--cache-dir", str(tmp_path)]
+
+    downloader_cls, _, _ = _run_main(
+        monkeypatch, argv, {1: DownloadResult(ok=True)}, fake_s3=fake_s3, load_pin=load_pin
+    )
+
+    load_pin.assert_called_once_with(fake_s3, "20261124-abc", "deadbeef", tmp_path)
+    assert downloader_cls.call_args.kwargs["pin"] is _RAW_PIN
+    settings = _run_report(fake_s3)["settings"]
+    assert settings["parent_version"] == "20261124-abc"
+    assert settings["parent_manifest_sha256"] == "deadbeef"
+
+
+def test_verify_existing_with_pin_flags_loads_the_pin_with_the_default_cache_dir(
+    monkeypatch, fake_s3
+):
+    load_pin = MagicMock(return_value=_RAW_PIN)
+
+    code, dl, _ = _run_command(
+        monkeypatch,
+        fake_s3,
+        [
+            "--parent-version",
+            "20261124-abc",
+            "--parent-manifest-sha256",
+            "deadbeef",
+            "verify-existing",
+        ],
+        load_pin=load_pin,
+    )
+
+    assert code == 0
+    load_pin.assert_called_once_with(
+        fake_s3, "20261124-abc", "deadbeef", Path("outputs") / "segdata-cache"
+    )
+    assert dl.pin is _RAW_PIN
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PinMismatch("manifest differs from the pin"),
+        ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "GetObject"),
+        ValueError("unparseable group 'x1'"),
+    ],
+    ids=["pin-mismatch", "client-error", "value-error"],
+)
+def test_an_unloadable_pin_returns_1_before_login_and_writes_no_run_report(
+    monkeypatch, fake_s3, caplog, error
+):
+    load_pin = MagicMock(side_effect=error)
+
+    downloader_cls, run, discover = _run_main(
+        monkeypatch, _PIN_FLAGS, expected_code=1, fake_s3=fake_s3, load_pin=load_pin
+    )
+
+    downloader_cls.assert_not_called()
+    run.assert_not_called()
+    assert fake_s3.objects == {}
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert messages == [f"cannot load coralnet-raw pin 20261124-abc: {error}"]
