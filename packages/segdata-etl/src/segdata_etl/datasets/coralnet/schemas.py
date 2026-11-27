@@ -7,7 +7,6 @@ output is deterministic and downstream readers can rely on the column types.
 
 from __future__ import annotations
 
-import pandas as pd
 import pyarrow as pa
 
 ANNOTATIONS_SCHEMA: pa.Schema = pa.schema(
@@ -38,25 +37,3 @@ IMAGES_SCHEMA: pa.Schema = pa.schema(
 
 ANNOTATIONS_PRIMARY_KEY: tuple[str, ...] = ("source_id", "image_id", "row", "col")
 IMAGES_PRIMARY_KEY: tuple[str, ...] = ("source_id", "image_id")
-
-
-class SchemaValidationError(ValueError):
-    """Raised when a DataFrame does not satisfy a declared parquet schema."""
-
-
-def validate(df: pd.DataFrame, schema: pa.Schema) -> None:
-    """Verify that ``df`` has every column the schema declares.
-
-    Dtypes are not checked here: ``io.write_parquet_deterministic`` casts every column to the
-    declared type. This catches a column that upstream code silently dropped or renamed.
-
-    Raises:
-        SchemaValidationError: If any declared column is missing from ``df``.
-    """
-    declared = {field.name for field in schema}
-    actual = set(df.columns)
-    missing = declared - actual
-    if missing:
-        raise SchemaValidationError(
-            f"DataFrame is missing required columns for schema: {sorted(missing)}"
-        )

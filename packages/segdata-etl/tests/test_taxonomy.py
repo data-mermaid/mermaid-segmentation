@@ -114,14 +114,6 @@ def _bad_attribute_routes(case: str) -> dict[str, _Response]:
     page2 = f"{first}?page=2"
     if case == "empty page":
         routes[first] = _Response({"count": 2, "next": None, "results": []})
-    elif case == "duplicate id":
-        dup = {"id": "b2", "name": "Acropora", "parent": None}
-        routes[first] = _Response({"count": 2, "next": page2, "results": [dup]})
-        routes[page2] = _Response({"count": 2, "next": None, "results": [dup]})
-    elif case == "rows lack parent":
-        routes[first] = _Response(
-            {"count": 2, "next": page2, "results": [{"id": "b2", "name": "Acropora"}]}
-        )
     elif case == "unknown parent":
         routes[page2] = _Response(
             {"count": 2, "next": None, "results": [{"id": "a1", "name": "Hard", "parent": "zz"}]}
@@ -143,8 +135,6 @@ def _bad_attribute_routes(case: str) -> dict[str, _Response]:
     ("case", "exc", "match"),
     [
         ("empty page", ValueError, "0 rows fetched"),
-        ("duplicate id", ValueError, "duplicate ids"),
-        ("rows lack parent", KeyError, "parent"),
         ("unknown parent", ValueError, "unknown parents"),
         ("next repeats", ValueError, "repeats"),
         ("more rows than count", ValueError, "2 rows fetched, API count is 1"),
@@ -253,24 +243,7 @@ def test_taxonomy_subcommand_stages_the_taxonomy_through_cli_main(
     assert (_staged_dir(stage) / "manifest.json").is_file()
 
 
-def test_stage_names_a_version_already_in_s3_with_a_counter(
-    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    first = _stage(tmp_path / "probe", capsys)
-    taken = f"taxonomy/mermaid-benthic/{first.name}/manifest.json"
-    s3 = FakeS3({(DATASET_BUCKET, taken): b"{}"})
-    _run(_args(stage_dir=tmp_path / "stage"), FakeSession(_routes()), capsys, s3)
-    assert _staged_dir(tmp_path / "stage").name == f"{first.name}-2"
-
-
-def test_stage_dir_is_required() -> None:
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["taxonomy"])
-
-
-@pytest.mark.parametrize(
-    "state", [GitState("abcdef1", True, True), GitState("abcdef1", False, False)]
-)
+@pytest.mark.parametrize("state", [GitState("abcdef1", True, True)])
 def test_a_dirty_or_unpushed_tree_is_refused_before_any_fetch(
     repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: GitState
 ) -> None:

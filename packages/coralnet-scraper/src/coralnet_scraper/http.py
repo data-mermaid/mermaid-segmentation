@@ -50,7 +50,7 @@ class _RedactUrlQuery(logging.Filter):
 
 
 _URL_QUERY_FILTER = _RedactUrlQuery()
-# Presigned media URLs carry CoralNet's credentials in the query (#276). The retry warning
+# Presigned media URLs carry CoralNet's credentials in the query. The retry warning
 # stays for live visibility; CountingRetry still counts retries for the Transport summary.
 # Both loggers write request URLs: the pool on retries and requests, util.retry on each retry.
 for _name in ("urllib3.connectionpool", "urllib3.util.retry"):

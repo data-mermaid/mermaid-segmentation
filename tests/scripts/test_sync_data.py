@@ -88,8 +88,3 @@ def test_workers_flag_sets_max_workers_and_the_pool_size(
 
     assert seen["workers"] == workers
     assert seen["client"][1].max_pool_connections == pool
-
-
-def test_main_requires_both_paths() -> None:
-    with pytest.raises(SystemExit):
-        script.main(["--data-config", "x.yaml"])

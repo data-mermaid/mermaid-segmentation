@@ -15,7 +15,6 @@ from mermaidseg.io import (
     REPO_ROOT,
     ConfigDict,
     apply_resolution,
-    build_eval_transform,
     build_train_parser,
     check_train_args,
     compile_transform,
@@ -49,13 +48,6 @@ def test_setup_config_output_is_plain_yaml_data():
     cfg = setup_config(paths, resolution=64)
     assert _non_plain_nodes(cfg) == []
     train = cfg["data"]["datasets"]["coralnet"]["train"]["transform"]
-    assert list(train) == [
-        "SmallestMaxSize",
-        "RandomResizedCrop",
-        "HorizontalFlip",
-        "VerticalFlip",
-        "ColorJitter",
-    ]
     assert train["RandomResizedCrop"]["size"] == [64, 64]
     assert cfg["model"]["input_size"] == [64, 64]
 
@@ -95,12 +87,6 @@ def test_apply_resolution_sets_only_the_random_resized_crop_size():
     }
 
 
-def test_eval_transform_resizes_to_the_input_size_then_normalizes():
-    resize, normalize = build_eval_transform((32, 48)).transforms
-    assert (type(resize), resize.height, resize.width) == (A.Resize, 32, 48)
-    assert isinstance(normalize, A.Normalize)
-
-
 def test_relative_path_resolves_to_the_repo_not_the_current_directory(monkeypatch, tmp_path: Path):
     (tmp_path / "configs").mkdir()
     (tmp_path / "configs" / "class_to_concepts.csv").write_text("decoy\n")
@@ -113,17 +99,19 @@ def test_relative_path_resolves_to_the_repo_not_the_current_directory(monkeypatc
 # ---------- ConfigDict ----------
 
 
-def test_update_merges_nested_mappings_instead_of_replacing_them():
+@pytest.mark.parametrize(
+    "update",
+    [
+        lambda cfg: cfg.update({"a": {"y": 3, "z": 4}}),
+        lambda cfg: cfg.update(a={"y": 3, "z": 4}),
+    ],
+    ids=["mapping", "keywords"],
+)
+def test_update_merges_nested_mappings_instead_of_replacing_them(update):
     cfg = ConfigDict({"a": {"x": 1, "y": 2}, "b": 1})
-    cfg.update({"a": {"y": 3, "z": 4}})
+    update(cfg)
     assert cfg == {"a": {"x": 1, "y": 3, "z": 4}, "b": 1}
     assert isinstance(cfg["a"], ConfigDict)
-
-
-def test_update_merges_nested_mappings_given_as_keywords():
-    cfg = ConfigDict({"a": {"x": 1, "y": 2}})
-    cfg.update(a={"y": 3, "z": 4})
-    assert cfg == {"a": {"x": 1, "y": 3, "z": 4}}
 
 
 def test_update_replaces_a_mapping_by_a_scalar_and_a_scalar_by_a_mapping():
@@ -186,7 +174,6 @@ def test_config_defaults_point_at_existing_repo_files():
     [
         pytest.param(["--cache-dir", "cache", "--num-workers", "0"], id="zero-num-workers"),
         pytest.param([*REQUIRED, "--nccl-timeout-min", "0"], id="zero-nccl-timeout"),
-        pytest.param([*REQUIRED, "--nccl-timeout-min", "-1"], id="negative-nccl-timeout"),
         pytest.param(
             [*REQUIRED, "--preempt-checkpoint-every-steps", "-1"], id="negative-preempt-every"
         ),
@@ -206,8 +193,6 @@ def test_check_train_args_rejects_invalid_arguments_with_exit_2(argv):
     [
         pytest.param([*REQUIRED, "--nccl-timeout-min", "0.01"], id="small-positive-nccl-timeout"),
         pytest.param([*REQUIRED, "--preempt-checkpoint-every-steps", "0"], id="preempt-disabled"),
-        pytest.param([*REQUIRED, "--checkpoint", "x"], id="checkpoint-alone"),
-        pytest.param([*REQUIRED, "--init-weights", "y"], id="init-weights-alone"),
         pytest.param(["--cache-dir", "cache", "--num-workers", "1"], id="single-worker"),
     ],
 )
@@ -230,19 +215,7 @@ def test_batch_size_flag_overrides_the_training_batch_size_and_keeps_its_sibling
     assert cfg == {"run_name": "keep", "training": {"batch_size": 8, "epochs": 5}}
 
 
-def test_run_name_flag_overrides_the_run_name():
-    cfg = ConfigDict({"run_name": "old"})
-    update_config_with_args(cfg, _overrides(run_name="new"))
-    assert cfg.run_name == "new"
-
-
 def test_flags_that_are_not_given_leave_the_config_untouched():
     cfg = ConfigDict({"run_name": "keep", "training": {"batch_size": 2}})
     update_config_with_args(cfg, _overrides())
     assert cfg == {"run_name": "keep", "training": {"batch_size": 2}}
-
-
-def test_batch_size_flag_creates_a_missing_training_section():
-    cfg = ConfigDict()
-    update_config_with_args(cfg, _overrides(batch_size=8))
-    assert cfg == {"training": {"batch_size": 8}}

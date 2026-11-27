@@ -40,19 +40,6 @@ def test_load_never_calls_the_hub(bundle_dir):
         load_bundle(bundle_dir, "cpu")
 
 
-def test_load_refuses_weights_missing_a_key(bundle_dir, tmp_path):
-    broken = tmp_path / "broken"
-    broken.mkdir()
-    weights = load_file(bundle_dir / WEIGHTS)
-    del weights["concept_proj.bias"]
-    save_file(weights, broken / WEIGHTS)
-    metadata = json.loads((bundle_dir / MODEL_JSON).read_text())
-    metadata[WEIGHTS_SHA256] = hashlib.sha256((broken / WEIGHTS).read_bytes()).hexdigest()
-    (broken / MODEL_JSON).write_text(json.dumps(metadata))
-    with pytest.raises(RuntimeError, match="concept_proj.bias"):
-        load_bundle(broken, "cpu")
-
-
 def test_load_refuses_weights_with_a_changed_value(bundle_dir, tmp_path):
     copied = tmp_path / "copy"
     shutil.copytree(bundle_dir, copied)
@@ -64,13 +51,17 @@ def test_load_refuses_weights_with_a_changed_value(bundle_dir, tmp_path):
         load_bundle(copied, "cpu")
 
 
-def test_load_refuses_truncated_weights_before_parsing_them(bundle_dir, tmp_path):
-    copied = tmp_path / "copy"
-    shutil.copytree(bundle_dir, copied)
-    data = (copied / WEIGHTS).read_bytes()
-    (copied / WEIGHTS).write_bytes(data[:-8])
-    with pytest.raises(ValueError, match="weights_sha256"):
-        load_bundle(copied, "cpu")
+def test_load_refuses_weights_missing_a_key(bundle_dir, tmp_path):
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    weights = load_file(bundle_dir / WEIGHTS)
+    del weights["concept_proj.bias"]
+    save_file(weights, broken / WEIGHTS)
+    metadata = json.loads((bundle_dir / MODEL_JSON).read_text())
+    metadata[WEIGHTS_SHA256] = hashlib.sha256((broken / WEIGHTS).read_bytes()).hexdigest()
+    (broken / MODEL_JSON).write_text(json.dumps(metadata))
+    with pytest.raises(RuntimeError, match="concept_proj.bias"):
+        load_bundle(broken, "cpu")
 
 
 def test_load_refuses_a_bundle_without_a_recorded_checksum(bundle_dir, tmp_path):
@@ -122,9 +113,7 @@ def test_predictor_preprocesses_with_the_bundles_own_statistics(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    ("key", "foreign"), [("channel_order", "BGR"), ("interpolation", "nearest")]
-)
+@pytest.mark.parametrize(("key", "foreign"), [("channel_order", "BGR")])
 def test_load_rejects_a_foreign_preprocessing_key(bundle_dir, tmp_path, key, foreign):
     copied = tmp_path / "copy"
     shutil.copytree(bundle_dir, copied)

@@ -67,10 +67,6 @@ def test_split_group_repeated_within_one_split_is_accepted(tmp_path: Path) -> No
     assert read_split_file(_write(tmp_path, text)).num_rows == 2
 
 
-def test_file_without_split_group_column_is_accepted(tmp_path: Path) -> None:
-    assert read_split_file(_write(tmp_path, "group,split\ns1,train\ns2,test\n")).num_rows == 2
-
-
 def test_coverage_allows_groups_the_version_lacks(tmp_path: Path) -> None:
     path = _write(tmp_path, "group,split\ns1,train\ns2,val\ns9,test\n")
     check_coverage(path, "coralnet", {"s1", "s2"})

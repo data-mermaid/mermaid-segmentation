@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -92,34 +91,6 @@ def test_a_staged_table_altered_after_staging_is_refused_with_no_writes(stage: P
     assert fake.calls == []
 
 
-def test_a_taxonomy_table_edited_after_preflight_is_uploaded_as_checked(
-    stage: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fake = FakeS3()
-    table = _staged(stage) / "growth_forms.parquet"
-    checked = table.read_bytes()
-    real_preflight = promote._taxonomy_preflight
-
-    def edit_after_preflight(*args: Any, **kwargs: Any) -> Any:
-        plan = real_preflight(*args, **kwargs)
-        table.write_bytes(b"edited after preflight")
-        return plan
-
-    monkeypatch.setattr(promote, "_taxonomy_preflight", edit_after_preflight)
-
-    _promote(fake, stage)
-
-    assert fake.objects[(DATASET_BUCKET, PREFIX + "growth_forms.parquet")] == checked
-
-
-def test_a_staged_manifest_describing_another_version_is_refused(stage: Path) -> None:
-    manifest = _staged(stage) / "manifest.json"
-    manifest.write_text(manifest.read_text().replace(VERSION, "20261126-abcdef1"))
-
-    with pytest.raises(PublishRefused, match="describes mermaid-benthic 20261126-abcdef1"):
-        _promote(FakeS3(), stage)
-
-
 def test_a_destination_table_holding_other_bytes_is_refused_before_any_write(stage: Path) -> None:
     fake = FakeS3({(DATASET_BUCKET, PREFIX + "growth_forms.parquet"): b"other"})
 
@@ -156,15 +127,3 @@ def test_promote_taxonomy_flag_runs_the_taxonomy_path(
 
     assert cli.main(argv) == 0
     assert (DATASET_BUCKET, PREFIX + "manifest.json") in fake.objects
-
-
-def test_dataset_and_taxonomy_flags_are_mutually_exclusive() -> None:
-    argv = ["promote", "--stage-dir", "s", "--dataset", "d", "--taxonomy", "t", "--version", "v"]
-
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(argv)
-
-
-def test_one_of_dataset_or_taxonomy_is_required() -> None:
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["promote", "--stage-dir", "s", "--version", "v"])

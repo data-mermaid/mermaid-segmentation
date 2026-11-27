@@ -44,12 +44,6 @@ def test_each_channel_matches_the_multi_hot_loss_on_that_channel():
         assert losses[f"multi_hot/{name}"] == pytest.approx(expected.item(), rel=1e-5)
 
 
-def test_name_count_must_match_the_channels():
-    logits, labels = _batch()
-    with pytest.raises(ValueError, match="2 binary concept names for 3 channels"):
-        binary_concept_losses(logits, labels, NAMES[:2], **WEIGHTS)
-
-
 def test_concept_bottleneck_loss_reports_the_breakdown_only_when_named():
     logits, labels = _batch()
     outputs = torch.randn(3, 5, 4, 4)

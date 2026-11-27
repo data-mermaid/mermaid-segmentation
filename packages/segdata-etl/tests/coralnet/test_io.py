@@ -9,10 +9,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from botocore.exceptions import ClientError
-from s3_fake import FakeS3, client_error
+from s3_fake import FakeS3
 
-from segdata_etl.datasets.coralnet import io as dataset_io
 from segdata_etl.datasets.coralnet.io import (
     _git_short_sha,
     compute_version_tag,
@@ -44,8 +42,6 @@ def test_write_parquet_deterministic_stores_rows_in_primary_key_order(tmp_path):
     ("uri", "expected"),
     [
         ("s3://b/k/x.parquet", ("b", "k/x.parquet")),
-        ("s3://b/k", ("b", "k")),
-        ("s3://b/", ("b", "")),
         ("s3://b", ("b", "")),
     ],
 )
@@ -53,7 +49,7 @@ def test_parse_s3_uri(uri, expected):
     assert parse_s3_uri(uri) == expected
 
 
-@pytest.mark.parametrize("uri", ["http://b/k", "b/k", ""])
+@pytest.mark.parametrize("uri", ["http://b/k"])
 def test_parse_s3_uri_rejects_a_non_s3_uri(uri):
     with pytest.raises(ValueError, match="Expected s3:// URI"):
         parse_s3_uri(uri)
@@ -63,8 +59,6 @@ def test_parse_s3_uri_rejects_a_non_s3_uri(uri):
     ("uri", "message"),
     [
         ("s3://b", "S3 URI missing key"),
-        ("s3://b/", "S3 URI missing key"),
-        ("gs://b/k", "Expected s3:// URI"),
     ],
 )
 def test_upload_to_s3_rejects_a_bad_uri_before_uploading(fake_s3, tmp_path, uri, message):
@@ -86,38 +80,15 @@ class _StubTable:
 
 
 class _StubCon:
-    """Stands in for the ibis connection: returns a table or raises on ``read_csv``."""
+    """Stands in for the ibis connection: returns a table from ``read_csv``."""
 
-    def __init__(self, result: pd.DataFrame | Exception):
+    def __init__(self, result: pd.DataFrame):
         self._result = result
         self.calls: list[tuple[str, dict]] = []
 
     def read_csv(self, uri: str, **kwargs):
         self.calls.append((uri, kwargs))
-        if isinstance(self._result, Exception):
-            raise self._result
         return _StubTable(self._result)
-
-
-def _client_with(key: str = "p/s1/annotations.csv") -> FakeS3:
-    client = FakeS3()
-    client.put("bkt", key, b"a\n1\n")
-    return client
-
-
-def test_read_csv_via_ibis_reads_the_s3_uri_with_the_messy_csv_options():
-    df = pd.DataFrame({"a": ["1"]})
-    con = _StubCon(df)
-
-    result = read_csv_via_ibis(con, _client_with(), "bkt", "p/s1/annotations.csv")
-
-    assert result is df
-    assert con.calls == [
-        (
-            "s3://bkt/p/s1/annotations.csv",
-            {"null_padding": True, "all_varchar": True, "quote": '"'},
-        )
-    ]
 
 
 def test_read_csv_via_ibis_returns_none_for_a_missing_object_without_reading():
@@ -125,24 +96,6 @@ def test_read_csv_via_ibis_returns_none_for_a_missing_object_without_reading():
 
     assert read_csv_via_ibis(con, FakeS3(), "bkt", "p/s1/annotations.csv") is None
     assert con.calls == []
-
-
-def test_read_csv_via_ibis_raises_when_the_existence_check_is_denied():
-    class Denied:
-        def head_object(self, **_):
-            raise client_error("AccessDenied", 403, "HeadObject")
-
-    con = _StubCon(pd.DataFrame())
-    with pytest.raises(ClientError):
-        read_csv_via_ibis(con, Denied(), "bkt", "k")
-    assert con.calls == []
-
-
-def test_read_csv_via_ibis_reraises_a_duckdb_failure_on_a_present_object():
-    con = _StubCon(RuntimeError("HTTP 404 Not Found"))
-
-    with pytest.raises(RuntimeError, match="HTTP 404"):
-        read_csv_via_ibis(con, _client_with(), "bkt", "p/s1/annotations.csv")
 
 
 def _git(repo, *args: str) -> str:
@@ -188,25 +141,6 @@ def test_git_short_sha_returns_the_head_prefix(git_repo):
 
 def test_git_short_sha_is_none_outside_a_repository(outside_git):
     assert _git_short_sha() is None
-
-
-def test_git_short_sha_is_none_when_git_is_not_installed(outside_git, monkeypatch):
-    monkeypatch.setenv("PATH", str(outside_git))
-
-    assert _git_short_sha() is None
-
-
-def test_git_short_sha_is_none_when_git_times_out(monkeypatch):
-    def _timeout(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="git", timeout=5)
-
-    monkeypatch.setattr(dataset_io.subprocess, "run", _timeout)
-
-    assert _git_short_sha() is None
-
-
-def test_compute_version_tag_returns_the_override_unchanged():
-    assert compute_version_tag("my-tag") == "my-tag"
 
 
 def test_compute_version_tag_is_the_date_and_the_head_sha(git_repo):

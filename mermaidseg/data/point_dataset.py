@@ -41,8 +41,6 @@ def rasterize_points(
         The ``(height, width)`` mask.
     """
     mask = np.zeros(shape, dtype=np.int32)
-    if len(rows) == 0:
-        return mask
     rows = rows.astype(np.intp)
     cols = cols.astype(np.intp)
     ids = label_ids.astype(np.int32) + np.int32(offset)

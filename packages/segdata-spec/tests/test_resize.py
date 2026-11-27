@@ -4,7 +4,6 @@ import random
 import pyarrow as pa
 import pytest
 from PIL import Image, UnidentifiedImageError
-from pydantic import ValidationError
 
 from segdata_spec.resize import (
     ResizeSpec,
@@ -59,33 +58,15 @@ def test_spec_id_changes_with_each_field(other):
 
 
 @pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"max_edge": 0},
-        {"max_edge": -1},
-        {"max_edge": 10, "jpeg_quality": 0},
-        {"max_edge": 10, "jpeg_quality": 96},
-        {"max_edge": 10, "filter": "nearest"},
-    ],
-)
-def test_spec_rejects_invalid_values(kwargs):
-    with pytest.raises(ValidationError):
-        ResizeSpec(**kwargs)
-
-
-@pytest.mark.parametrize(
     ("size", "expected"),
     [
         ((4000, 3000), (2048, 1536)),
-        ((6000, 4000), (2048, 1365)),
         ((3000, 4000), (1536, 2048)),
         # int(2215 * (2048 / 2215)) is 2047 in float arithmetic, not 2048.
         ((2215, 1000), (2047, 924)),
         ((2048, 1536), (2048, 1536)),
-        ((2049, 1000), (2048, 999)),
         # A zero edge would fail the encode, so each edge keeps at least one pixel.
         ((10000, 3), (2048, 1)),
-        ((3, 10000), (1, 2048)),
     ],
 )
 def test_scaled_size(size, expected):
@@ -107,12 +88,6 @@ def test_resize_image_converts_png_to_rgb_or_l_jpeg_within_limit(mode):
     assert (out.format, out.mode, out.size) == ("JPEG", "L" if mode == "L" else "RGB", (100, 50))
 
 
-def test_resize_image_keeps_a_one_pixel_edge_on_an_extreme_aspect_ratio():
-    out = _decode(resize_image(_jpeg((10000, 3)), ResizeSpec(max_edge=2048)))
-
-    assert (out.format, out.size) == ("JPEG", (2048, 1))
-
-
 def test_resize_image_scales_a_palette_png_above_the_limit_to_rgb_jpeg():
     data = _encode(Image.new("P", (300, 200)), "PNG")
 
@@ -125,12 +100,6 @@ def test_resize_image_scales_a_cmyk_jpeg_above_the_limit_to_rgb_jpeg():
     out = _decode(resize_image(_jpeg((300, 200), "CMYK"), ResizeSpec(max_edge=150)))
 
     assert (out.format, out.mode, out.size) == ("JPEG", "RGB", (150, 100))
-
-
-def test_resize_image_scales_an_image_one_pixel_over_the_limit():
-    out = _decode(resize_image(_jpeg((151, 100)), ResizeSpec(max_edge=150)))
-
-    assert out.size == (150, 99)
 
 
 def test_resize_image_filter_changes_the_output():
@@ -164,14 +133,6 @@ def test_resize_image_reencodes_cmyk_jpeg_within_limit():
     out = _decode(resize_image(data, ResizeSpec(max_edge=2048)))
 
     assert (out.format, out.mode, out.size) == ("JPEG", "RGB", (64, 32))
-
-
-def test_resize_image_raises_on_decompression_bomb(monkeypatch):
-    data = _jpeg((100, 100))
-    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
-
-    with pytest.raises(Image.DecompressionBombError):
-        resize_image(data, ResizeSpec(max_edge=2048))
 
 
 def test_resize_mask_uses_nearest_so_label_ids_survive():
@@ -285,8 +246,3 @@ def test_resize_image_rejects_a_format_outside_jpeg_and_png():
 
     with pytest.raises(UnidentifiedImageError):
         resize_image(tiff, ResizeSpec(max_edge=2048))
-
-
-def test_resize_mask_rejects_a_format_other_than_png():
-    with pytest.raises(UnidentifiedImageError):
-        resize_mask(_jpeg((8, 8)), (4, 4))

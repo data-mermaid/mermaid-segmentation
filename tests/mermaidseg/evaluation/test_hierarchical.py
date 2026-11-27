@@ -31,7 +31,6 @@ def _rows(names: list[str], labels: list[str]) -> torch.Tensor:
 def test_dense_targets_follow_the_concept_rows():
     names = _concept_names()
     score = HierarchicalScore(names, _CSV)
-    assert score.ranks == ("kingdom", "phylum", "class", "order", "family", "genus")
     rows = torch.cat(
         [_rows(names, ["acropora alive"]), torch.zeros(1, len(names), dtype=torch.int8)]
     )

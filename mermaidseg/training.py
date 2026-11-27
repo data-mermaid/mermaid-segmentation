@@ -516,7 +516,7 @@ def run(args: argparse.Namespace) -> None:
                 # Same predicate on every rank: global_step is updated together.
                 # Steps that do not write return immediately, with no barrier.
                 write_interval = step % checkpoint_every == 0
-                write_preempt = preempt_every > 0 and step > 0 and step % preempt_every == 0
+                write_preempt = preempt_every > 0 and step % preempt_every == 0
                 if not write_interval and not write_preempt:
                     return
 

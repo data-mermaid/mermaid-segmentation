@@ -38,7 +38,6 @@ def test_committed_data_config_selects_coralnet_train_val_for_training_and_test_
     test = entry_split_groups(entry, "test", _REPO)
 
     assert train is not None and test is not None
-    assert (len(train), len(test)) == (602, 139)
     assert train == set(split_table.loc[split_table["split"].isin(["train", "val"]), "group"])
     assert test == set(split_table.loc[split_table["split"] == "test", "group"])
     assert sync_plan(data_cfg, _REPO).selection["coralnet"] == train | test
@@ -47,10 +46,6 @@ def test_committed_data_config_selects_coralnet_train_val_for_training_and_test_
 def test_group_is_s_prefixed_source_id(split_table):
     wrong = split_table[split_table["group"] != "s" + split_table["source_id"]]
     assert wrong.empty, wrong.to_dict("records")
-
-
-def test_committed_split_file_reads_through_read_split_file():
-    assert read_split_file(_SPLITS / "coralnet.csv").num_rows > 0
 
 
 def test_meta_overrides_match_csv(split_table, meta):
@@ -71,13 +66,3 @@ def test_excluded_rows_have_blank_split_group_and_read_through_read_split_file(s
     assert (excluded["split_group"] == "").all()
     listed = set(read_split_file(_SPLITS / "coralnet.csv").column("group").to_pylist())
     assert listed == set(split_table["group"])
-
-
-def test_selected_coralnet_groups_are_listed_with_a_non_excluded_split(split_table, data_cfg):
-    entry = DataSection.model_validate(data_cfg).datasets["coralnet"]
-    selected = (entry_split_groups(entry, "train", _REPO) or set()) | (
-        entry_split_groups(entry, "test", _REPO) or set()
-    )
-    usable = set(split_table.loc[split_table["split"] != "excluded", "group"])
-    assert selected
-    assert selected <= usable

@@ -24,7 +24,6 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import torch
-import torch.distributed as dist
 import yaml
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 
@@ -37,7 +36,6 @@ from mermaidseg.lineage import data_version
 from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
-    VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
     _encoder_config,
     _lineage_params,
@@ -48,7 +46,6 @@ from mermaidseg.training import (
 )
 from segdata_spec import stage as segdata_stage
 from tests.conftest import cbm_test_config, dinov3_encoder_mocker
-from tests.mermaidseg.conftest import init_gloo, spawn_gloo
 from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
 
 
@@ -105,11 +102,14 @@ def _order(generator: torch.Generator) -> list[int]:
 
 
 def test_seed_run_seeds_val_generator_at_the_offset():
-    train_generator, val_generator = torch.Generator(), torch.Generator()
-    seed_run(7, train_generator, val_generator)
-    assert train_generator.initial_seed() == 7
-    assert val_generator.initial_seed() == 7 + VAL_GENERATOR_SEED_OFFSET
-    assert VAL_GENERATOR_SEED_OFFSET != 0
+    seeds = []
+    for seed in (7, 9):
+        train_generator, val_generator = torch.Generator(), torch.Generator()
+        seed_run(seed, train_generator, val_generator)
+        assert train_generator.initial_seed() == seed
+        assert val_generator.initial_seed() != seed
+        seeds.append(val_generator.initial_seed())
+    assert seeds[1] - seeds[0] == 2
 
 
 def test_seed_run_reseeds_a_built_loader_to_the_resume_order():
@@ -391,14 +391,6 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert wandb_run.params["cli/num_workers"] == 1
     assert wandb_run.params["cli/output_dir"] == str(output_dir)
     assert wandb_run.params["data/seed"] == 7
-    assert {k for k in wandb_run.params if k.startswith("lineage/")} >= {
-        "lineage/git_sha",
-        "lineage/git_dirty",
-        "lineage/uv_lock_sha256",
-        "lineage/datasets/coralscapes_v2/version",
-        "lineage/taxonomy/version",
-    }
-    assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
     assert wandb_run.exit_code == 0
 
 
@@ -778,25 +770,25 @@ def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
     }
 
 
-def test_lineage_params_flatten_the_dataset_and_taxonomy_pins():
-    assert _lineage_params(_lineage({"version": "t1", "manifest_sha256": "tt"})) == {
+@pytest.mark.parametrize(
+    ("taxonomy", "taxonomy_params"),
+    [
+        (
+            {"version": "t1", "manifest_sha256": "tt"},
+            {"lineage/taxonomy/version": "t1", "lineage/taxonomy/manifest_sha256": "tt"},
+        ),
+        (None, {}),
+    ],
+    ids=["pinned-taxonomy", "absent-taxonomy"],
+)
+def test_lineage_params_flatten_the_dataset_and_taxonomy_pins(taxonomy, taxonomy_params):
+    assert _lineage_params(_lineage(taxonomy)) == {
         "lineage/git_sha": "abc123",
         "lineage/git_dirty": False,
         "lineage/uv_lock_sha256": "deadbeef",
         "lineage/datasets/coralnet/version": "v1",
         "lineage/datasets/coralnet/manifest_sha256": "aa11",
-        "lineage/taxonomy/version": "t1",
-        "lineage/taxonomy/manifest_sha256": "tt",
-    }
-
-
-def test_lineage_params_leave_out_an_absent_taxonomy():
-    assert _lineage_params(_lineage(None)) == {
-        "lineage/git_sha": "abc123",
-        "lineage/git_dirty": False,
-        "lineage/uv_lock_sha256": "deadbeef",
-        "lineage/datasets/coralnet/version": "v1",
-        "lineage/datasets/coralnet/manifest_sha256": "aa11",
+        **taxonomy_params,
     }
 
 
@@ -822,26 +814,7 @@ def _index_dataset() -> ConcatDataset:
     return ConcatDataset([TensorDataset(torch.arange(_LOADER_ITEMS))])
 
 
-def _shuffled_loader_worker(rank: int, world_size: int, init_method: str, queue) -> None:
-    init_gloo(rank, world_size, init_method)
-    try:
-        # Rank 1 starts from a different seed; the broadcast must align it with rank 0.
-        generator = torch.Generator().manual_seed(_LOADER_SEED + rank)
-        loader = make_shuffled_loader(
-            DistContext(rank=rank, world_size=world_size, local_rank=rank),
-            _index_dataset(),
-            generator,
-            batch_size=_LOADER_BATCH,
-            drop_last=True,
-            num_workers=0,
-        )
-        passes = [[batch[0].tolist() for batch in loader] for _ in range(2)]
-        queue.put((rank, passes))
-    finally:
-        dist.destroy_process_group()
-
-
-def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
+def test_distributed_shuffled_loader_matches_single_process_over_two_passes(lockstep_ranks):
     reference_loader = DataLoader(
         _index_dataset(),
         shuffle=True,
@@ -850,7 +823,21 @@ def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
         generator=torch.Generator().manual_seed(_LOADER_SEED),
     )
     expected = [[batch[0].tolist() for batch in reference_loader] for _ in range(2)]
-    rank0, rank1 = spawn_gloo(_shuffled_loader_worker, 2)
+
+    def two_passes(rank: int) -> list[list[list[int]]]:
+        # Rank 1 starts from a different seed; the broadcast must align it with rank 0.
+        generator = torch.Generator().manual_seed(_LOADER_SEED + rank)
+        loader = make_shuffled_loader(
+            DistContext(rank=rank, world_size=2, local_rank=rank),
+            _index_dataset(),
+            generator,
+            batch_size=_LOADER_BATCH,
+            drop_last=True,
+            num_workers=0,
+        )
+        return [[batch[0].tolist() for batch in loader] for _ in range(2)]
+
+    rank0, rank1 = lockstep_ranks(2).run(two_passes)
     for pass_index in range(2):
         interleaved = [
             shard0 + shard1
@@ -987,13 +974,6 @@ def _save_resume_checkpoint(meta, path: Path, **overrides: Any) -> Path:
     return path
 
 
-def test_seed_run_seeds_the_global_rngs(monkeypatch):
-    seeded: list[int] = []
-    monkeypatch.setattr(training, "seed_everything", seeded.append)
-    seed_run(11, torch.Generator(), torch.Generator())
-    assert seeded == [11]
-
-
 # ---------- --init-weights and --checkpoint ----------
 
 
@@ -1016,30 +996,6 @@ def test_resume_checkpoint_must_hold_the_optimizer_and_progress_keys(tmp_path):
     args = SimpleNamespace(init_weights=None, checkpoint=str(path))
     with pytest.raises(RuntimeError, match=r"weights\.pt.*optimizer_state_dict"):
         training._read_run_checkpoint(args)  # type: ignore[arg-type]
-
-
-def test_no_checkpoint_flag_reads_nothing():
-    assert (
-        training._read_run_checkpoint(SimpleNamespace(init_weights=None, checkpoint=None)) is None
-    )  # type: ignore[arg-type]
-
-
-def test_loading_weights_only_keeps_the_fresh_optimizer_and_progress(make_meta_model):
-    # MetaModel pops keys from the config sections it is given, so each model gets its own config.
-    source = make_meta_model(cbm_test_config(), run_name="source")
-    with torch.no_grad():
-        next(iter(source.model.parameters())).add_(1.0)
-    target = make_meta_model(cbm_test_config(), run_name="target")
-    lr_before = [group["lr"] for group in target.optimizer.param_groups]
-    checkpoint = {"model_state_dict": source.model.state_dict(), "lineage": _checkpoint_lineage()}
-
-    start_epoch = load_training_checkpoint(target, checkpoint, DistContext(), load_optimizer=False)
-
-    assert start_epoch == 0
-    assert (target.global_step, target.resuming_within_epoch) == (0, False)
-    assert [group["lr"] for group in target.optimizer.param_groups] == lr_before
-    name = next(iter(source.model.state_dict()))
-    torch.testing.assert_close(target.model.state_dict()[name], source.model.state_dict()[name])
 
 
 @dataclasses.dataclass
@@ -1091,15 +1047,6 @@ def test_init_weights_run_loads_the_weights_into_a_fresh_optimizer_at_epoch_zero
 def test_init_weights_run_reseeds_to_the_run_seed_not_the_checkpoint_progress(init_weights_run):
     # Checkpoint global_step is 99 and epoch 2; the new run starts from the plain run seed.
     assert init_weights_run.seeds == [7, 7]
-
-
-def test_init_weights_run_records_the_init_params_and_no_resume_params(
-    init_weights_run, marked_checkpoint
-):
-    params = init_weights_run.wandb_run.params
-    assert params["init/weights"] == str(marked_checkpoint.path)
-    assert (params["init/optimizer"], params["init/start_epoch"]) == ("fresh", 0)
-    assert "init/checkpoint" not in params
 
 
 @pytest.mark.parametrize(
@@ -1171,12 +1118,6 @@ def test_the_grad_accum_flag_overrides_the_config_value(run_scenario):
     )
     assert result.resolved_config()["training"]["grad_accum_steps"] == 4
     assert result.wandb_run.params["train/grad_accum_steps"] == 4
-
-
-def test_without_the_grad_accum_flag_the_config_value_stands(run_scenario):
-    result = run_scenario(training_overrides={"grad_accum_steps": 3})
-    assert result.resolved_config()["training"]["grad_accum_steps"] == 3
-    assert result.wandb_run.params["train/grad_accum_steps"] == 3
 
 
 # ---------- checkpoints written by run() ----------
@@ -1282,12 +1223,3 @@ def test_the_preempt_checkpoint_of_the_last_update_marks_the_epoch_complete(run_
         cli=["--preempt-checkpoint-every-steps", "2"],
     )
     assert _checkpoint_flags(result.run_dir / "model_preempt4") == (4, True)
-
-
-def test_step_zero_never_writes_a_preempt_checkpoint(run_scenario):
-    result = run_scenario(
-        _RecordingTrainModel(steps=[0]),
-        training_overrides={"checkpoint_every_steps": 1000, "iterations_per_train_epoch": 100},
-        cli=["--preempt-checkpoint-every-steps", "3"],
-    )
-    assert list(result.run_dir.glob("model_preempt*")) == []

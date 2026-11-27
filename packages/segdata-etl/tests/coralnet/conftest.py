@@ -5,11 +5,9 @@ Image-byte and CSV builders for the scraped-source tests; ``fake_s3`` is in the 
 
 from __future__ import annotations
 
-import io
 import struct
 
 import pytest
-from PIL import Image
 from s3_fake import FakeS3
 
 __all__ = ["populate_source"]
@@ -54,12 +52,6 @@ def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:
 @pytest.fixture
 def jpeg_small_bytes() -> bytes:
     return _make_jpeg_bytes(1024, 768)
-
-
-@pytest.fixture
-def jpeg_large_bytes() -> bytes:
-    """JPEG with longest_edge=4096 (> 2048 default threshold => needs_resize)."""
-    return _make_jpeg_bytes(4096, 3000)
 
 
 @pytest.fixture
@@ -133,57 +125,3 @@ def populate_source(
 @pytest.fixture
 def populate():
     return populate_source
-
-
-# ============================================================================
-# Image corruption and format fixtures for preprocessing robustness tests
-# ============================================================================
-
-
-@pytest.fixture
-def valid_rgb_jpeg_bytes() -> bytes:
-    """Valid RGB JPEG (3 channels, 2048x1536)."""
-    img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    return buf.getvalue()
-
-
-@pytest.fixture
-def rgba_png_bytes() -> bytes:
-    """RGBA PNG (4 channels, 1024x768) — recoverable; resize converts it to RGB."""
-    img = Image.new("RGBA", (1024, 768), color=(255, 0, 0, 255))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-@pytest.fixture
-def grayscale_jpeg_bytes() -> bytes:
-    """Grayscale JPEG (1 channel, L mode) — recoverable; resize encodes L directly."""
-    img = Image.new("L", (1024, 768), color=128)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    return buf.getvalue()
-
-
-@pytest.fixture
-def truncated_jpeg_bytes() -> bytes:
-    """Truncated JPEG (valid header but missing end marker and data)."""
-    img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    jpeg_data = buf.getvalue()
-    # Keep only first 50% of data, truncating mid-stream
-    return jpeg_data[: len(jpeg_data) // 2]
-
-
-@pytest.fixture
-def corrupted_sof_jpeg_bytes() -> bytes:
-    """Decodable JPEG (with scan data) whose SOF0 marker bytes are zeroed."""
-    img = Image.new("RGB", (64, 48), color=(255, 0, 0))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    data = buf.getvalue()
-    sof = data.index(b"\xff\xc0")
-    return data[:sof] + b"\x00\x00" + data[sof + 2 :]

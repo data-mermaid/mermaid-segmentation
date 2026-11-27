@@ -99,9 +99,6 @@ def calculate_taxonomic_rank_loss(
 ) -> torch.Tensor:
     """Cross-entropy on raw logits for the active taxonomic class; masked where not_given or none."""
     num_channels = concept_outputs.size(1)
-    if num_channels == 0:
-        return torch.tensor(0.0, device=concept_outputs.device, dtype=concept_outputs.dtype)
-
     if concept_labels.size(1) != num_channels:
         raise ValueError(
             "Taxonomic label/output channel mismatch: "

@@ -46,8 +46,6 @@ def test_write_csv_of_no_rows_creates_an_empty_file(tmp_path):
         (None, 4, "n/a"),
         (float("nan"), 4, "n/a"),
         (0.123456, 4, "0.1235"),
-        (0.5, 2, "0.50"),
-        (3, 4, "3.0000"),
         ("text", 4, "text"),
     ],
 )

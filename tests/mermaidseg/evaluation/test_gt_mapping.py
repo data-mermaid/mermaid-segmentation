@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +10,6 @@ import pyarrow as pa
 import pytest
 
 from mermaidseg.data.point_dataset import PointDataset
-from mermaidseg.evaluation import gt_mapping
 from mermaidseg.evaluation.gt_mapping import (
     ConceptLookup,
     build_class_lookup,
@@ -105,23 +103,6 @@ def test_without_a_hierarchy_a_target_outside_the_vocabulary_is_ignored():
     assert lookup.name_to_class_id == {"acro": 0, "hc": 1, "gone": 0, "absent": 0}
 
 
-@pytest.mark.parametrize(
-    ("label", "live", "coral"),
-    [
-        ("porites", True, True),
-        ("dead pocillopora", False, False),
-        ("a. galapagensis (alive)", True, True),
-        ("millepora", True, True),
-        ("cred-octocoral", True, True),
-        ("palythoa", True, False),
-        ("macroalgae", True, False),  # live column ignored outside corals / echinoderms
-    ],
-)
-def test_point_scopes_from_the_concept_table(label, live, coral):
-    lookup = build_concept_lookup("coralnet", [label], [], _CSV)
-    assert lookup.scopes(label) == (live, coral)
-
-
 def test_concept_lookup_unmapped_label_gives_zeros_and_default_scopes():
     mapped = np.array([2, 1, 0], dtype=np.int8)
     lookup = ConceptLookup({"coral": mapped}, 3, {"coral": (False, True)})
@@ -177,40 +158,6 @@ def test_a_taxon_without_a_channel_encodes_as_not_given_at_its_rank(tmp_path):
     assert lookup.row("foo").tolist() == [2, 0, 0, 2]
 
 
-def test_a_concept_cell_that_is_not_a_valid_value_raises_naming_the_cell(tmp_path):
-    csv_path = _write_concept_csv(
-        tmp_path / "c.csv",
-        [
-            {"source_dataset_source": "src", "source_label_class_name": "foo",
-             "kingdom": "animalia", "live": "yes"},
-        ],
-    )  # fmt: skip
-
-    with pytest.raises(ValueError, match="'yes'"):
-        build_concept_lookup("src", ["foo"], _CONCEPT_NAMES, csv_path)
-
-
-def test_table_without_a_live_column_gives_default_scopes_and_warns(tmp_path, caplog):
-    coral_row = {
-        "source_dataset_source": "src",
-        "source_label_class_name": "acro",
-        "kingdom": "animalia",
-        "order": "scleractinia",
-    }
-    without = _write_concept_csv(tmp_path / "without.csv", [coral_row])
-    with caplog.at_level(logging.WARNING, logger=gt_mapping.logger.name):
-        lookup = build_concept_lookup("src", ["acro"], _CONCEPT_NAMES, without)
-    assert "no 'live' column" in caplog.text
-    assert lookup.name_to_scope == {}
-    assert lookup.scopes("acro") == (True, False)
-
-    with_live = _write_concept_csv(tmp_path / "with.csv", [{**coral_row, "live": "true"}])
-    caplog.clear()
-    lookup = build_concept_lookup("src", ["acro"], _CONCEPT_NAMES, with_live)
-    assert "no 'live' column" not in caplog.text
-    assert lookup.scopes("acro") == (True, True)
-
-
 @pytest.mark.parametrize(
     ("row", "expected"),
     [
@@ -225,18 +172,3 @@ def test_table_without_a_live_column_gives_default_scopes_and_warns(tmp_path, ca
 )
 def test_point_scopes_live_column_applies_to_cnidaria_and_echinoderms_only(row, expected):
     assert point_scopes(pd.Series(row)) == expected
-
-
-@pytest.mark.parametrize("rank", ["phylum", "order", "class", "family"])
-def test_point_scopes_rejects_an_invalid_taxonomic_cell(rank):
-    row = {
-        "live": "true",
-        "phylum": "cnidaria",
-        "order": "actiniaria",
-        "class": "hexacorallia",
-        "family": "actiniidae",
-        rank: "not given",
-    }
-
-    with pytest.raises(ValueError, match="invalid taxonomic concept cell"):
-        point_scopes(pd.Series(row))

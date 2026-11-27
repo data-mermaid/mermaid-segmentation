@@ -6,6 +6,7 @@
 # submits what is missing. Common options:
 #
 #   --dry-run    print the sbatch commands instead of submitting them
+#   --skip-sync  use the cache at MERMAIDSEG_CACHE_DIR as is: check it, do not sync it
 #   RUN...       only consider these runs (default: every run of the launcher)
 
 set -euo pipefail
@@ -40,6 +41,7 @@ require_site_env() {
 }
 
 DRY_RUN=0
+SKIP_SYNC=0
 SELECTED=()
 LAST_JOB_ID=""
 N_SUBMITTED=0
@@ -49,6 +51,7 @@ parse_launcher_args() {
     while (($#)); do
         case "$1" in
             --dry-run) DRY_RUN=1 ;;
+            --skip-sync) SKIP_SYNC=1 ;;
             -h | --help)
                 echo "${USAGE:-}"
                 exit 0

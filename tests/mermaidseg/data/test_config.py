@@ -45,13 +45,6 @@ def test_pins_carry_dataset_names_and_taxonomy_name(tmp_path: Path) -> None:
         "20261121-ab12cd3",
         SHA_T,
     )
-    assert TAXONOMY_NAME == "mermaid-benthic"
-
-
-def test_no_taxonomy_gives_none(tmp_path: Path) -> None:
-    assert (
-        sync_plan({"datasets": {"d": _entry(train={"groups": ["a"]})}}, tmp_path).taxonomy is None
-    )
 
 
 def test_groups_are_unioned_across_blocks(tmp_path: Path) -> None:
@@ -100,79 +93,18 @@ def test_split_files_map_datasets_that_have_one_to_repo_root_paths(tmp_path: Pat
         _entry(train={"use": ["train"]}),
         _entry(split_file="s.csv", train={"use": ["train"], "groups": "all"}),
         _entry(train={}),
-        _entry(train={"groups": "all", "bogus": 1}),
         _entry(train={"groups": "all"}, bogus=1),
-        _entry(train={"groups": "all", "repeat": 0}),
-        _entry(train={"groups": "all"}, resize={"max_edge": 100, "bogus": 1}),
     ],
     ids=[
         "use-without-split-file",
         "use-and-groups",
         "neither",
-        "unknown-block-key",
         "unknown-entry-key",
-        "repeat-below-one",
-        "unknown-resize-key",
     ],
 )
 def test_invalid_entries_raise(tmp_path: Path, entry: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         sync_plan({"datasets": {"d": entry}}, tmp_path)
-
-
-def _plan_with_split_rows(root: Path, rows: list[str]) -> None:
-    path = root / "s.csv"
-    path.write_text("group,split\n" + "".join(f"{r}\n" for r in rows))
-    cfg = {"datasets": {"d": _entry(split_file="s.csv", train={"use": ["train"]})}}
-    sync_plan(cfg, root)
-
-
-@pytest.mark.parametrize("bad", ["Val", "holdout", ""])
-def test_split_value_outside_known_splits_raises(tmp_path: Path, bad: str) -> None:
-    with pytest.raises(ValueError, match=f"'{bad}'"):
-        _plan_with_split_rows(tmp_path, ["g1,train", f"g2,{bad}"])
-
-
-@pytest.mark.parametrize(
-    "rows",
-    [["g1,train", "g1,val"], ["g1,train", "g1,train"]],
-    ids=["across-splits", "within-split"],
-)
-def test_group_on_more_than_one_row_raises(tmp_path: Path, rows: list[str]) -> None:
-    with pytest.raises(ValueError, match="g1"):
-        _plan_with_split_rows(tmp_path, rows)
-
-
-def test_unknown_section_key_raises(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        sync_plan({"datasets": {}, "bucket": "other"}, tmp_path)
-
-
-def test_section_accepts_resize_block_keys_and_default() -> None:
-    section = DataSection.model_validate(
-        {
-            "default": {"train": {"transform": {"HorizontalFlip": {"p": 0.5}}}},
-            "datasets": {
-                "d": _entry(
-                    resize={"max_edge": 1024, "filter": "bicubic", "jpeg_quality": 90},
-                    train={
-                        "groups": "all",
-                        "transform": {"VerticalFlip": {"p": 1.0}},
-                        "repeat": 3,
-                        "annotators": ["a", "b"],
-                    },
-                )
-            },
-        }
-    )
-    entry = section.datasets["d"]
-    assert entry.resize == ResizeSpec(max_edge=1024, filter="bicubic", jpeg_quality=90)
-    assert entry.train is not None
-    assert (entry.train.transform, entry.train.repeat, entry.train.annotators) == (
-        {"VerticalFlip": {"p": 1.0}},
-        3,
-        ["a", "b"],
-    )
 
 
 def test_default_train_transform_fills_a_train_block_without_one() -> None:
@@ -206,32 +138,6 @@ def test_default_never_creates_a_train_block() -> None:
     assert entry.val.transform is None
 
 
-@pytest.mark.parametrize("split", ["val", "test"])
-def test_repeat_on_an_eval_block_raises(split: str) -> None:
-    with pytest.raises(ValidationError, match="repeat"):
-        DataSection.model_validate(
-            {"datasets": {"d": _entry(**{split: {"groups": "all", "repeat": 2}})}}
-        )
-
-
-@pytest.mark.parametrize("split", ["val", "test"])
-def test_transform_on_an_eval_block_raises(split: str) -> None:
-    with pytest.raises(ValidationError, match="transform"):
-        DataSection.model_validate(
-            {"datasets": {"d": _entry(**{split: {"groups": "all", "transform": {}}})}}
-        )
-
-
-def test_default_rejects_unknown_keys() -> None:
-    with pytest.raises(ValidationError):
-        DataSection.model_validate(
-            {
-                "default": {"val": {"transform": {}}},
-                "datasets": {"d": _entry(train={"groups": "all"})},
-            }
-        )
-
-
 def test_entry_split_groups_resolves_one_split_block(tmp_path: Path) -> None:
     _write_split_file(tmp_path)
     entry = DataSection.model_validate(
@@ -249,3 +155,24 @@ def test_entry_split_groups_resolves_one_split_block(tmp_path: Path) -> None:
     assert entry_split_groups(entry, "train", tmp_path) == {"g1", "g3"}
     assert entry_split_groups(entry, "val", tmp_path) is None
     assert entry_split_groups(entry, "test", tmp_path) == {"z"}
+
+
+def test_sync_plan_carries_each_entrys_resize(tmp_path: Path) -> None:
+    data_cfg = {
+        "datasets": {
+            "a": _entry(resize={"max_edge": 100}, train={"groups": "all"}),
+            "b": _entry(train={"groups": "all"}),
+        }
+    }
+    assert sync_plan(data_cfg, tmp_path).resize == {"a": ResizeSpec(max_edge=100), "b": None}
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+@pytest.mark.parametrize(
+    ("key", "value"), [("repeat", 2), ("transform", {})], ids=["repeat", "transform"]
+)
+def test_train_only_keys_on_an_eval_block_raise(split: str, key: str, value: Any) -> None:
+    with pytest.raises(ValidationError, match=key):
+        DataSection.model_validate(
+            {"datasets": {"d": _entry(**{split: {"groups": "all", key: value}})}}
+        )

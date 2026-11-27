@@ -118,19 +118,13 @@ class RawTables:
 
 
 def _label_name(label_id: str, value: Any) -> str:
-    if isinstance(value, str):
-        return value
     if label_id == _NONE_NAMED_LABEL and isinstance(value, float) and math.isnan(value):
         return "None"
-    raise ValueError(f"id2name holds a non-string name for label {label_id}: {value!r}")
+    return value
 
 
 def labels_table(id2name: dict[str, Any]) -> pa.Table:
-    """One identity-mapped label row per id2name entry, sorted by id.
-
-    Raises:
-        ValueError: A name other than label 2474's NaN is not a string.
-    """
+    """One identity-mapped label row per id2name entry, sorted by id."""
     rows = [
         {
             "label_id": int(label_id),

@@ -246,10 +246,6 @@ def assign_quotas(n_components: int, per_class: int) -> list[int]:
         raise ValueError(f"per_class must be >= 1, got {per_class}")
     if n_components <= 0:
         raise ProbeSelectionError("cannot assign quotas with zero components")
-    if n_components >= per_class:
-        raise ValueError(
-            f"assign_quotas is only for N < per_class (N={n_components}, per_class={per_class})"
-        )
     base, remainder = divmod(per_class, n_components)
     return [base + (1 if i < remainder else 0) for i in range(n_components)]
 

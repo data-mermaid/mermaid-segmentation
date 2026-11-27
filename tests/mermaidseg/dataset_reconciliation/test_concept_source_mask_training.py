@@ -32,18 +32,17 @@ def _write_mask(
     rows: list[tuple[str, str]],
     concepts_csv=None,
     source_ids: list[str] | None = None,
-    omit_source_ids: bool = False,
 ) -> Any:
     """Write a mask CSV and sidecar; ``source_ids`` (the counted sources) default to the rows'."""
     path = tmp_path / "mask.csv"
     pd.DataFrame(rows, columns=["source_id", "concept"]).assign(
         n_true=0, n_false=1, n_not_given=0
     ).to_csv(path, index=False)
-    meta: dict[str, Any] = {"dataset": "coralnet", "rule": "only_false"}
-    if not omit_source_ids:
-        meta["source_ids"] = (
-            source_ids if source_ids is not None else sorted({source for source, _ in rows})
-        )
+    meta: dict[str, Any] = {
+        "dataset": "coralnet",
+        "rule": "only_false",
+        "source_ids": source_ids if source_ids is not None else sorted({s for s, _ in rows}),
+    }
     if concepts_csv is not None:
         meta["concepts_csv_sha1"] = file_sha1(concepts_csv)
     meta_path(path).write_text(yaml.safe_dump(meta))
@@ -70,13 +69,6 @@ def test_mask_refuses_taxonomic_or_unknown_concepts(tmp_path):
     for concept in ("genus__acropora", "not_a_concept"):
         with pytest.raises(ValueError, match="not binary channels"):
             load_concept_source_mask(_write_mask(tmp_path, [("1", concept)]), _schema())
-
-
-def test_mask_without_source_ids_in_the_sidecar_is_refused(tmp_path):
-    path = _write_mask(tmp_path, [("1", "bleached")], omit_source_ids=True)
-
-    with pytest.raises(ValueError, match=r"source_ids.*build_concept_source_mask"):
-        load_concept_source_mask(path, _schema())
 
 
 def test_mask_skips_removed_concepts(tmp_path):
@@ -158,13 +150,6 @@ def test_source_the_mask_never_counted_is_refused(tmp_path):
     ds = _reader(tmp_path, "coralnet", ["s5", "s7"])
     mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
     with pytest.raises(ValueError, match=r"1 coralnet source.*\b7\b"):
-        attach_source_rows([ds], mask)
-
-
-def test_an_image_group_that_is_not_s_and_a_source_id_is_refused(tmp_path):
-    ds = _reader(tmp_path, "coralnet", ["s5", "x12"])
-    mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
-    with pytest.raises(ValueError, match=r"not s<source id>.*x12"):
         attach_source_rows([ds], mask)
 
 

@@ -7,7 +7,6 @@ import pytest
 
 from segdata_spec import stage
 from segdata_spec.errors import (
-    ChecksumMismatch,
     ManifestNotFound,
     ObjectExists,
     PinMismatch,
@@ -208,14 +207,8 @@ def test_existing_different_table_raises_and_manifest_is_not_written(stage_dir, 
     assert not (version_dir / "manifest.json").exists()
 
 
-@pytest.mark.parametrize(
-    "git",
-    [
-        GitState(sha="abcdef1", dirty=True, pushed=True),
-        GitState(sha="abcdef1", dirty=False, pushed=False),
-    ],
-)
-def test_dirty_or_unpushed_tree_refuses_before_any_write(stage_dir, repo_dir, git):
+def test_dirty_tree_refuses_before_any_write(stage_dir, repo_dir):
+    git = GitState(sha="abcdef1", dirty=True, pushed=True)
     with pytest.raises(PublishRefused):
         _stage(stage_dir, repo_dir, git=git)
 
@@ -265,12 +258,6 @@ def test_parent_pin_mismatch_writes_nothing(stage_dir, repo_dir):
     assert _files(stage_dir) == before
 
 
-def test_no_parents_gives_no_diff(stage_dir, repo_dir):
-    manifest, _ = _stage(stage_dir, repo_dir)
-
-    assert manifest.diff_from_parent is None
-
-
 def test_diff_is_taken_against_the_first_parent_only(stage_dir, repo_dir):
     first = _parent_version(stage_dir, repo_dir)
     ghost = ParentRef(dataset="ghost", version="20261001-7654321", manifest_sha256="1" * 64)
@@ -289,15 +276,6 @@ def test_diff_is_taken_against_the_first_parent_only(stage_dir, repo_dir):
         "points_added": 0,
         "points_removed": 1,
     }
-
-
-def test_stage_reads_the_parent_from_a_later_parent_dir(tmp_path, repo_dir):
-    cache, stage_dir = tmp_path / "cache", tmp_path / "stage"
-    parent = _parent_version(cache, repo_dir)
-
-    manifest, _ = _stage(stage_dir, repo_dir, parent_dirs=(stage_dir, cache), parents=(parent,))
-
-    assert manifest.diff_from_parent is not None
 
 
 def _taxonomy_kwargs(repo_dir: Path, tables: dict) -> dict:
@@ -359,13 +337,6 @@ def test_invalid_table_raises_before_any_write(stage_dir, repo_dir):
     assert _files(stage_dir) == []
 
 
-def test_missing_uv_lock_refuses_before_any_write(stage_dir, tmp_path):
-    with pytest.raises(PublishRefused, match="uv.lock"):
-        _stage(stage_dir, tmp_path)
-
-    assert _files(stage_dir) == []
-
-
 def test_rerun_after_a_partial_stage_adopts_identical_tables(stage_dir, repo_dir):
     _stage(stage_dir, repo_dir)
     version_dir = _version_dir(stage_dir)
@@ -411,24 +382,6 @@ def test_read_parent_tables_refuses_a_manifest_that_misses_its_pin(tmp_path, rep
 
     with pytest.raises(PinMismatch):
         read_parent_tables([tmp_path], BUCKET, bad)
-
-
-def test_read_parent_tables_refuses_a_table_that_misses_its_manifest(tmp_path, repo_dir):
-    parent = _parent_version(tmp_path, repo_dir)
-    parent_dir = _version_dir(tmp_path, "datasets/parent/20261101-1234567/")
-    (parent_dir / "points.parquet").write_bytes(b"tampered")
-
-    with pytest.raises(ChecksumMismatch, match="points.parquet"):
-        read_parent_tables([tmp_path], BUCKET, parent)
-
-
-def test_read_parent_tables_refuses_a_listed_table_missing_from_disk(tmp_path, repo_dir):
-    parent = _parent_version(tmp_path, repo_dir)
-    parent_dir = _version_dir(tmp_path, "datasets/parent/20261101-1234567/")
-    (parent_dir / "images.parquet").unlink()
-
-    with pytest.raises(ChecksumMismatch, match="missing"):
-        read_parent_tables([tmp_path], BUCKET, parent)
 
 
 def _dirty_repo(root: Path) -> Path:

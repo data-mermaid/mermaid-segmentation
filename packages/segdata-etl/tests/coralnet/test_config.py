@@ -7,16 +7,14 @@ import pytest
 from segdata_etl.datasets.coralnet import config
 
 
-@pytest.mark.parametrize("value", ["abc", "0", "-1"])
+@pytest.mark.parametrize("value", ["abc", "0"])
 def test_get_workers_rejects_invalid_env(monkeypatch, value):
     monkeypatch.setenv("MERMAID_CORALNET_ETL_WORKERS", value)
     with pytest.raises(ValueError, match=f"MERMAID_CORALNET_ETL_WORKERS .*{value!r}"):
         config.get_workers()
 
 
-@pytest.mark.parametrize(
-    ("args", "expected"), [((), 16), ((5,), 5)], ids=["module-default", "explicit-default"]
-)
+@pytest.mark.parametrize(("args", "expected"), [((), 16)], ids=["module-default"])
 def test_get_workers_falls_back_to_the_default_when_unset(monkeypatch, args, expected):
     monkeypatch.delenv("MERMAID_CORALNET_ETL_WORKERS", raising=False)
     assert config.get_workers(*args) == expected

@@ -41,7 +41,8 @@ COPY pyproject.toml uv.lock .python-version ./
 COPY packages/coralnet-scraper/pyproject.toml ./packages/coralnet-scraper/pyproject.toml
 COPY packages/segdata-etl/pyproject.toml ./packages/segdata-etl/pyproject.toml
 COPY packages/segdata-spec/pyproject.toml ./packages/segdata-spec/pyproject.toml
-# segdata-spec is a dependency of the root project. `--no-install-workspace` skips it and the root
+# segdata-spec comes in through the `training` extra (the `training` default group, which `--no-dev`
+# keeps, and the `mlflow` extra both include it). `--no-install-workspace` skips it and the root
 # project, so this layer holds only third-party packages and stays cached until the lock changes.
 RUN uv sync --locked --no-dev --extra mlflow --no-install-workspace
 
