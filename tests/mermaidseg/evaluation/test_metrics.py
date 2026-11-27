@@ -177,6 +177,12 @@ def test_binary_stats_rejects_an_unannotated_row_with_a_given_code():
         stats.update(np.array([[0, 2]]), np.array([[0.9, 0.9]]), unannotated=np.array([True]))
 
 
+def test_binary_stats_rejects_an_unannotated_mask_that_does_not_match_the_rows():
+    stats = BinaryConceptStats(["a"], [0])
+    with pytest.raises(ValueError, match="unannotated has 1 entries but there are 2 rows"):
+        stats.update(np.array([[0], [0]]), np.array([[0.9], [0.9]]), unannotated=np.array([True]))
+
+
 def test_binary_stats_merge_sums_unannotated_counts():
     a = BinaryConceptStats(["c"], [0])
     b = BinaryConceptStats(["c"], [0])

@@ -471,8 +471,8 @@ class BinaryConceptStats:
                 ``n_unannotated``.
 
         Raises:
-            ValueError: If a ground-truth code is outside ``{0, 1, 2}``, or an
-                unannotated row has a non-zero code.
+            ValueError: If a ground-truth code is outside ``{0, 1, 2}``, ``unannotated``
+                does not have one entry per row, or an unannotated row has a non-zero code.
         """
         if not self.channel_indices:
             return
@@ -487,6 +487,10 @@ class BinaryConceptStats:
         annotated = np.ones((g.shape[0], 1), dtype=bool)
         if unannotated is not None:
             unlabeled = np.asarray(unannotated, dtype=bool).reshape(-1, 1)
+            if unlabeled.shape[0] != g.shape[0]:
+                raise ValueError(
+                    f"unannotated has {unlabeled.shape[0]} entries but there are {g.shape[0]} rows"
+                )
             if np.any(unlabeled & (g != 0)):
                 raise ValueError("unannotated rows must have concept code 0, not TRUE or FALSE")
             annotated = ~unlabeled
