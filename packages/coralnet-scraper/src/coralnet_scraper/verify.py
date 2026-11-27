@@ -122,11 +122,12 @@ def verify_source(
         source_id: CoralNet source id.
         expected_total: The image count CoralNet's overview reports for the source.
         pinned: Image ids a pinned ``coralnet-raw`` version holds; a listed image with no
-            non-empty object counts as present when its id is here.
+            object at all counts as present when its id is here. A zero-byte object is
+            missing even when pinned.
 
     Returns:
-        The failures, warnings and counts (``pinned_images`` counts listed images present only
-        through ``pinned``). A missing ``annotations.csv`` or ``image_list.csv``,
+        The failures, warnings and counts (``pinned_images`` counts listed images with no object
+        that are present only through ``pinned``). A missing ``annotations.csv`` or ``image_list.csv``,
         or unusable annotation columns, end the checks early with no counts.
     """
     v = Verification()
@@ -154,7 +155,8 @@ def verify_source(
 
     image_sizes = _image_object_sizes(objects, f"{base}images/")
     absent = [i for i in ids if image_sizes.get(i, 0) <= 0]
-    missing = [i for i in absent if i not in pinned]
+    exempt = [i for i in absent if i in pinned and i not in image_sizes]
+    missing = [i for i in absent if i not in exempt]
     if missing:
         v.failures.append(f"image_objects_missing:{len(missing)}")
     orphans = set(image_sizes) - set(ids)
@@ -166,7 +168,7 @@ def verify_source(
         "annotation_rows": len(annotations),
         "annotated_images": len(annotated),
         "image_objects": len(image_sizes),
-        "pinned_images": len(absent) - len(missing),
+        "pinned_images": len(exempt),
     }
     return v
 

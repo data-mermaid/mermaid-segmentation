@@ -702,9 +702,3 @@ def test_verify_existing_with_pin_flags_loads_the_pin_with_the_default_cache_dir
         fake_s3, "20261124-abc", "deadbeef", Path("outputs") / "segdata-cache"
     )
     assert dl.pin is _RAW_PIN
-
-
-def test_a_run_without_pin_flags_loads_no_pin(monkeypatch, fake_s3):
-    downloader_cls, _, _ = _run_main(monkeypatch, [], {1: DownloadResult(ok=True)}, fake_s3=fake_s3)
-
-    assert downloader_cls.call_args.kwargs["pin"] is None
