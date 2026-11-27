@@ -38,6 +38,12 @@ uv run --locked python scripts/sync_data.py --data-config configs/data_config.ya
 
 Each launch syncs again, so a changed pin in the data config is picked up without extra steps. This does not hold when you pass `--skip-sync`.
 
+Older caches may contain `resized/<spec id>/.index/` folders. Sync ignores them and never deletes them; remove them with:
+
+```bash
+rm -rf "$MERMAIDSEG_CACHE_DIR"/resized/*/.index
+```
+
 ### Use an existing cache
 
 If a cache already holds what the data config pins, skip the sync:
