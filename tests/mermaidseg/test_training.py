@@ -386,6 +386,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
     assert checkpoint["config"] == resolved
     assert checkpoint["lineage"]["seed"] == 7
+    assert checkpoint["config"] == checkpoint["lineage"]["resolved_config"]
     assert not (workdir / "model_checkpoints").exists()
     assert wandb_run.params["cli/num_workers"] == 1
     assert wandb_run.params["cli/output_dir"] == str(output_dir)

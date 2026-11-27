@@ -237,12 +237,28 @@ def _added() -> dict:
     return _with_dataset(_pins(), "coralscapes")
 
 
-def _removed_source() -> dict:
-    return _with_dataset(_pins(), "coralscapes")
-
-
 def _taxonomy_changed() -> dict:
     out = _pins()
+    out["taxonomy"] = {"version": "t2", "manifest_sha256": "b" * 64}
+    return out
+
+
+def _untaxed() -> dict:
+    out = _pins()
+    out["taxonomy"] = None
+    return out
+
+
+def _two_datasets() -> dict:
+    return _with_dataset(
+        _pins(), "coralscapes", version="s1", manifest_sha256="d" * 64, resize=None
+    )
+
+
+def _all_changed() -> dict:
+    out = _two_datasets()
+    out["datasets"]["coralnet"]["version"] = "v2"
+    out["datasets"]["coralscapes"]["version"] = "s2"
     out["taxonomy"] = {"version": "t2", "manifest_sha256": "b" * 64}
     return out
 
@@ -259,13 +275,22 @@ def _taxonomy_changed() -> dict:
         ),
         pytest.param(_changed(resize=None), _pins(), ("coralnet", "resize"), id="resize"),
         pytest.param(_added(), _pins(), ("coralscapes",), id="dataset-added"),
-        pytest.param(_pins(), _removed_source(), ("coralscapes",), id="dataset-removed"),
+        pytest.param(_pins(), _added(), ("coralscapes",), id="dataset-removed"),
         pytest.param(_taxonomy_changed(), _pins(), ("taxonomy", "t1", "t2"), id="taxonomy"),
+        pytest.param(
+            _all_changed(),
+            _two_datasets(),
+            ("coralnet", "coralscapes", "taxonomy"),
+            id="several-at-once",
+        ),
+        pytest.param(_untaxed(), _pins(), ("taxonomy",), id="taxonomy-unpinned-now"),
+        pytest.param(_pins(), None, ("coralnet", "taxonomy"), id="no-data-version-in-checkpoint"),
     ],
 )
 def test_check_same_data_names_every_differing_pin(new, old, needles):
+    source = {} if old is None else {"data_version": old}
     with pytest.raises(ValueError) as raised:
-        check_same_data(new, {"data_version": old})
+        check_same_data(new, source)
     for needle in needles:
         assert needle in str(raised.value)
 
