@@ -871,7 +871,8 @@ class MetaModel:
 
         Raises:
             ValueError: If ``iterations_per_train_epoch`` is not positive, or the resume
-                offset is outside ``0..iterations_per_train_epoch``.
+                offset is past ``iterations_per_train_epoch``. A negative offset does not
+                raise; it logs a warning and starts the epoch at 0.
         """
         self.model.train()
         if self.iterations_per_train_epoch <= 0:
