@@ -27,7 +27,7 @@ from segdata_spec.errors import (
     SchemaValidationError,
 )
 from segdata_spec.features import check_index, extractor_identity, feature_store_name
-from segdata_spec.git import GitState, probe_git, refuse_unpublishable
+from segdata_spec.git import Publishable
 from segdata_spec.layout import (
     FEATURE_INDEX_NAME,
     MANIFEST_NAME,
@@ -126,13 +126,13 @@ def _write_version(version_dir: Path, blobs: Mapping[str, bytes], manifest_bytes
     _write_new(version_dir / MANIFEST_NAME, manifest_bytes)
 
 
-def _etl_info(package: str, command: str, git: GitState, lock_sha: str) -> EtlInfo:
+def _etl_info(package: str, command: str, repo: Publishable) -> EtlInfo:
     return EtlInfo(
         package=package,
         command=command,
-        git_sha=git.sha,
+        git_sha=repo.git.sha,
         git_dirty=False,
-        uv_lock_sha256=lock_sha,
+        uv_lock_sha256=repo.uv_lock_sha256,
     )
 
 
@@ -271,8 +271,7 @@ def stage_dataset(
     label_mapping: LabelMapping | None = None,
     dropped: Mapping[str, int] | None = None,
     taxonomy: Pin | None = None,
-    repo_dir: Path,
-    git: GitState | None = None,
+    repo: Publishable,
 ) -> tuple[Manifest, str]:
     """Stage a dataset version under ``<stage_dir>/<bucket>/datasets/<dataset>/<version>/``.
 
@@ -281,20 +280,16 @@ def stage_dataset(
     bytes are identical.
 
     Raises:
-        PublishRefused: The tree is dirty or unpushed, or the version's manifest is already staged.
         SchemaValidationError: A table fails its schema or the cross-table rules.
         ManifestNotFound: No directory in ``parent_dirs`` holds the first parent's manifest.
         PinMismatch: The first parent's manifest differs from its ``ParentRef``.
         ChecksumMismatch: A parent table differs from the parent manifest.
         ObjectExists: A staged table already exists with different bytes; the manifest is then not written.
     """
-    state = git or probe_git(repo_dir)
-    lock_sha = refuse_unpublishable(state, repo_dir)
     conformed = _conform_all(tables, DATASET_TABLES)
     validate_dataset_tables(kind, conformed)
     blobs = {name: table_bytes(table) for name, table in conformed.items()}
     version_dir = cache_path(stage_dir, bucket, dataset_prefix(dataset, version))
-    _refuse_if_staged(version_dir)
     diff = None
     if parents:
         diff = compute_diff(_parent_tables(parent_dirs, bucket, parents[0]), conformed)
@@ -305,7 +300,7 @@ def stage_dataset(
         kind=kind,
         created_at=datetime.now(UTC),
         image_store=image_store,
-        etl=_etl_info(etl_package, etl_command, state, lock_sha),
+        etl=_etl_info(etl_package, etl_command, repo),
         source=source,
         parents=tuple(parents),
         label_mapping=label_mapping,
@@ -329,33 +324,28 @@ def stage_taxonomy(
     etl_package: str,
     etl_command: str,
     source: SourceInfo,
-    repo_dir: Path,
-    git: GitState | None = None,
+    repo: Publishable,
 ) -> tuple[TaxonomyManifest, str]:
     """Stage a taxonomy version under ``<stage_dir>/<bucket>/taxonomy/<name>/<version>/``.
 
     Returns the manifest and its sha256.
 
     Raises:
-        PublishRefused: The tree is dirty or unpushed, or the version's manifest is already staged.
         SchemaValidationError: A table is missing, unknown or fails its schema.
         ObjectExists: A staged table already exists with different bytes; the manifest is then not written.
     """
-    state = git or probe_git(repo_dir)
-    lock_sha = refuse_unpublishable(state, repo_dir)
     missing = sorted(set(TAXONOMY_TABLES) - set(tables))
     if missing:
         raise SchemaValidationError(f"missing taxonomy tables: {missing}")
     conformed = _conform_all(tables, TAXONOMY_TABLES)
     blobs = {table_name: table_bytes(table) for table_name, table in conformed.items()}
     version_dir = cache_path(stage_dir, bucket, taxonomy_prefix(name, version))
-    _refuse_if_staged(version_dir)
     manifest = TaxonomyManifest(
         schema_version=1,
         name=name,
         version=version,
         created_at=datetime.now(UTC),
-        etl=_etl_info(etl_package, etl_command, state, lock_sha),
+        etl=_etl_info(etl_package, etl_command, repo),
         source=source,
         files=_file_entries(conformed, blobs),
     )
@@ -376,8 +366,7 @@ def stage_feature_set(
     allow_missing: bool = False,
     etl_package: str,
     etl_command: str,
-    repo_dir: Path,
-    git: GitState | None = None,
+    repo: Publishable,
 ) -> FeatureSetPin:
     """Stage a feature set under ``<stage_dir>/<bucket>/datasets/<d>/<v>/features/<family>/``.
 
@@ -393,7 +382,7 @@ def stage_feature_set(
     Raises:
         ValueError: ``extractor`` lacks an identity key, ``family`` is not a key segment, or the
             dataset's image store is not ``images/<segment>/`` in ``bucket``.
-        PublishRefused: The tree is dirty or unpushed, or the set's manifest is already staged.
+        PublishRefused: The set's manifest is already staged.
         ManifestNotFound: No directory in ``dataset_dirs`` holds the dataset manifest.
         PinMismatch: The dataset manifest differs from ``dataset``.
         ChecksumMismatch: The dataset's ``images.parquet`` differs from its manifest.
@@ -407,8 +396,6 @@ def stage_feature_set(
     set_dir = cache_path(
         stage_dir, bucket, feature_set_prefix(dataset.name, dataset.version, family)
     )
-    state = git or probe_git(repo_dir)
-    lock_sha = refuse_unpublishable(state, repo_dir)
     manifest, blobs = read_version_tables(
         dataset_dirs,
         bucket,
@@ -438,7 +425,7 @@ def stage_feature_set(
             )
         },
         stats=FeatureSetStats(n_images=conformed.num_rows, n_missing=missing),
-        etl=_etl_info(etl_package, etl_command, state, lock_sha),
+        etl=_etl_info(etl_package, etl_command, repo),
         created_at=datetime.now(UTC),
     )
     manifest_bytes = dump_manifest(set_manifest)

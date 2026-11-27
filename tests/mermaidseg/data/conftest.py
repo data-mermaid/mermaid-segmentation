@@ -21,7 +21,7 @@ from PIL import Image
 
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.layout import resize_id, synced_marker_dir
 from segdata_spec.manifest import (
     EtlInfo,
@@ -359,8 +359,6 @@ def publish_taxonomy_version(
 ) -> Pin:
     """Stage taxonomy ``mermaid-benthic`` and copy it into ``fake`` under the dataset bucket."""
     repo = tmp_path / "repo"
-    repo.mkdir(exist_ok=True)
-    (repo / "uv.lock").write_bytes(b"lock-bytes")
     stage_dir = Path(tempfile.mkdtemp(dir=tmp_path))
     _, sha = stage_taxonomy(
         stage_dir,
@@ -380,8 +378,11 @@ def publish_taxonomy_version(
         etl_package="segdata-etl",
         etl_command="segdata taxonomy",
         source=SourceInfo(type="test", uri="s3://src/", revision="r1"),
-        repo_dir=repo,
-        git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
+        repo=Publishable(
+            root=repo,
+            git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
+            uv_lock_sha256=hashlib.sha256(b"lock-bytes").hexdigest(),
+        ),
     )
     root = stage_dir / DATASET_BUCKET
     for path in sorted(p for p in root.rglob("*") if p.is_file()):

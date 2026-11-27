@@ -28,7 +28,7 @@ from segdata_etl.common.release import INGEST_BUCKET, S3Target, ingest_prefix
 from segdata_etl.label_maps.curated import curated_source
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.layout import resize_id, synced_marker_dir
 from segdata_spec.manifest import Manifest, Pin, SourceInfo
 from segdata_spec.read import DatasetVersion, open_version
@@ -97,8 +97,7 @@ def publish_fixture_taxonomy(client: Any, repo: Path) -> str:
         etl_package="segdata-etl",
         etl_command="segdata taxonomy",
         source=SourceInfo(type="mermaid-api", uri="https://api.test", revision="r1"),
-        repo_dir=repo,
-        git=CLEAN_GIT,
+        repo=Publishable(root=repo, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
     )
     root = stage_dir / DATASET_BUCKET
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
@@ -111,8 +110,8 @@ def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_text("lock")
-    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_spec.git.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 

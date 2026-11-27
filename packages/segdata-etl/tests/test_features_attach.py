@@ -17,7 +17,7 @@ from segdata_etl import cli
 from segdata_etl.common.featurevector import FeatureVectorsInvalid, FeatureVectorsMissing
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ExtractorMismatch, PinMismatch, PublishRefused
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.manifest import ImageStore, SourceInfo
 from segdata_spec.stage import stage_dataset
 
@@ -45,8 +45,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_bytes(b"lock")
-    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_spec.git.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
@@ -114,8 +114,7 @@ def publish_version(fake: FakeS3, repo: Path, groups: dict[str, str] | None = No
         etl_package="segdata-etl",
         etl_command="segdata build ds",
         source=SourceInfo(type="test", uri="s3://src/", revision="r1"),
-        repo_dir=repo,
-        git=CLEAN_GIT,
+        repo=Publishable(root=repo, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
     )
     root = stage_dir / DATASET_BUCKET
     for path in sorted(root.rglob("*")):

@@ -180,7 +180,7 @@ def test_build_refuses_an_unpublishable_tree_before_reading_s3(
 ) -> None:
     s3 = FakeS3()
     _ingested(s3)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: git)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _dir: git)
     stage = tmp_path / "stage"
 
     with pytest.raises(PublishRefused):

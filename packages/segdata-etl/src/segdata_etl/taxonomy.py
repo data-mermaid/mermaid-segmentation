@@ -16,7 +16,8 @@ from typing import Any
 import pyarrow as pa
 import requests
 
-from segdata_etl.common.stage import publishable_repo, stage_taxonomy_version
+from segdata_etl.common.stage import stage_taxonomy_version
+from segdata_spec.git import publishable_repo
 from segdata_spec.manifest import SourceInfo
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
@@ -131,7 +132,7 @@ def run_taxonomy(
         PublishRefused: The git tree is dirty or unpushed.
         ValueError: The API data fails its checks.
     """
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     tables, source = _fetch_source(session or requests.Session(), args.base_url)
     stage_taxonomy_version(
         args.stage_dir,

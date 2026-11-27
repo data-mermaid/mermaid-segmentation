@@ -16,7 +16,7 @@ import pyarrow as pa
 from botocore.exceptions import ClientError
 from PIL import Image
 
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.manifest import (
     FeatureSetPin,
     ImageStore,
@@ -197,11 +197,10 @@ def _images_table(
     )
 
 
-def _repo_dir(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir(exist_ok=True)
-    (repo / "uv.lock").write_bytes(b"lock-bytes")
-    return repo
+def _publishable() -> Publishable:
+    return Publishable(
+        root=Path("repo"), git=CLEAN_GIT, uv_lock_sha256=hashlib.sha256(b"lock-bytes").hexdigest()
+    )
 
 
 def _upload_staged(client: FakeS3, stage_dir: Path) -> None:
@@ -293,8 +292,7 @@ def publish_version(
         etl_command="segdata build ds",
         source=SOURCE,
         parents=parents,
-        repo_dir=_repo_dir(tmp_path),
-        git=CLEAN_GIT,
+        repo=_publishable(),
     )
     _upload_staged(client, stage_dir)
     client.calls.clear()
@@ -318,8 +316,7 @@ def publish_taxonomy_version(client: FakeS3, tmp_path: Path) -> Pin:
         etl_package="segdata-etl",
         etl_command="segdata taxonomy",
         source=SOURCE,
-        repo_dir=_repo_dir(tmp_path),
-        git=CLEAN_GIT,
+        repo=_publishable(),
     )
     _upload_staged(client, stage_dir)
     client.calls.clear()
@@ -370,8 +367,7 @@ def stage_features(
         extractor=kwargs.pop("extractor", EXTRACTOR),
         etl_package="segdata-etl",
         etl_command="segdata features attach ds",
-        repo_dir=_repo_dir(tmp_path),
-        git=CLEAN_GIT,
+        repo=_publishable(),
         **kwargs,
     )
 
