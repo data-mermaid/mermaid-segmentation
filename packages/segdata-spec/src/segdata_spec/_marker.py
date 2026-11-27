@@ -16,10 +16,15 @@ _ALL = "all"
 
 @dataclass(frozen=True)
 class SyncMarker:
-    """The resize spec applied and the groups synced (None means all)."""
+    """The resize spec applied, the groups synced (None means all) and the images skipped.
+
+    ``skipped`` holds the ids of images whose original Pillow could not decode, so the resized
+    cache has no output for them. A marker written before this field existed reads as empty.
+    """
 
     resize: ResizeSpec | None
     groups: frozenset[str] | None
+    skipped: frozenset[str] = frozenset()
 
 
 def merge_groups(
@@ -35,6 +40,7 @@ def dump_marker(marker: SyncMarker) -> bytes:
     payload = {
         "resize": None if marker.resize is None else marker.resize.model_dump(),
         "groups": _ALL if marker.groups is None else sorted(marker.groups),
+        "skipped": sorted(marker.skipped),
     }
     return json.dumps(payload, sort_keys=True, indent=2).encode()
 
@@ -65,18 +71,21 @@ def load_marker(path: Path) -> SyncMarker:
         return SyncMarker(
             resize=None if payload["resize"] is None else ResizeSpec(**payload["resize"]),
             groups=None if groups == _ALL else frozenset(groups),
+            skipped=frozenset(payload.get("skipped", ())),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise CorruptSyncMarker(f"sync marker {path} is unreadable: {exc!r}") from exc
 
 
 def union_markers(markers: Iterable[SyncMarker]) -> SyncMarker:
-    """Union the markers of one resize spec: the groups (None absorbs)."""
+    """Union the markers of one resize spec: the groups (None absorbs) and the skipped ids."""
     items = list(markers)
     groups: frozenset[str] | None = frozenset()
+    skipped: frozenset[str] = frozenset()
     for marker in items:
         groups = merge_groups(groups, marker.groups)
-    return SyncMarker(items[0].resize, groups)
+        skipped |= marker.skipped
+    return SyncMarker(items[0].resize, groups, skipped)
 
 
 def load_synced(directory: Path) -> SyncMarker:

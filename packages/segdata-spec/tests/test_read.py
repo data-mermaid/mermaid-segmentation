@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import shutil
 from pathlib import Path
 
@@ -54,6 +55,46 @@ def test_open_version_rejects_a_pin_that_differs_from_the_cache(fake_s3, tmp_pat
 
     with pytest.raises(PinMismatch):
         open_version(cache, BUCKET, Pin(name="ds", version=VERSION, manifest_sha256="0" * 64))
+
+
+def test_open_version_leaves_out_images_any_marker_skipped(fake_s3, tmp_path, cache):
+    good = jpeg_bytes(64, 48)
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (good, "g1"), "b": (good[: len(good) // 2], "g1"), "c": (good, "g2")},
+        points=[("a", 1, 1, 5), ("b", 2, 2, 6), ("c", 3, 3, 5)],
+        sizes=dict.fromkeys("abc", (64, 48)),
+    )
+    spec = ResizeSpec(max_edge=32)
+    for groups in ({"g1"}, {"g2"}):
+        sync(
+            fake_s3,
+            {"ds": pin},
+            cache,
+            bucket=BUCKET,
+            selection={"ds": groups},
+            resize={"ds": spec},
+        )
+
+    version = open_version(cache, BUCKET, pin, resize=spec)
+
+    assert version.images.column("image_id").to_pylist() == ["a", "c"]
+    assert version.points is not None
+    assert version.points.column("image_id").to_pylist() == ["a", "c"]
+
+
+def test_open_version_reads_a_marker_without_a_skipped_list(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path)
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+    (marker,) = (cache / "synced" / "original" / BUCKET / "ds" / VERSION).glob("*.json")
+    payload = json.loads(marker.read_text())
+    del payload["skipped"]
+    marker.write_text(json.dumps(payload))
+
+    version = open_version(cache, BUCKET, pin)
+
+    assert version.images.column("image_id").to_pylist() == ["a", "b", "c"]
 
 
 def test_open_taxonomy_feeds_the_hierarchy(fake_s3, tmp_path, cache):

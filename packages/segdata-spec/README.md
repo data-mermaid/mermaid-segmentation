@@ -97,7 +97,7 @@ Without a resize spec, `sync` writes every object to `<cache_dir>/<bucket>/<key>
 
 With a spec, `sync` writes each image and mask to `<cache_dir>/resized/<spec id>/<bucket>/<key>` and does not cache the original. Each output has an index file at `<cache_dir>/resized/<spec id>/.index/<bucket>/<key>.json` with the source ETag, the output size, the output sha256 and the output's pixel width and height. Two specs share one cache without interfering.
 
-After a dataset version syncs, `sync` writes a new marker file at `<cache_dir>/synced/<spec id or original>/<bucket>/<dataset>/<version>/<uuid>.json`, with `original` for a dataset that has no spec. The file holds the resize spec (or null) and the groups that sync synced (`"all"` when the selection is `None`). It is written atomically once that version's images verify, so an interrupted multi-dataset sync leaves no marker for the version it was syncing, while markers for versions that finished earlier remain, and `sync` never reads or changes an existing marker, so concurrent syncs of one version do not overwrite each other. `open_version` reads every marker file in the directory and requires at least one. Its groups are the union of the files' groups, where `"all"` absorbs the rest. A marker file that cannot be parsed raises `CorruptSyncMarker` naming its path.
+After a dataset version syncs, `sync` writes a new marker file at `<cache_dir>/synced/<spec id or original>/<bucket>/<dataset>/<version>/<uuid>.json`, with `original` for a dataset that has no spec. The file holds the resize spec (or null), the groups that sync synced (`"all"` when the selection is `None`) and `skipped`, the ids of images left out because their original does not decode (see [Sync](#guarantees)). A marker without `skipped` reads as an empty list. It is written atomically once that version's images verify, so an interrupted multi-dataset sync leaves no marker for the version it was syncing, while markers for versions that finished earlier remain, and `sync` never reads or changes an existing marker, so concurrent syncs of one version do not overwrite each other. `open_version` reads every marker file in the directory and requires at least one. Its groups are the union of the files' groups, where `"all"` absorbs the rest. The union of the files' `skipped` ids is left out of `images`, `points` and `label_counts`. A marker file that cannot be parsed raises `CorruptSyncMarker` naming its path.
 
 `sync_tables` writes its marker to `<cache_dir>/synced/tables/<bucket>/<dataset>/<version>/<uuid>.json` instead, in the same format with no groups. `open_version` never reads it, so it raises `NotSynced` for a version synced only that way; `open_tables` accepts it, or the marker of any resize id.
 
@@ -110,7 +110,7 @@ A resized file keeps the source key name, so a key ending `.png` may hold JPEG b
 ## Resize rule
 
 - Images are decoded with JPEG draft mode, then scaled with Lanczos (or the spec's filter) to `int(edge * (max_edge / longest))` on each edge. Because the float product is truncated, a few sizes come out one pixel short, for example 2215 to 2047 at `max_edge=2048`.
-- Originals are decoded only as JPEG or PNG, and masks only as PNG. Any other format fails with `ImageUndecodable`.
+- Originals are decoded only as JPEG or PNG, and masks only as PNG. An original or mask in another format, or one Pillow cannot fully decode (such as a truncated JPEG), is skipped; see [Sync](#guarantees).
 - Each scaled edge is at least 1 px: a 10000x3 image at `max_edge=2048` becomes 2048x1.
 - A JPEG in RGB or L mode within `max_edge` is cached byte for byte. Any other image is re-encoded as JPEG.
 - Masks are scaled to their image's new size with nearest-neighbour and stay PNG.
@@ -152,6 +152,7 @@ Sync:
 - An image or mask that is absent fails the sync with `ImageMissing`. A changed object also fails.
 - Images and masks are fetched with `IfMatch` on the recorded ETag.
 - With a resize spec, the original is verified (`IfMatch`, size, MD5, CRC64NVME) before it is resized, and only the result is written. The index entry is written before the output, so the output file is the commit point.
+- An original or mask that matches its checksums but does not decode does not fail the sync. Its image gets no resized output, its id goes into the marker's `skipped` list and `DatasetSyncResult.skipped`, and `scripts/sync_data.py` prints the count and ids. A later sync downloads it again and skips it again.
 - After resizing, the output's pixel size is checked against the size computed from the row's `width` and `height`. A mismatch raises `ChecksumMismatch` and nothing is cached.
 - On a cache hit for a resized output, `sync` checks the output against its index entry, and the entry's source ETag against `images.parquet`. The entry's recorded pixel size is also checked against the expected size; a missing or different size raises `ChecksumMismatch`. A mismatch, or a missing or malformed entry, raises `ChecksumMismatch`; the original is not downloaded again.
 - The worker pool starts only after every check above. Results are taken in row order, so the error raised matches a serial run.
@@ -178,7 +179,7 @@ All derive from `errors.SegdataError`.
 | `FeatureMissing` | A selected feature file is absent from the bucket. |
 | `NotSynced` | `open_version` finds no marker for the resize spec (including a tables-only sync), `open_tables` finds neither a tables-only nor an image marker, or `open_feature_set` finds no feature marker. |
 | `CorruptSyncMarker` | A marker file cannot be parsed. |
-| `ImageUndecodable` | An image or mask matches its checksums but cannot be decoded (for example, a format other than JPEG or PNG). Names the S3 key. |
+| `ImageUndecodable` | Internal to `sync`: an image or mask matches its checksums but cannot be decoded. `sync` catches it and skips the image. Names the S3 key. |
 
 `sync` also raises `ValueError` for a `selection` that names an unpinned dataset or an absent group, a `resize` that names an unpinned dataset, or `max_workers` below 1. `read` raises `FileNotFoundError` for a manifest or table that is not cached. `read` and `open_version` raise `ValueError` when a point names an `image_id` absent from `images` (resize set).
 
