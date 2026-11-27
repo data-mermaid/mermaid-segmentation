@@ -716,8 +716,10 @@ dependencies = [
     { name = "boto3" },
     { name = "pandas" },
     { name = "pillow" },
+    { name = "pyarrow" },
     { name = "requests" },
     { name = "requests-ratelimiter" },
+    { name = "segdata-spec" },
     { name = "stamina" },
     { name = "tqdm" },
 ]
@@ -733,9 +735,11 @@ requires-dist = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "pandas" },
-    { name = "pillow", specifier = ">=12.2" },
+    { name = "pillow", specifier = ">=13.0" },
+    { name = "pyarrow" },
     { name = "requests" },
     { name = "requests-ratelimiter" },
+    { name = "segdata-spec", editable = "packages/segdata-spec" },
     { name = "stamina", specifier = ">=26.2" },
     { name = "tqdm" },
 ]

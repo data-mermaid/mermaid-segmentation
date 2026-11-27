@@ -88,15 +88,6 @@ def resized_cache_path(cache_dir: Path, spec: ResizeSpec, bucket: str, key: str)
     return cache_path(cache_dir / "resized" / spec.id, bucket, key)
 
 
-def resized_index_path(cache_dir: Path, spec: ResizeSpec, bucket: str, key: str) -> Path:
-    """Return ``<cache_dir>/resized/<spec.id>/.index/<bucket>/<key>.json``, the output's sidecar.
-
-    S3 bucket names cannot start with ``.``, so ``.index`` never collides with a bucket folder.
-    """
-    path = cache_path(cache_dir / "resized" / spec.id / ".index", bucket, key)
-    return path.with_name(path.name + ".json")
-
-
 def resize_id(spec: ResizeSpec | None) -> str:
     """Return ``spec.id``, or ``original`` for images cached as is."""
     return "original" if spec is None else spec.id

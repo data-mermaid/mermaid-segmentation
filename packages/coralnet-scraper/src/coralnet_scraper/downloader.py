@@ -33,6 +33,7 @@ from coralnet_scraper.parsers import (
     parse_source_access,
     parse_total_images_from_source_html,
 )
+from coralnet_scraper.pin import RawPin
 from coralnet_scraper.session import _PAGE_GET_TIMEOUT, CoralNetSession
 from coralnet_scraper.verify import Verification, orphan_image_keys, verify_source
 from coralnet_scraper.walker import ImageRef, SourceWalker
@@ -83,6 +84,7 @@ class CoralNetDownloader:
         export_workers: int | None = None,
         requests_per_second: float | None = None,
         s3: Any | None = None,
+        pin: RawPin | None = None,
     ) -> None:
         """Create the client and its HTTP and S3 sessions; no network call is made.
 
@@ -96,6 +98,8 @@ class CoralNetDownloader:
             requests_per_second: Rate limit shared by every CoralNet session; ``None`` reads
                 the environment, where unset means no limit.
             s3: S3 client every component writes with; ``None`` builds the boto3 client.
+            pin: A published ``coralnet-raw`` version whose images count as present and are
+                not downloaded; ``None`` uses the scrape prefix alone.
 
         Raises:
             ValueError: If a worker count is not an integer of at least 1, or the rate is
@@ -123,6 +127,7 @@ class CoralNetDownloader:
             if s3 is not None
             else boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
         )
+        self.pin = pin
         self.exporter = AnnotationExporter(self.auth, self.s3, export_workers=self.export_workers)
         self.walker = SourceWalker(self.auth, self.s3, reset_partial=self._reset_partial)
         self.images = ImageFetcher(self.auth, self.s3, max_workers=self.max_workers)
@@ -300,17 +305,30 @@ class CoralNetDownloader:
         state["stages"].append(stage)
         self._save_state(source_id, bucket_name, s3_prefix, state)
 
+    def _pinned_ids(self, source_id: int) -> frozenset[int]:
+        """Return the image ids the pin holds for the source; empty without a pin."""
+        return self.pin.ids_for(source_id) if self.pin is not None else frozenset()
+
     def _mark_complete(
         self, source_id: int, bucket_name: str, s3_prefix: str, verification: Verification
     ) -> None:
-        """Write the source's ``_complete.json``, then delete its ``_partial/``."""
-        marker = {
+        """Write the source's ``_complete.json``, then delete its ``_partial/``.
+
+        The marker carries a ``parent`` pin when an image is present only in the pinned version.
+        """
+        marker: dict[str, Any] = {
             "source_id": source_id,
             "scraper_version": _SCRAPER_VERSION,
             "completed_at": datetime.now(UTC).isoformat(),
             **verification.stats,
             "warnings": verification.warnings,
         }
+        if self.pin is not None and verification.stats.get("pinned_images", 0) > 0:
+            marker["parent"] = {
+                "dataset": "coralnet-raw",
+                "version": self.pin.version,
+                "manifest_sha256": self.pin.manifest_sha256,
+            }
         key = s3_io.object_key_complete_marker(s3_prefix, source_id)
         s3_io.write_json_s3(self.s3, bucket_name, key, marker)
         s3_io.delete_prefix(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
@@ -361,7 +379,12 @@ class CoralNetDownloader:
             logger.info("Source %s reports zero images; skipping", source_id)
             return DownloadResult(ok=True, skipped_no_images=True)
         verification = verify_source(
-            self.s3, bucket_name, s3_prefix, source_id, expected_total=counts.total_images
+            self.s3,
+            bucket_name,
+            s3_prefix,
+            source_id,
+            expected_total=counts.total_images,
+            pinned=self._pinned_ids(source_id),
         )
         if not verification.ok:
             return DownloadResult(False, errors=verification.failures)
@@ -544,7 +567,9 @@ class CoralNetDownloader:
             self._finish_stage(sid, bucket_name, s3_prefix, state, "export")
         image_failures = ImageFailures()
         if "images" not in state["stages"]:
-            image_failures = self.images.download_missing_images(refs, sid, bucket_name, s3_prefix)
+            image_failures = self.images.download_missing_images(
+                refs, sid, bucket_name, s3_prefix, pinned=self._pinned_ids(sid)
+            )
             errs += _image_failure_codes(image_failures)
             if image_failures == ImageFailures():
                 self._finish_stage(sid, bucket_name, s3_prefix, state, "images")
@@ -572,7 +597,12 @@ class CoralNetDownloader:
             fails, else an empty list.
         """
         verification = verify_source(
-            self.s3, bucket_name, s3_prefix, source_id, expected_total=total_images
+            self.s3,
+            bucket_name,
+            s3_prefix,
+            source_id,
+            expected_total=total_images,
+            pinned=self._pinned_ids(source_id),
         )
         if (
             verification.ok
@@ -580,7 +610,12 @@ class CoralNetDownloader:
             and self._prune_orphans(source_id, bucket_name, s3_prefix, dry_run=dry_run)
         ):
             verification = verify_source(
-                self.s3, bucket_name, s3_prefix, source_id, expected_total=total_images
+                self.s3,
+                bucket_name,
+                s3_prefix,
+                source_id,
+                expected_total=total_images,
+                pinned=self._pinned_ids(source_id),
             )
         if not verification.ok:
             logger.error(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
 import numpy as np
@@ -36,6 +37,20 @@ def build_classes_and_colors(
     for name in ordered:
         colors[name] = [int(x) for x in rng.integers(0, 256, size=3)]
     return classes, colors
+
+
+def canonicalize(labels: Iterable[str]) -> dict[str, str]:
+    """Case-merge label spellings; prefer mixed case over all-caps, then lexicographic order."""
+    groups: dict[str, list[str]] = defaultdict(list)
+    for label in labels:
+        groups[label.lower()].append(label)
+    out: dict[str, str] = {}
+    for variants in groups.values():
+        mixed = [v for v in variants if v != v.upper()]
+        canonical = sorted(mixed)[0] if mixed else sorted(variants)[0]
+        for v in variants:
+            out[v] = canonical
+    return out
 
 
 def taxonomy_name_index(attributes: pa.Table) -> dict[str, list[tuple[str, str]]]:

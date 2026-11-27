@@ -111,13 +111,19 @@ def test_format_summary_lists_each_dataset_and_the_taxonomy() -> None:
         resize = None if version.startswith("20260101") else _RESIZE_1024
         return DatasetSyncResult(version, "0" * 64, resize)
 
+    skipping = DatasetSyncResult("20260104-abc1234", "0" * 64, _RESIZE_1024, frozenset({"y", "x"}))
     result = SyncResult(
-        datasets={"a": dataset("20260101-abc1234"), "b": dataset("20260102-abc1234")},
+        datasets={
+            "a": dataset("20260101-abc1234"),
+            "b": dataset("20260102-abc1234"),
+            "c": skipping,
+        },
         taxonomy=Pin(name="mermaid-benthic", version="20260103-abc1234", manifest_sha256="1" * 64),
     )
     assert format_summary(result).splitlines() == [
         "a: version 20260101-abc1234, resize original",
         "b: version 20260102-abc1234, resize 5a451a1295a8",
+        "c: version 20260104-abc1234, resize 5a451a1295a8, skipped 2 undecodable: ['x', 'y']",
         "taxonomy: version 20260103-abc1234",
     ]
 

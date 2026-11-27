@@ -7,6 +7,7 @@ import pytest
 
 from segdata_etl.common.labels import (
     AmbiguousTaxonomyName,
+    canonicalize,
     resolve_taxonomy_name,
     taxonomy_name_index,
 )
@@ -36,3 +37,20 @@ def test_a_name_matching_several_attributes_raises_naming_them() -> None:
     with pytest.raises(AmbiguousTaxonomyName, match=r"'porites'.*'Porites'.*'PORITES'") as info:
         resolve_taxonomy_name("porites", index)
     assert isinstance(info.value, ValueError)
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        (
+            ["Other Hard corals", "Other hard corals"],
+            {"Other Hard corals": "Other Hard corals", "Other hard corals": "Other Hard corals"},
+        ),
+        (["SAND", "Sand"], {"SAND": "Sand", "Sand": "Sand"}),
+        (["Sand", "Coral", "CCA"], {"Sand": "Sand", "Coral": "Coral", "CCA": "CCA"}),
+    ],
+)
+def test_canonicalize_merges_case_variants_preferring_mixed_case(
+    labels: list[str], expected: dict[str, str]
+) -> None:
+    assert canonicalize(labels) == expected

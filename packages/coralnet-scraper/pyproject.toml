@@ -11,9 +11,11 @@ dependencies = [
     "beautifulsoup4",
     "boto3",
     "pandas",
-    "pillow>=12.2",
+    "pillow>=13.0",
+    "pyarrow",
     "requests",
     "requests-ratelimiter",
+    "segdata-spec",
     "stamina>=26.2",
     "tqdm",
 ]
@@ -26,6 +28,9 @@ tests = [
     "pytest>=8.0",
     "pytest-socket>=0.7",
 ]
+
+[tool.uv.sources]
+segdata-spec = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]

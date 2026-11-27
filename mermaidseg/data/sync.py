@@ -35,12 +35,15 @@ def run_sync(
 def format_summary(result: SyncResult) -> str:
     """One line per dataset (name, version, resize id), then the taxonomy version.
 
-    The resize id is ``original`` for a dataset cached without resizing.
+    The resize id is ``original`` for a dataset cached without resizing. A dataset that skipped
+    undecodable images ends its line with their count and ids.
     """
-    lines = [
-        f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}"
-        for name, r in result.datasets.items()
-    ]
+    lines = []
+    for name, r in result.datasets.items():
+        line = f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}"
+        if r.skipped:
+            line += f", skipped {len(r.skipped)} undecodable: {sorted(r.skipped)}"
+        lines.append(line)
     assert result.taxonomy is not None  # run_sync always passes the required pin
     lines.append(f"taxonomy: version {result.taxonomy.version}")
     return "\n".join(lines)
