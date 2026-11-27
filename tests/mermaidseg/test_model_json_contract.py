@@ -63,6 +63,7 @@ def _sidecar_architecture(tmp_path: Path) -> dict:
         input_size=cfg.model.input_size,
         mean=(0.5,) * 3,
         std=(0.25,) * 3,
+        label_space={},
         lineage={},
     )
     return json.loads((tmp_path / MODEL_JSON).read_text())["architecture"]

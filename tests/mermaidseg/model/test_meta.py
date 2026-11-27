@@ -510,6 +510,7 @@ def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
         input_size=IMAGE_SIZE,
         mean=(0.5, 0.5, 0.5),
         std=(0.25, 0.25, 0.25),
+        label_space={},
         lineage={},
     )
     architecture = json.loads((tmp_path / MODEL_JSON).read_text())["architecture"]

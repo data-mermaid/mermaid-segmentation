@@ -5,22 +5,38 @@ from __future__ import annotations
 import hashlib
 import io
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 import torch
 import torch.distributed as dist
+import yaml
 from botocore.exceptions import ClientError
 
+from mermaidseg.data import PointDataset
+from mermaidseg.data.config import DataSection
+from mermaidseg.data.factory import source_offsets
+from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.dataset_reconciliation.label_space import (
+    LabelSpace,
+    label_keys_sha1,
+    read_label_space,
+    resolve_label_space,
+    write_label_space,
+)
 from mermaidseg.export import export_bundle
-from mermaidseg.io import ConfigDict
+from mermaidseg.io import ConfigDict, resolve_repo_path
+from mermaidseg.lineage import data_version as section_data_version
 from segdata_spec import DATASET_BUCKET
 from tests.conftest import cbm_test_config
+from tests.mermaidseg.data.conftest import ImageSpec, open_written
 from tests.mermaidseg.inference import _tiny
 
 DS_A = ("datasets", "ds-a", "20261120-aaaaaaa")
@@ -383,3 +399,164 @@ def concept_keep(schema: ConceptSchema) -> torch.Tensor:
     keep = torch.ones(2, schema.num_channels, dtype=torch.bool)
     keep[1, schema.channel_names.index("bleached")] = False
     return keep
+
+
+# ---------- label space ----------
+
+LABEL_SPACE_TAXONOMY = pa.table(
+    {"id": ["1", "2", "3"], "name": ["Acropora", "Porites", "Sand"], "parent_id": [None] * 3}
+)
+
+# training keys -> label space meta key of the file each one names.
+_LABEL_SPACE_FILES = {
+    "concept_mapping_path": "concepts_csv_sha1",
+    "concept_removal": "concept_removal_sha1",
+    "concept_source_mask": "concept_source_mask_sha1",
+}
+
+
+def write_test_label_space(
+    directory: Path,
+    tables: Mapping[str, Any],
+    training_cfg: Any,
+    schema: ConceptSchema,
+    section: DataSection,
+    taxonomy: pa.Table = LABEL_SPACE_TAXONOMY,
+) -> LabelSpace:
+    """Resolve ``tables`` into a label space whose meta matches ``training_cfg`` and ``section``.
+
+    Writes it to ``directory`` and returns it as read back.
+    """
+    space = resolve_label_space(
+        tables, source_offsets(tables), taxonomy, training_cfg, schema, train_groups={}
+    )
+    space.meta.update(
+        {
+            "data_version": section_data_version(section),
+            "label_keys_sha1": label_keys_sha1(training_cfg),
+            **{
+                meta_key: (
+                    file_sha1(resolve_repo_path(training_cfg[key])) if training_cfg[key] else None
+                )
+                for key, meta_key in _LABEL_SPACE_FILES.items()
+            },
+        }
+    )
+    write_label_space(directory, space)
+    return read_label_space(directory)
+
+
+def label_space_reader(
+    tmp_path: Path,
+    name: str,
+    labels: dict[int, tuple[str, str]],
+    split: str = "train",
+    global_offset: int = 0,
+) -> PointDataset:
+    """A points reader of source ``name`` over ``label_id -> (name, benthic attribute)``."""
+    rows = [
+        {"label_id": i, "name": label, "mermaid_benthic_attribute": attribute}
+        for i, (label, attribute) in labels.items()
+    ]
+    version = open_written(
+        tmp_path / name / split,
+        kind="points",
+        images=[ImageSpec("i1")],
+        labels=rows,
+        points=[("i1", 0, 0, min(labels))],
+        name=name,
+    )
+    return PointDataset(version, split=split, global_offset=global_offset)  # type: ignore[arg-type]
+
+
+CORALSCAPES_LABELS = {1: ("acropora", "Acropora"), 2: ("sand", "Sand")}
+PACIFIC_LABELS = {1: ("porites", "Porites")}
+
+
+def label_space_section(versions: Mapping[str, str]) -> DataSection:
+    """A data section pinning each dataset ``name -> version`` with a made-up manifest sha256."""
+    return DataSection.model_validate(
+        {
+            "datasets": {
+                name: {"version": version, "manifest_sha256": f"sha-{name}"}
+                for name, version in versions.items()
+            },
+            "taxonomy": {"version": "tax-v", "manifest_sha256": "sha-tax"},
+        }
+    )
+
+
+@pytest.fixture()
+def label_space_run(tmp_path: Path) -> SimpleNamespace:
+    """A two-dataset run and the label space written for it.
+
+    ``coralscapes_v2`` (offset 0) holds acropora and sand, ``pacific_labeled_corals`` (offset 2)
+    holds porites; the class subset is Acropora and Sand. Attributes: ``readers`` (keyed by
+    ``(name, split)``), ``training_cfg``, ``section``, ``schema_config``, ``concepts_csv``,
+    ``space`` and ``directory``.
+    """
+    concepts_csv = tmp_path / "concepts.csv"
+    table = concept_table()
+    pd.concat(
+        [
+            table.assign(source_dataset_source=s)
+            for s in ("coralscapes_v2", "pacific_labeled_corals")
+        ]
+    ).to_csv(concepts_csv, index=False)
+    sources = {"coralscapes_v2", "pacific_labeled_corals"}
+    schema = ConceptSchema.from_csv(concepts_csv, sources=sources)
+    readers = {
+        ("coralscapes_v2", "train"): label_space_reader(
+            tmp_path, "coralscapes_v2", CORALSCAPES_LABELS
+        ),
+        ("pacific_labeled_corals", "val"): label_space_reader(
+            tmp_path, "pacific_labeled_corals", PACIFIC_LABELS, split="val", global_offset=2
+        ),
+    }
+    directory = tmp_path / "label_space"
+    training_cfg = ConfigDict(
+        {
+            "concept_mapping_path": str(concepts_csv),
+            "concept_removal": "",
+            "concept_source_mask": "",
+            "class_subset": ["Acropora", "Sand"],
+            "label_roll_up": False,
+            "label_space": str(directory),
+        }
+    )
+    section = label_space_section(
+        {name: ds.version.manifest.version for name, ds in _by_name(readers).items()}
+    )
+    space = write_test_label_space(
+        directory,
+        {name: ds.version for name, ds in _by_name(readers).items()},
+        training_cfg,
+        schema,
+        section,
+    )
+    schema_config = tmp_path / "schema.yaml"
+    schema_config.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "datasets": {
+                        name: {"version": "v", "manifest_sha256": "s", "train": {"groups": "all"}}
+                        for name in sorted(sources)
+                    }
+                }
+            }
+        )
+    )
+    return SimpleNamespace(
+        readers=readers,
+        training_cfg=training_cfg,
+        section=section,
+        schema_config=schema_config,
+        concepts_csv=concepts_csv,
+        space=space,
+        directory=directory,
+    )
+
+
+def _by_name(readers: Mapping[tuple[str, str], PointDataset]) -> dict[str, PointDataset]:
+    return {name: ds for (name, _), ds in readers.items()}

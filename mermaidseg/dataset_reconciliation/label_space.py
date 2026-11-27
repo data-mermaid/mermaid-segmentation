@@ -108,13 +108,14 @@ class LabelSpace:
         ``encode_concept_row`` codes it.
 
         Args:
-            offsets: Global offset of each dataset in ``source_labels``.
+            offsets: Global offset of each dataset of the run; the labels of other datasets in
+                ``source_labels`` are left out.
 
         Raises:
             ValueError: Two datasets produce the same global id.
         """
-        _check_global_ids(self.source_labels, offsets)
-        labels = self.source_labels
+        labels = self.source_labels[self.source_labels["dataset"].isin(list(offsets))]
+        _check_global_ids(labels, offsets)
         global_ids = [
             offsets[d] + int(i) for d, i in zip(labels["dataset"], labels["label_id"], strict=True)
         ]

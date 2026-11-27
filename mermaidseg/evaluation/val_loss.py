@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from mermaidseg.data.config import DataSection, DatasetEntry, Split, SplitSelection
-from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
+from mermaidseg.data.factory import build_datasets
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.inference.bundle import ModelBundle
@@ -174,8 +174,9 @@ def evaluate_val_loss(
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
 
+    section = split_blocks_only(section, split)
     dataset_dict = build_datasets(
-        split_blocks_only(section, split),
+        section,
         Path(cache_dir),
         repo_root=REPO_ROOT,
         padding=cfg.training.padding,
@@ -185,8 +186,8 @@ def evaluate_val_loss(
     registry, schema = build_registry(
         dataset_dict,
         cfg.training,
+        section=section,
         schema_config=schema_config,
-        benthic_hierarchy=load_benthic_hierarchy(section, Path(cache_dir)),
         device=device,
     )
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]

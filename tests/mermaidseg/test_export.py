@@ -56,6 +56,7 @@ def _sidecar_kwargs(**overrides):
         "input_size": (56, 56),
         "mean": (0.5, 0.5, 0.5),
         "std": (0.25, 0.25, 0.25),
+        "label_space": {"classes.csv": "aa", "concepts.csv": "bb"},
         "lineage": {"seed": 7},
     }
     return {**kwargs, **overrides}
@@ -92,6 +93,7 @@ def test_resume_with_the_same_contract_refreshes_the_lineage(tmp_path: Path):
     [
         ({"id2label": {0: "ignore", 1: "sand"}}, "id2label"),
         ({"model_class": "Other"}, "architecture"),
+        ({"label_space": {"classes.csv": "aa", "concepts.csv": "cc"}}, "label_space"),
     ],
 )
 def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, override, key):

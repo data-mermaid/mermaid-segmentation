@@ -38,7 +38,7 @@ from segdata_spec.sync import check_published_manifest
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 # Sections that must not change when a run resumes into an existing sidecar.
-_CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing")
+_CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing", "label_space")
 
 
 def _jsonable(value: Any) -> Any:
@@ -61,6 +61,7 @@ def _build_sidecar(
     input_size: Sequence[int],
     mean: Sequence[float],
     std: Sequence[float],
+    label_space: Mapping[str, str],
     lineage: dict,
 ) -> dict:
     kwargs = {k: v for k, v in model_kwargs.items() if k != "encoder_name"}
@@ -84,6 +85,7 @@ def _build_sidecar(
                 "channel_order": CHANNEL_ORDER,
                 "interpolation": INTERPOLATION,
             },
+            "label_space": label_space,
             "lineage": lineage,
         }
     )
@@ -111,12 +113,14 @@ def write_sidecar(
     input_size: Sequence[int],
     mean: Sequence[float],
     std: Sequence[float],
+    label_space: Mapping[str, str],
     lineage: dict,
 ) -> Path:
     """Write ``model.json`` atomically into ``run_dir`` and return its path.
 
-    An existing sidecar must carry the same architecture, id2label, concept_id2name and
-    preprocessing; only its lineage is replaced.
+    ``label_space`` maps each file of the run's label space copy to its sha256. An existing
+    sidecar must carry the same architecture, id2label, concept_id2name, preprocessing and
+    label_space; only its lineage is replaced.
 
     Raises:
         ValueError: The existing sidecar differs; the message names the differing keys.
@@ -131,6 +135,7 @@ def write_sidecar(
         input_size=input_size,
         mean=mean,
         std=std,
+        label_space=label_space,
         lineage=lineage,
     )
     path = Path(run_dir) / MODEL_JSON

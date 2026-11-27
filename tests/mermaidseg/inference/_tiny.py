@@ -148,6 +148,7 @@ def write_run(
         input_size=INPUT_SIZE,
         mean=mean,
         std=std,
+        label_space={},
         lineage=lineage,
     )
     checkpoint = run_dir / "model_step1"

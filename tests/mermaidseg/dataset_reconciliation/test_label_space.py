@@ -244,6 +244,50 @@ def test_concepts_table_omits_a_removed_channel(tmp_path: Path) -> None:
     ]
 
 
+def test_resolving_no_tables_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="at least one dataset"):
+        resolve_label_space(
+            {},
+            {},
+            _TAXONOMY,
+            SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
+            _schema(tmp_path),
+            train_groups={},
+        )
+
+
+def _coverage_level(caplog: pytest.LogCaptureFixture, dataset: str) -> tuple[str, str]:
+    record = next(r for r in caplog.records if r.getMessage().startswith(f"{dataset}:"))
+    return record.levelname, record.getMessage()
+
+
+def test_coverage_is_logged_per_source_at_info_when_some_labels_map_and_warns_when_none_do(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    tables = {
+        "coralnet": _tables(tmp_path, [_label(1, "sand", "Sand"), _label(2, "zzz", None)]),
+        "mermaid": _tables(tmp_path, [_label(1, "zz1", None)], name="mermaid"),
+    }
+
+    with caplog.at_level("INFO", logger=label_space_module.logger.name):
+        resolve_label_space(
+            tables,
+            {"coralnet": 0, "mermaid": 2},
+            _TAXONOMY,
+            SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
+            _schema(tmp_path),
+            train_groups={},
+        )
+
+    assert _coverage_level(caplog, "coralnet") == (
+        "INFO",
+        "coralnet: 1 of 2 source labels map to a target class",
+    )
+    level, message = _coverage_level(caplog, "mermaid")
+    assert level == "WARNING"
+    assert "check source label keys against the mapping" in message
+
+
 # ---------- LabelSpace.lookups ----------
 
 
