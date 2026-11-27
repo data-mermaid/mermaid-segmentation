@@ -2,37 +2,41 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from coralnet_scraper import pin as pin_mod
 from coralnet_scraper.pin import RawPin, load_raw_pin
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.layout import cache_path, dataset_prefix
 from segdata_spec.manifest import Pin
 
 
 def _images(rows: list[tuple[str, str]]) -> pa.Table:
     return pa.table(
-        {"image_id": [i for i, _ in rows], "group": [g for _, g in rows]},
-        schema=pa.schema([("image_id", pa.string()), ("group", pa.string())]),
+        {
+            "image_id": [i for i, _ in rows],
+            "group": [g for _, g in rows],
+            "key": [f"images/{i}.jpg" for i, _ in rows],
+        },
+        schema=pa.schema([("image_id", pa.string()), ("group", pa.string()), ("key", pa.string())]),
     )
 
 
 def _patch_tables(monkeypatch, rows: list[tuple[str, str]]) -> dict:
-    """Replace the segdata calls; return what they receive."""
+    """Replace the sync call with one that writes the cached images table; return its args."""
     seen: dict = {}
 
     def fake_sync(client, pins, cache_dir, *, bucket):
         seen["sync"] = (client, dict(pins), cache_dir, bucket)
-
-    def fake_open(cache_dir, bucket, pin):
-        seen["open"] = (cache_dir, bucket, pin)
-        return SimpleNamespace(images=_images(rows))
+        (pin,) = pins.values()
+        key = f"{dataset_prefix(pin.name, pin.version)}images.parquet"
+        path = cache_path(cache_dir, bucket, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(_images(rows), path)
 
     monkeypatch.setattr(pin_mod, "sync_tables", fake_sync)
-    monkeypatch.setattr(pin_mod, "open_tables", fake_open)
     return seen
 
 
@@ -47,7 +51,6 @@ def test_the_image_ids_are_grouped_by_source(monkeypatch, tmp_path):
     )
     expected = Pin(name="coralnet-raw", version="20261124-abc1234", manifest_sha256="deadbeef")
     assert seen["sync"] == (client, {"coralnet-raw": expected}, tmp_path, DATASET_BUCKET)
-    assert seen["open"] == (tmp_path, DATASET_BUCKET, expected)
 
 
 def test_ids_for_a_source_the_pin_lacks_is_empty(monkeypatch, tmp_path):

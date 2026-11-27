@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.layout import cache_path, dataset_prefix
 from segdata_spec.manifest import Pin
-from segdata_spec.read import open_tables
 from segdata_spec.sync import sync_tables
 
 _DATASET = "coralnet-raw"
@@ -57,6 +58,9 @@ def _group_ids(images: pa.Table) -> dict[int, frozenset[int]]:
 def load_raw_pin(s3: Any, version: str, manifest_sha256: str, cache_dir: Path) -> RawPin:
     """Sync the tables of the pinned ``coralnet-raw`` version and read its image ids.
 
+    Reads only the ``image_id`` and ``group`` columns of ``images.parquet``; the other
+    tables stay on disk.
+
     Args:
         s3: S3 client.
         version: Version of the published dataset.
@@ -68,5 +72,8 @@ def load_raw_pin(s3: Any, version: str, manifest_sha256: str, cache_dir: Path) -
     """
     pin = Pin(name=_DATASET, version=version, manifest_sha256=manifest_sha256)
     sync_tables(s3, {pin.name: pin}, cache_dir, bucket=DATASET_BUCKET)
-    images = open_tables(cache_dir, DATASET_BUCKET, pin).images
+    images_key = f"{dataset_prefix(pin.name, pin.version)}images.parquet"
+    images = pq.read_table(
+        cache_path(cache_dir, DATASET_BUCKET, images_key), columns=["image_id", "group"]
+    )
     return RawPin(version, manifest_sha256, _group_ids(images))
