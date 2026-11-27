@@ -5,8 +5,8 @@ Reads only the local cache: no S3 call, and no re-hash of images or tables. Each
 by the same ``build_datasets`` call that training makes, so the check fails exactly when job
 start-up would: a missing or corrupt marker, a pin mismatch, a missing table, a selected group that
 is absent or unsynced, or a missing image or mask file. A pinned taxonomy must be in the cache too.
-Prints one line per dataset and exits 1 if any check failed. A failed check names its cause;
-``scripts/sync_data.py`` fixes it.
+Prints one line per dataset and exits 1 if any check failed. A failed check names its cause and
+the step that fixes it: usually ``scripts/sync_data.py``, or a fix to the data config.
 
 The config's ``data:`` section is the one ``scripts/sync_data.py`` reads.
 
@@ -23,10 +23,11 @@ from pathlib import Path
 from mermaidseg.data.config import DataSection
 from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
 from mermaidseg.io import REPO_ROOT, load_section
-from segdata_spec.errors import CorruptSyncMarker, NotSynced, PinMismatch
+from segdata_spec.errors import SegdataError
 
-_CHECK_ERRORS = (NotSynced, CorruptSyncMarker, PinMismatch, FileNotFoundError, ValueError)
-_HINT = "run scripts/sync_data.py with the same --data-config and --cache-dir"
+# Failures of the cache or the config. Anything else is a bug and propagates as a traceback.
+_CHECK_ERRORS = (SegdataError, OSError, ValueError)
+_SYNC = "run scripts/sync_data.py with the same --data-config and --cache-dir"
 # Padding and input size only shape transforms and masks, so any valid value gives the same check.
 _PADDING = 0
 _INPUT_SIZE = (1, 1)
@@ -40,7 +41,7 @@ def _check_dataset(section: DataSection, name: str, cache_dir: Path) -> str | No
             one, cache_dir, repo_root=REPO_ROOT, padding=_PADDING, input_size=_INPUT_SIZE
         )
     except _CHECK_ERRORS as e:
-        return f"{type(e).__name__}: {e}"
+        return _failure(e)
     return None
 
 
@@ -49,15 +50,26 @@ def _check_taxonomy(section: DataSection, cache_dir: Path) -> str | None:
     try:
         load_benthic_hierarchy(section, cache_dir)
     except _CHECK_ERRORS as e:
-        return f"{type(e).__name__}: {e}"
+        return _failure(e)
     return None
+
+
+def _failure(e: Exception) -> str:
+    """Return the printed failure of ``e``, with the step that fixes it."""
+    if isinstance(e, (SegdataError, FileNotFoundError)):
+        hint = _SYNC
+    elif isinstance(e, OSError):
+        hint = "check that the cache files are readable"
+    else:
+        hint = f"check the data config; if it is right, {_SYNC}"
+    return f"{type(e).__name__}: {e}; {hint}"
 
 
 def _line(name: str, ok_detail: str, failure: str | None) -> tuple[str, bool]:
     """Return the printed line of one check and whether it passed."""
     if failure is None:
         return f"{name}: {ok_detail}, ok", True
-    return f"{name}: {failure}; {_HINT}", False
+    return f"{name}: {failure}", False
 
 
 def check_cache(section: DataSection, cache_dir: Path) -> list[tuple[str, bool]]:

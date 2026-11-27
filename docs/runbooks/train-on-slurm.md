@@ -65,9 +65,9 @@ The encoder download still runs, so `HF_TOKEN` is still required. AWS credential
 
 The check stats each selected file. On a large cache on shared scratch, it can take a few minutes. That is far faster than the full sync, which reads and hashes every file.
 
-It also checks the pinned taxonomy. It prints one line per dataset, `<name>: version V, resize R, ok` or the error, and reports every dataset, not only the first failure. It exits 1 if any check fails. You can run it by hand with the command above. If it fails, the launcher prints `cache check failed; nothing submitted` and exits 1.
+It also checks the pinned taxonomy. It prints one line per dataset, `<name>: version V, resize R, ok`, and one for the taxonomy, `taxonomy: version V, ok`. A failed line is `<name>: <ErrorType>: <message>; <what to do>`. It reports every dataset, not only the first failure. An unexpected error, which is a bug, stops it with a traceback. It exits 1 if any check fails. You can run it by hand with the command above. If it fails, the launcher prints `cache check failed; nothing submitted` and exits 1.
 
-The check does not read image or mask bytes. A file that is corrupted but present is found only when training reads it. A file that was deleted after the sync, for example by an interrupted `rsync` or a scratch purge, fails the check. To verify the bytes, launch without `--skip-sync`.
+The check does not read image or mask bytes. A file that is corrupted but present, or present but not readable by you (for example in a cache another user synced), is found only when training reads it. A file that was deleted after the sync, for example by an interrupted `rsync` or a scratch purge, fails the check. To verify the bytes, launch without `--skip-sync`.
 
 Use the flag when:
 
@@ -155,9 +155,9 @@ To keep the new wandb run separate from the old one, change `MERMAIDSEG_WANDB_ID
 | The launcher says a Slurm variable is not set, or `MERMAIDSEG_LOG_DIR` does not exist | Fix the env file. See [Write the env file](set-up-slurm.md#write-the-env-file). |
 | The job stops with `set WANDB_API_KEY in the secured env file` | Add `WANDB_API_KEY` to the env file that the job reads. |
 | The launcher prints `cache sync failed; nothing submitted` | Read the error above it. Check the AWS credentials, and that the pins in `configs/data_config.yaml` exist in `mermaid-ic-datasets`. Run the launcher again. |
-| The launcher prints `cache check failed; nothing submitted` | Read the lines above it. Run `scripts/sync_data.py` with the same data config and cache dir, or launch without `--skip-sync`. |
+| The launcher prints `cache check failed; nothing submitted` | Read the lines above it: each failed line says what to do. For a cache failure, run `scripts/sync_data.py` with the same data config and cache dir, or launch without `--skip-sync`. |
 | The launcher prints `encoder download failed; nothing submitted` | Check `HF_TOKEN` and access to the DINOv3 repo, then run the launcher again. |
-| The job fails because a dataset is not synced | The cache lacks a version, group or resize that the data config selects. Run the launcher again to sync it. |
+| The job fails because a dataset is not synced | The cache lacks a version, group or resize that the data config selects. Run the launcher again without `--skip-sync` to sync it. |
 | `cbm_final_res768` runs out of GPU memory | Set `FINAL_768_BATCH` and `FINAL_768_ACCUM` in the shell before you launch. Their product must stay 32, or the launcher refuses. |
 | A job is cancelled about a second after it starts, with no logs | Do not pass parameters with `sbatch --export=ALL,VAR=...`. A site prolog cancels such jobs. Pass them as arguments to `train.sbatch`. |
 | A multi-GPU job times out in a collective | The NCCL flight recorder writes each rank's last collectives to `logs/nccl_trace_<run>_<job id>_rank_*`. |
