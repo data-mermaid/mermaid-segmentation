@@ -22,7 +22,7 @@ from coralnet_scraper.config import (
     validate_requests_per_second,
     validate_workers,
 )
-from coralnet_scraper.errors import WalkCountMismatch
+from coralnet_scraper.errors import ExportEmpty, WalkCountMismatch
 from coralnet_scraper.exporter import AnnotationExporter, _upload_csv
 from coralnet_scraper.images import ImageFetcher
 from coralnet_scraper.models import DownloadResult, ImageFailures
@@ -528,14 +528,18 @@ class CoralNetDownloader:
             return DownloadResult(False, errors=[*errs, "image_list_failed"])
         total_images = state["total_images"]
         if "export" not in state["stages"]:
-            if not self.exporter.download_annotations(
-                sid,
-                bucket_name,
-                s3_prefix,
-                refs=refs,
-                total_images=total_images,
-                points_per_image=parse_points_per_image(overview_html),
-            ):
+            try:
+                exported = self.exporter.download_annotations(
+                    sid,
+                    bucket_name,
+                    s3_prefix,
+                    refs=refs,
+                    total_images=total_images,
+                    points_per_image=parse_points_per_image(overview_html),
+                )
+            except ExportEmpty:
+                return DownloadResult(False, errors=[*errs, "export_empty"])
+            if not exported:
                 return DownloadResult(False, errors=[*errs, "annotations_failed"])
             self._finish_stage(sid, bucket_name, s3_prefix, state, "export")
         image_failures = ImageFailures()

@@ -17,7 +17,13 @@ import requests
 
 from coralnet_scraper import s3_io
 from coralnet_scraper.config import DEFAULT_PREFIX
-from coralnet_scraper.errors import ContentError, SessionExpired, _ExportPrepTimeout, _retrying
+from coralnet_scraper.errors import (
+    ContentError,
+    ExportEmpty,
+    SessionExpired,
+    _ExportPrepTimeout,
+    _retrying,
+)
 from coralnet_scraper.parsers import parse_export_annotations_prep_form
 from coralnet_scraper.session import _PAGE_EXPORT_TIMEOUT, CoralNetSession, browse_page_url
 from coralnet_scraper.verify import strip_status
@@ -84,9 +90,9 @@ def _check_export_columns(df: pd.DataFrame) -> None:
 
 
 def _check_export_has_rows(df: pd.DataFrame) -> None:
-    """Raise :class:`ContentError` if an export that must have rows is header-only."""
+    """Raise :class:`ExportEmpty` if an export that must have rows is header-only."""
     if df.empty:
-        raise ContentError("export has no rows although an image is Confirmed")
+        raise ExportEmpty("export has no rows although an image is Confirmed")
 
 
 def _refs_by_page(refs: list[ImageRef]) -> dict[int, list[ImageRef]]:
@@ -227,7 +233,11 @@ class AnnotationExporter:
         Returns:
             True on success; False on failure, after logging the error. The export must
             pass :func:`decode_export_csv`, name only images of ``refs`` and have rows when
-            one of them is Confirmed; an export that does not, after the attempts of :meth:`_export_validated`, uploads nothing.
+            one of them is Confirmed; an export that does not, after the attempts of
+            :meth:`_export_validated`, uploads nothing.
+
+        Raises:
+            ExportEmpty: The export stays header-only although an image is Confirmed.
         """
         try:
             prep_timeout = export_prep_timeout_seconds(total_images, points_per_image)
@@ -274,6 +284,9 @@ class AnnotationExporter:
             _upload_csv(self.s3, bucket_name, key, df_annotations)
             logger.info("Annotations saved s3://%s/%s", bucket_name, key)
             return True
+        except ExportEmpty:
+            logger.warning("download_annotations: empty export for source %s", source_id)
+            raise
         except Exception:
             logger.exception("download_annotations failed source %s", source_id)
             return False
@@ -307,6 +320,9 @@ class AnnotationExporter:
         Returns:
             True on success; False on failure, after logging the error. Chunks of pages
             that finished stay on S3.
+
+        Raises:
+            ExportEmpty: A page export stays header-only although an image of it is Confirmed.
         """
         try:
             pages = _refs_by_page(refs)
@@ -334,6 +350,9 @@ class AnnotationExporter:
                 annotations_key,
             )
             return True
+        except ExportEmpty:
+            logger.warning("download_annotations_paginated: empty export for source %s", source_id)
+            raise
         except Exception:
             logger.exception("download_annotations_paginated failed source %s", source_id)
             return False

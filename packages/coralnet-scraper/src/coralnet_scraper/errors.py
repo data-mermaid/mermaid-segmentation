@@ -24,6 +24,10 @@ class WalkIncomplete(ContentError):
     """The browse walk breaks a page rule or does not match the overview's image count."""
 
 
+class ExportEmpty(ContentError):
+    """An export that must have rows because an image is Confirmed has none."""
+
+
 class SessionExpired(Exception):
     """CoralNet treated a logged-in session's request as logged out."""
 

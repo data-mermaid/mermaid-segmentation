@@ -78,10 +78,11 @@ An exception inside one source, in the skip check or the download, is logged and
 A source fails when:
 
 - any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`). These still fail the source and set exit code 1, but do not count toward the [circuit breaker](#retries-and-circuit-breaker);
-- the metadata, labelset, annotations, or image list step failed;
+- the metadata, labelset, or image list step failed, or the annotations export failed (`annotations_failed`);
 - the last [browse walk attempt](#retries-and-circuit-breaker) found a different number of images than the overview reports (`walk_count_mismatch:<found>!=<total>`). Only the saved walk is discarded and the next run walks again. The export and the images are not attempted. This failure does not count toward the circuit breaker;
 - the source is not accessible (`cannot access source <id>: <reason>`). The reason is `Permission denied` or `Source does not exist`, from the page CoralNet serves with status 200, or `HTTP 404`. This failure does not count toward the [circuit breaker](#retries-and-circuit-breaker);
 - the overview request returned HTTP 403 (`overview_forbidden`). This failure counts toward the circuit breaker;
+- the annotations export has no rows although an image is Confirmed, after its retries (`export_empty`). This failure does not count toward the [circuit breaker](#retries-and-circuit-breaker);
 - verification of the source failed (`verification_failed`, with the [codes](#verification));
 - the overview page shows no "Total images" count (`overview_total_missing`; `verify-existing` reports it too). This failure counts toward the circuit breaker;
 - CoralNet login failed for the source (`login failed`);
@@ -130,7 +131,7 @@ The scraper accepts a response only when its content is valid. A status of 200 i
 
   The image unit repeats the resolve step, so an expired pre-signed URL is resolved again. Waits are 5 to 120 s with jitter. There is no cap on total retry time. A page-level walk failure resumes from the last walk checkpoint. A count mismatch redoes the walk. These retries sit on top of the transport retries above, so one image can make up to about 4 × 6 requests. The first bulk `export_prep` read timeout is sized from the estimated annotation rows: the overview's image count times its points per image (100 when the overview gives none), at 250 rows/s plus 120 s, within 300 to 7200 s. After an `export_prep` read timeout, the next attempt waits an extra 60 s, because CoralNet may still be building the export. Once one page export fails, the other pages make no further attempts.
 - **Image-stage stop.** After 20 images in a row fail, the scraper skips the remaining queued images and the source gets `images_outage`.
-- **Circuit breaker.** After 5 consecutive outage-type failures the breaker trips. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `overview_forbidden`, `overview_total_missing`, `annotations_failed`, `image_list_failed` and `images_outage`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. A source skipped because it is complete neither counts toward the streak nor resets it.
+- **Circuit breaker.** After 5 consecutive outage-type failures the breaker trips. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `overview_forbidden`, `overview_total_missing`, `annotations_failed`, `image_list_failed` and `images_outage`. Other failed sources, for example `cannot access source <id>: <reason>`, `export_empty`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. A source skipped because it is complete neither counts toward the streak nor resets it.
 
   After a trip the run logs `Circuit breaker tripped: …` and waits `--breaker-cooldown` seconds (default 600) before the next source it does not skip as complete. That source is the probe:
 

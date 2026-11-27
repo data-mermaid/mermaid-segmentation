@@ -36,6 +36,7 @@ from conftest import (
 from coralnet_scraper import downloader as downloader_mod
 from coralnet_scraper import walker as walker_mod
 from coralnet_scraper.downloader import CoralNetDownloader
+from coralnet_scraper.errors import ExportEmpty
 from coralnet_scraper.models import ImageFailures
 from coralnet_scraper.verify import Verification
 
@@ -202,6 +203,16 @@ def test_download_source_stops_after_annotations_fail(fake_s3):
 
     assert res.ok is False
     assert res.errors == ["annotations_failed"]
+    dl.images.download_image_to_s3.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_download_source_reports_an_empty_export_apart_from_a_failed_one(fake_s3):
+    dl, mocks = _failing_step_downloader(fake_s3)
+    mocks["download_annotations"].side_effect = ExportEmpty("header-only")
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors == ["export_empty"]
     dl.images.download_image_to_s3.assert_not_called()  # type: ignore[attr-defined]
 
 

@@ -39,7 +39,7 @@ from conftest import (
 
 from coralnet_scraper import exporter as exporter_mod
 from coralnet_scraper.downloader import CoralNetDownloader
-from coralnet_scraper.errors import ContentError, SessionExpired
+from coralnet_scraper.errors import ContentError, ExportEmpty, SessionExpired
 from coralnet_scraper.exporter import (
     _PAGINATED_EXPORT_THRESHOLD,
     decode_export_csv,
@@ -838,16 +838,29 @@ def test_a_header_only_page_export_without_a_confirmed_image_is_accepted(
     assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg"]
 
 
-def test_a_confirmed_page_that_stays_header_only_fails_the_export(paginated_downloader, fake_s3):
+def test_a_confirmed_page_that_stays_header_only_raises_export_empty(paginated_downloader, fake_s3):
     dl = paginated_downloader
     refs = _status_refs({1: "Confirmed", 2: "Confirmed"})
     served, get, post = _serve_by_page({1: [_rows(1)], 2: [_HEADER_ONLY]})
 
-    with _mock_paginated_session(dl, get=get, post=post):
-        ok = dl.exporter.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
+    with _mock_paginated_session(dl, get=get, post=post), pytest.raises(ExportEmpty):
+        dl.exporter.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
 
-    assert ok is False
     assert served[2] > 1
+    assert _BULK_KEY not in fake_s3.objects
+
+
+def test_a_confirmed_bulk_export_that_stays_header_only_fails_the_export(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed"})
+    served, get, post = _serve_by_page({1: [_HEADER_ONLY]})
+
+    with _mock_paginated_session(dl, get=get, post=post), pytest.raises(ExportEmpty):
+        dl.exporter.download_annotations(1, "b", "p", refs=refs, total_images=1, points_per_image=1)
+
+    assert served[1] > 1
     assert _BULK_KEY not in fake_s3.objects
 
 

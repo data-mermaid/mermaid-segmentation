@@ -388,6 +388,34 @@ def test_a_verification_failure_does_not_reset_the_outage_streak(fake_s3):
     assert attempted == [1, 2, 3, 4, 5, 6]
 
 
+def test_empty_exports_do_not_open_the_circuit(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(
+        range(1, 7), "export_empty"
+    )
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped is None
+    assert attempted == list(range(1, 7))
+
+
+def test_an_empty_export_does_not_reset_the_outage_streak(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = {
+        1: "annotations_failed",
+        2: "annotations_failed",
+        3: "export_empty",
+        4: "annotations_failed",
+        5: "annotations_failed",
+        6: "annotations_failed",
+        7: True,
+    }
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5, 6]
+
+
 @pytest.mark.parametrize(
     "error",
     [
