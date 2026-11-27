@@ -28,7 +28,10 @@ from tests.mermaidseg.conftest import cbm_mask_config, cbm_meta, concept_keep, s
 
 NAMES = ["bleached", "anthropogenic", "sand"]
 _VAL_SECTION = DataSection.model_validate(
-    {"datasets": {"ds": {"version": "v", "manifest_sha256": "x", "val": {"groups": "all"}}}}
+    {
+        "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
+        "datasets": {"ds": {"version": "v", "manifest_sha256": "x", "val": {"groups": "all"}}},
+    }
 )
 
 
@@ -84,6 +87,7 @@ def _split_section() -> DataSection:
     """``a`` has all three blocks; ``b`` only a train block, with transform and repeat."""
     return DataSection.model_validate(
         {
+            "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
             "datasets": {
                 "a": {
                     "version": "v",
@@ -103,7 +107,7 @@ def _split_section() -> DataSection:
                     },
                 },
                 "c": {"version": "v", "manifest_sha256": "x", "test": {"groups": ["g4"]}},
-            }
+            },
         }
     )
 
@@ -191,6 +195,7 @@ class _Harness:
             return self.datasets
 
         monkeypatch.setattr(val_loss, "build_datasets", build_datasets)
+        monkeypatch.setattr(val_loss, "load_benthic_hierarchy", lambda *_a: {})
         monkeypatch.setattr(val_loss, "build_registry", lambda *_a, **_k: (registry, schema))
         monkeypatch.setattr(val_loss, "build_loss", build_loss)
         self.bundle = SimpleNamespace(
@@ -346,6 +351,7 @@ def _run_real_val_loss(monkeypatch, tmp_path, schema, model, dataset, **kwargs):
 
     monkeypatch.setattr(val_loss, "_bundle_config", lambda *_a: cfg)
     monkeypatch.setattr(val_loss, "build_datasets", lambda *_a, **_k: {("ds", "val"): dataset})
+    monkeypatch.setattr(val_loss, "load_benthic_hierarchy", lambda *_a: {})
     monkeypatch.setattr(val_loss, "build_registry", lambda *_a, **_k: (registry, schema))
     monkeypatch.setattr(val_loss, "build_loss", recording_build_loss)
     bundle = SimpleNamespace(

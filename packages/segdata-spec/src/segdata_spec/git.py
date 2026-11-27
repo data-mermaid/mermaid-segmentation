@@ -29,11 +29,25 @@ def _git(repo_dir: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def on_remote(repo_dir: Path, sha: str) -> bool:
+    """Whether some remote-tracking branch contains ``sha``; False when git cannot tell.
+
+    The attached ``=`` form keeps ``sha`` from ever being parsed as an option.
+    """
+    result = subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo_dir), "branch", "-r", f"--contains={sha}"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def probe_git(repo_dir: Path) -> GitState:
     """Read HEAD, tracked-file dirtiness and whether a remote branch contains HEAD."""
     sha = _git(repo_dir, "rev-parse", "HEAD")
     dirty = bool(_git(repo_dir, "status", "--porcelain", "--untracked-files=no"))
-    pushed = bool(_git(repo_dir, "branch", "-r", "--contains", "HEAD"))
+    pushed = on_remote(repo_dir, sha)
     return GitState(sha=sha, dirty=dirty, pushed=pushed)
 
 

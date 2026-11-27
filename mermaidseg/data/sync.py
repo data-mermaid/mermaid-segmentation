@@ -41,6 +41,6 @@ def format_summary(result: SyncResult) -> str:
         f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}"
         for name, r in result.datasets.items()
     ]
-    if result.taxonomy is not None:
-        lines.append(f"taxonomy: version {result.taxonomy.version}")
+    assert result.taxonomy is not None  # run_sync always passes the required pin
+    lines.append(f"taxonomy: version {result.taxonomy.version}")
     return "\n".join(lines)

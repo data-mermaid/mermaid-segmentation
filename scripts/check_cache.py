@@ -4,7 +4,7 @@
 Reads only the local cache: no S3 call, and no re-hash of images or tables. Each dataset is opened
 by the same ``build_datasets`` call that training makes, so the check fails exactly when job
 start-up would: a missing or corrupt marker, a pin mismatch, a missing table, a selected group that
-is absent or unsynced, or a missing image or mask file. A pinned taxonomy must be in the cache too.
+is absent or unsynced, or a missing image or mask file. The pinned taxonomy must be in the cache too.
 Prints one line per dataset and exits 1 if any check failed. A failed check names its cause and
 the step that fixes it: usually ``scripts/sync_data.py``, or a fix to the data config.
 
@@ -83,9 +83,8 @@ def check_cache(section: DataSection, cache_dir: Path) -> list[tuple[str, bool]]
         resize = entry.resize.id if entry.resize else "original"
         failure = _check_dataset(section, name, cache_dir)
         results.append(_line(name, f"version {entry.version}, resize {resize}", failure))
-    if section.taxonomy is not None:
-        failure = _check_taxonomy(section, cache_dir)
-        results.append(_line("taxonomy", f"version {section.taxonomy.version}", failure))
+    failure = _check_taxonomy(section, cache_dir)
+    results.append(_line("taxonomy", f"version {section.taxonomy.version}", failure))
     return results
 
 

@@ -126,10 +126,11 @@ def _schema_config(tmp_path: Path, *sources: str) -> Path:
         yaml.safe_dump(
             {
                 "data": {
+                    "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
                     "datasets": {
                         name: {"version": "v", "manifest_sha256": "s", "train": {"groups": "all"}}
                         for name in sources
-                    }
+                    },
                 }
             }
         )
@@ -159,6 +160,7 @@ def test_build_registry_freezes_concepts_to_the_schema(tmp_path, monkeypatch):
     registry, schema = build_registry(
         dataset_dict,
         _registry_training_cfg(),
+        benthic_hierarchy={},
         schema_config=_schema_config(tmp_path, "coralscapes_v2"),
     )
     assert registry.target_id2label == {1: "pocillopora", 2: "sand"}
@@ -172,6 +174,7 @@ def test_build_registry_exits_naming_a_dataset_missing_from_the_concept_schema(t
         build_registry(
             dataset_dict,
             _registry_training_cfg(),
+            benthic_hierarchy={},
             schema_config=_schema_config(tmp_path, "coralscapes_v2"),
         )
 
@@ -195,6 +198,7 @@ def test_build_registry_registers_one_reader_per_source(tmp_path, monkeypatch):
     registry, _ = build_registry(
         dataset_dict,
         _registry_training_cfg(),
+        benthic_hierarchy={},
         schema_config=_schema_config(tmp_path, "coralscapes_v2", "pacific_labeled_corals"),
     )
     # pacific has no train split, so its only split stands in.

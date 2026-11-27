@@ -114,7 +114,7 @@ def resolved_config() -> dict[str, Any]:
 def write_run(
     run_dir: Path,
     *,
-    git_dirty: bool | None = False,
+    git_dirty: bool = False,
     config: dict[str, Any] | None = None,
     mean: Sequence[float] = IMAGENET_MEAN,
     std: Sequence[float] = IMAGENET_STD,

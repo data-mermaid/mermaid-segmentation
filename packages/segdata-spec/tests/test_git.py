@@ -5,11 +5,63 @@ from pathlib import Path
 import pytest
 
 from segdata_spec.errors import PublishRefused
-from segdata_spec.git import GitState, probe_git, refuse_unpublishable
+from segdata_spec.git import GitState, on_remote, probe_git, refuse_unpublishable
 
 
 def _run(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)  # noqa: S603, S607
+
+
+def _head(repo: Path) -> str:
+    result = subprocess.run(  # noqa: S603
+        ["git", "rev-parse", "HEAD"],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _repo_with_remote(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose ``origin/main`` holds the returned sha."""
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    work.mkdir()
+    _run(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    _run(work, "init", "-b", "main")
+    _run(work, "config", "user.name", "t")
+    _run(work, "config", "user.email", "t@example.com")
+    _run(work, "remote", "add", "origin", str(origin))
+    (work / "f.txt").write_text("one")
+    _run(work, "add", "f.txt")
+    _run(work, "commit", "-m", "one")
+    _run(work, "push", "-u", "origin", "main")
+    return work, _head(work)
+
+
+def test_on_remote_is_true_for_a_sha_on_a_remote_branch(tmp_path):
+    work, pushed = _repo_with_remote(tmp_path)
+    assert on_remote(work, pushed) is True
+
+
+def test_on_remote_is_false_for_a_sha_only_on_a_local_branch(tmp_path):
+    work, _ = _repo_with_remote(tmp_path)
+    (work / "g.txt").write_text("two")
+    _run(work, "add", "g.txt")
+    _run(work, "commit", "-m", "two")
+    assert on_remote(work, _head(work)) is False
+
+
+def test_on_remote_is_false_for_a_sha_the_repository_does_not_know(tmp_path):
+    work, _ = _repo_with_remote(tmp_path)
+    assert on_remote(work, "0123456789abcdef0123456789abcdef01234567") is False
+
+
+def test_on_remote_is_false_outside_a_git_checkout(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert on_remote(plain, "0123456789abcdef0123456789abcdef01234567") is False
 
 
 def test_probe_git_reports_dirty_and_pushed(tmp_path):

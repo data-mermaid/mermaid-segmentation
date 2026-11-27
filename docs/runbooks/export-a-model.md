@@ -13,7 +13,7 @@ This runbook turns a training checkpoint into a bundle: `model.json` and `weight
   - Slurm or local run: `outputs/model_checkpoints/<run>/`.
   - SageMaker run: download from `s3://$SM_STAGING_BUCKET/runs/<job>/checkpoints/model_checkpoints/<run>/`. See [Get the checkpoints](train-on-sagemaker.md#get-the-checkpoints).
 - Have AWS credentials that read `mermaid-ic-datasets`, and run the command from a git checkout. The export checks the run's data pins against the bucket and its commit against your checkout.
-- Run `git fetch origin` first. The export reads the local `origin/*` refs and does not fetch.
+- Run `git fetch` first. The export reads the local remote-tracking branches of every remote and does not fetch.
 - Choose an output directory that is empty or does not exist yet. Its parent directory must exist.
 
 ## Export the checkpoint
@@ -37,11 +37,9 @@ Bundles exported before the `weights_sha256` key existed have no key, and `load_
 | No `model.json` beside the checkpoint | Copy the run's `model.json` into the checkpoint's directory. For SageMaker, download it with the checkpoint. |
 | The checkpoint cannot be loaded, or lacks a required key | Use another checkpoint of the run. A `*.partial` file is incomplete. |
 | No recorded lineage | Export a checkpoint that `scripts/train.py` wrote. Each checkpoint records the lineage of the session that wrote it. |
-| The lineage records a dirty or unknown git tree | The session that wrote the checkpoint ran on uncommitted code. A run that resumed or warm-started from a checkpoint inherits that checkpoint's git state, so a source that was dirty gives the same refusal. A checkpoint without lineage cannot be resumed or warm-started at all. `lineage.parent` in the checkpoint shows the source's git SHA, dirty state and data version. You cannot export it. Train again from a clean commit, from scratch or from a clean checkpoint. The resumed or warm-started session must itself run on a clean tree; a clean checkpoint does not help if the code is dirty. |
-| The lineage has no `data_version`, no datasets, or no taxonomy pin | The checkpoint was written by a run that did not pin its data. Train again with a data config that pins every dataset and the taxonomy. |
+| The lineage records a dirty git tree | The session that wrote the checkpoint ran on uncommitted code. A run that resumed or warm-started from a checkpoint inherits that checkpoint's git state, so a source that was dirty gives the same refusal. A checkpoint without lineage cannot be resumed or warm-started at all. `lineage.parent` in the checkpoint shows the source's git SHA, dirty state and data version. You cannot export it. Train again from a clean commit, from scratch or from a clean checkpoint. The resumed or warm-started session must itself run on a clean tree; a clean checkpoint does not help if the code is dirty. |
 | A pinned manifest is missing from `mermaid-ic-datasets`, or its sha256 differs from the pin | The export checks the manifest of each dataset and the taxonomy in `lineage.data_version`. Check the AWS credentials and that the version was published, then export again. |
-| `git_sha` is not a 40-character lowercase hex id, or no `origin/*` ref contains it | Run `git fetch origin`. If the commit is still missing, push it. |
-| The config differs from the recorded lineage | The checkpoint and its lineage do not match. Use a checkpoint from one unchanged run. |
+| No remote branch contains `git_sha` | Run `git fetch`. If the commit is still missing, push it. |
 | The output directory is not empty | Choose an empty or new directory. |
 | The parent of the output directory does not exist | Create the parent directory. |
 

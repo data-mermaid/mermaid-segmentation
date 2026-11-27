@@ -65,7 +65,7 @@ def test_global_ids_cover_every_labels_parquet_row_at_the_readers_offset(
     # Only label 3 has a point; label 7 has none in the selection and still gets an id.
     reader = _reader(tmp_path, _named({3: "a", 7: "b"}), global_offset=5)
 
-    registry = SourceLabelRegistry([reader], schema)
+    registry = SourceLabelRegistry([reader], schema, benthic_hierarchy={})
 
     assert registry.dataset_offsets == {"coralnet": 5}
     assert registry.global_id2source == {8: ("coralnet", "a"), 12: ("coralnet", "b")}
@@ -82,7 +82,7 @@ def test_source_to_target_follows_each_rows_benthic_attribute(
     ]
     reader = _reader(tmp_path, labels, global_offset=10)
 
-    registry = SourceLabelRegistry([reader], schema)
+    registry = SourceLabelRegistry([reader], schema, benthic_hierarchy={})
 
     assert registry.target_label2id == {"acropora": 1, "sand": 2}
     assert registry.source_to_target.tolist() == [0] * 11 + [1, 2, 0, 0]
@@ -93,7 +93,7 @@ def test_a_gap_id_inside_a_sources_range_maps_to_background(
 ) -> None:
     reader = _reader(tmp_path, _named({1: "a", 3: "b"}), global_offset=10)
 
-    registry = SourceLabelRegistry([reader], schema)
+    registry = SourceLabelRegistry([reader], schema, benthic_hierarchy={})
 
     assert registry.source_to_target.tolist() == [0] * 11 + [1, 0, 2]
 
@@ -104,7 +104,7 @@ def test_lookups_span_the_largest_offset_plus_label_id(
     first = _reader(tmp_path, _named({58: "x", 100: "y"}), name="a")
     second = _reader(tmp_path, _named({1: "p", 9: "q"}), name="b", global_offset=100)
 
-    registry = SourceLabelRegistry([first, second], schema)
+    registry = SourceLabelRegistry([first, second], schema, benthic_hierarchy={})
 
     assert registry.num_global_source_classes == 109
     assert registry.source_to_target.shape == (110,)
@@ -118,7 +118,7 @@ def test_default_targets_are_the_sorted_union_across_sources(
         tmp_path, _named({1: "sand", 2: "fish"}), name="coralscapes_v2", global_offset=2
     )
 
-    registry = SourceLabelRegistry([mermaid, scapes], schema)
+    registry = SourceLabelRegistry([mermaid, scapes], schema, benthic_hierarchy={})
 
     assert registry.target_label2id == {"acropora": 1, "fish": 2, "sand": 3}
     assert registry.source_to_target.tolist() == [0, 1, 3, 3, 2]
@@ -158,16 +158,6 @@ def test_label_roll_up_maps_a_target_onto_its_ancestor_in_the_class_subset(
     assert registry.source_to_target.tolist() == expected
 
 
-def test_label_roll_up_without_a_hierarchy_raises(schema: ConceptSchema, tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="requires benthic_hierarchy"):
-        SourceLabelRegistry(
-            [_reader(tmp_path, _named({1: "sand"}))],
-            schema,
-            target_label_subset=["sand"],
-            label_roll_up=True,
-        )
-
-
 def test_label_roll_up_without_a_subset_raises(schema: ConceptSchema, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="requires target_label_subset"):
         SourceLabelRegistry(
@@ -184,7 +174,7 @@ def test_target_label_subset_collapses_other_targets_to_background(
     labels = [_label(1, "acropora alive", "Acropora"), _label(2, "sand", "Sand")]
 
     registry = SourceLabelRegistry(
-        [_reader(tmp_path, labels)], schema, target_label_subset=["Sand"]
+        [_reader(tmp_path, labels)], schema, target_label_subset=["Sand"], benthic_hierarchy={}
     )
 
     assert registry.target_label2id == {"sand": 1}
@@ -195,7 +185,7 @@ def test_duplicate_source_name_raises(schema: ConceptSchema, tmp_path: Path) -> 
     first = _reader(tmp_path / "1", _named({1: "a"}), name="mermaid")
     second = _reader(tmp_path / "2", _named({1: "b"}), name="mermaid")
     with pytest.raises(ValueError, match="Duplicate source_name 'mermaid'"):
-        SourceLabelRegistry([first, second], schema)
+        SourceLabelRegistry([first, second], schema, benthic_hierarchy={})
 
 
 def test_mermaid_concept_rows_are_keyed_by_the_benthic_attribute_of_each_ba_gf_label(
@@ -220,6 +210,7 @@ def test_mermaid_concept_rows_are_keyed_by_the_benthic_attribute_of_each_ba_gf_l
     registry = SourceLabelRegistry(
         [PointDataset(version, split="train", global_offset=0)],
         concept_schema=schema,
+        benthic_hierarchy={},
     )
 
     true_channels = [
@@ -251,7 +242,7 @@ def test_dense_concepts_follow_the_registry_lookup(tmp_path: Path) -> None:
     reader = DenseDataset(version, split="train", global_offset=5)
     schema = ConceptSchema.from_csv(sources={"coralscapes_v2"})
 
-    registry = SourceLabelRegistry([reader], concept_schema=schema)
+    registry = SourceLabelRegistry([reader], concept_schema=schema, benthic_hierarchy={})
 
     global_ids = torch.as_tensor(reader[0][1]).long()[None]
     assert global_ids.tolist() == [[[6, 7]]]
@@ -276,7 +267,7 @@ def test_coverage_is_judged_per_source_at_its_own_offset(
     )
 
     with caplog.at_level("INFO", logger=registry_module.logger.name):
-        SourceLabelRegistry([mermaid, scapes], schema)
+        SourceLabelRegistry([mermaid, scapes], schema, benthic_hierarchy={})
 
     levels = {
         name: next(r.levelname for r in caplog.records if r.getMessage().startswith(f"{name}:"))

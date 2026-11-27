@@ -109,7 +109,8 @@ class SourceLabelRegistry:
         target_labels: list[str] | None = None,
         label_roll_up: bool = False,
         target_label_subset: list[str] | set[str] | None = None,
-        benthic_hierarchy: Mapping[str, str | None] | None = None,
+        *,
+        benthic_hierarchy: Mapping[str, str | None],
     ):
         """Build the source-to-target (and concept) lookups over the readers' global IDs.
 
@@ -121,11 +122,11 @@ class SourceLabelRegistry:
             target_label_subset: Target label names to retain.
             concept_schema: Concept schema that ``source_to_concepts`` is built from.
             benthic_hierarchy: Lower-cased benthic-attribute name -> parent name (see
-                ``segdata_spec.taxonomy.hierarchy_from_table``), required with ``label_roll_up``.
+                ``segdata_spec.taxonomy.hierarchy_from_table``); read only with ``label_roll_up``.
 
         Raises:
             ValueError: If there are no datasets, two datasets share a ``source_name``, or
-                ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``.
+                ``label_roll_up`` has no ``target_label_subset``.
         """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -171,8 +172,6 @@ class SourceLabelRegistry:
         if label_roll_up:
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
-            if benthic_hierarchy is None:
-                raise ValueError("label_roll_up=True requires benthic_hierarchy")
             hierarchy = dict(benthic_hierarchy)
 
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays

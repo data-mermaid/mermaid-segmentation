@@ -98,7 +98,7 @@ class DataSection(_Strict):
     it never adds a block.
     """
 
-    taxonomy: PinRef | None = None
+    taxonomy: PinRef
     default: DefaultSection | None = None
     datasets: dict[str, DatasetEntry]
 
@@ -117,7 +117,7 @@ class SyncPlan:
     """The arguments ``segdata_spec.sync.sync`` takes, derived from a data config."""
 
     pins: dict[str, Pin]
-    taxonomy: Pin | None
+    taxonomy: Pin
     selection: dict[str, set[str] | None]
     split_files: dict[str, Path]
     resize: dict[str, ResizeSpec | None] = field(default_factory=dict)
@@ -175,21 +175,16 @@ def sync_plan(data_cfg: Mapping[str, Any], repo_root: Path) -> SyncPlan:
         repo_root: The directory ``split_file`` paths are relative to.
 
     Raises:
-        pydantic.ValidationError: The section has an unknown key or an invalid block.
+        pydantic.ValidationError: The section has an unknown key, no taxonomy pin or an invalid block.
         ValueError: A split file is malformed (see ``segdata_spec.splits.read_split_file``).
     """
     section = DataSection.model_validate(data_cfg)
-    taxonomy = (
-        Pin(name=TAXONOMY_NAME, **section.taxonomy.model_dump())
-        if section.taxonomy is not None
-        else None
-    )
     return SyncPlan(
         pins={
             name: Pin(name=name, version=e.version, manifest_sha256=e.manifest_sha256)
             for name, e in section.datasets.items()
         },
-        taxonomy=taxonomy,
+        taxonomy=Pin(name=TAXONOMY_NAME, **section.taxonomy.model_dump()),
         selection={name: _entry_selection(e, repo_root) for name, e in section.datasets.items()},
         resize={name: e.resize for name, e in section.datasets.items()},
         split_files={

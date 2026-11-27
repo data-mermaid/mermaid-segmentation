@@ -39,6 +39,7 @@ def _write_inputs(tmp_path):
         yaml.safe_dump(
             {
                 "data": {
+                    "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
                     "datasets": {
                         "coralnet": {
                             "version": pin.version,
@@ -46,7 +47,7 @@ def _write_inputs(tmp_path):
                             "split_file": str(split_file),
                             "train": {"use": ["train"]},
                         }
-                    }
+                    },
                 }
             }
         )

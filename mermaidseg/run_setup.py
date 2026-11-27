@@ -82,7 +82,7 @@ def build_registry(
     training_cfg: Any,
     *,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
-    benthic_hierarchy: Mapping[str, str | None] | None = None,
+    benthic_hierarchy: Mapping[str, str | None],
     device: torch.device | str = "cpu",
 ) -> tuple[SourceLabelRegistry, ConceptSchema]:
     """Label registry over ``dataset_dict``, with concepts frozen to ``schema_config``.
@@ -96,7 +96,7 @@ def build_registry(
         dataset_dict: Built readers keyed by ``(name, split)``.
         training_cfg: The ``training`` section.
         schema_config: Data config whose datasets freeze the concept channels.
-        benthic_hierarchy: Benthic-attribute name -> parent name, required with
+        benthic_hierarchy: Benthic-attribute name -> parent name, read only with
             ``training.label_roll_up`` (see ``mermaidseg.data.factory.load_benthic_hierarchy``).
         device: Device of the registry's lookup tensors.
 

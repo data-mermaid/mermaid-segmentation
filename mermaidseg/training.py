@@ -202,9 +202,8 @@ def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
     for name, pin in version["datasets"].items():
         params[f"lineage/datasets/{name}/version"] = pin["version"]
         params[f"lineage/datasets/{name}/manifest_sha256"] = pin["manifest_sha256"]
-    if version["taxonomy"] is not None:
-        params["lineage/taxonomy/version"] = version["taxonomy"]["version"]
-        params["lineage/taxonomy/manifest_sha256"] = version["taxonomy"]["manifest_sha256"]
+    params["lineage/taxonomy/version"] = version["taxonomy"]["version"]
+    params["lineage/taxonomy/manifest_sha256"] = version["taxonomy"]["manifest_sha256"]
     return params
 
 

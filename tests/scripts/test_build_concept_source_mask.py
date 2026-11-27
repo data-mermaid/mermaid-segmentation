@@ -46,6 +46,7 @@ def inputs(tmp_path: Path) -> dict[str, Path]:
         yaml.safe_dump(
             {
                 "data": {
+                    "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
                     "datasets": {
                         "coralnet": {
                             "version": pin.version,
@@ -53,7 +54,7 @@ def inputs(tmp_path: Path) -> dict[str, Path]:
                             "split_file": str(split_file),
                             "train": {"use": ["train"]},
                         }
-                    }
+                    },
                 }
             }
         )
@@ -120,7 +121,16 @@ def _config(tmp_path: Path, pin: Pin, train: dict[str, Any]) -> Path:
     """A data config pinning ``pin`` as ``coralnet`` with the ``train`` block."""
     data_config = tmp_path / "config.yaml"
     entry = {"version": pin.version, "manifest_sha256": pin.manifest_sha256, "train": train}
-    data_config.write_text(yaml.safe_dump({"data": {"datasets": {"coralnet": entry}}}))
+    data_config.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
+                    "datasets": {"coralnet": entry},
+                }
+            }
+        )
+    )
     return data_config
 
 

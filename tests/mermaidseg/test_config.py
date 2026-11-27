@@ -141,6 +141,7 @@ def test_resolved_committed_config_loads_under_weights_only_with_paths_as_text(
 
 
 _DATA_SECTION = {
+    "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
     "datasets": {
         "mermaid": {
             "version": "v",
@@ -148,7 +149,7 @@ _DATA_SECTION = {
             "split_file": "splits.csv",
             "train": {"use": ["train"]},
         }
-    }
+    },
 }
 
 

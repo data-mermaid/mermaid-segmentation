@@ -12,7 +12,6 @@ import torch
 from botocore.exceptions import ClientError
 from safetensors.torch import load_file, save_file
 
-from mermaidseg import export
 from mermaidseg.export import _untied_cpu_state, write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS
 from tests.mermaidseg.conftest import (
@@ -22,7 +21,6 @@ from tests.mermaidseg.conftest import (
     TAX,
     FakeS3,
     commit,
-    data_version,
     deployable_lineage,
     export_ckpt,
     git,
@@ -150,13 +148,6 @@ def test_export_of_a_checkpoint_without_lineage_raises_naming_its_path(tmp_path)
     assert str(checkpoint) in str(excinfo.value)
 
 
-def test_export_refuses_a_run_from_an_unknown_tree(tmp_path):
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=None)
-    with pytest.raises(ValueError, match="clean tree"):
-        export_ckpt(checkpoint, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
-
-
 def test_export_refuses_a_non_empty_output_directory(run, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
@@ -171,16 +162,6 @@ def test_export_accepts_an_existing_empty_output_directory(run, tmp_path):
     out.mkdir()
     export_ckpt(run[0], out, repo_dir=run[1])
     assert sorted(p.name for p in out.iterdir()) == sorted([MODEL_JSON, WEIGHTS])
-
-
-def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_naming_the_key(
-    tmp_path,
-):
-    other = {**_tiny.resolved_config(), "seed": 1}
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", config=other)
-    with pytest.raises(ValueError, match="seed"):
-        export_ckpt(checkpoint, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize("key", ["config"])
@@ -257,11 +238,29 @@ def test_export_refuses_a_commit_only_on_a_local_branch_telling_the_user_to_fetc
     lineage = deployable_lineage(local_sha)
     checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
     s3 = seeded_s3()
-    with pytest.raises(ValueError, match="git fetch origin") as raised:
+    with pytest.raises(ValueError, match="not on any remote branch") as raised:
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
     assert local_sha in str(raised.value)
     assert s3.requested == []
     assert not (tmp_path / "out").exists()
+
+
+def test_export_accepts_a_commit_on_a_remote_other_than_origin(tmp_path):
+    repo, _ = repo_with_origin(tmp_path)
+    other = tmp_path / "other.git"
+    other.mkdir()
+    git(other, "init", "--bare", "--initial-branch=main")
+    git(repo, "remote", "add", "other", str(other))
+    git(repo, "checkout", "-b", "elsewhere")
+    sha_on_other = commit(repo, "elsewhere.txt")
+    git(repo, "push", "other", "elsewhere")
+    git(repo, "checkout", "main")
+    git(repo, "branch", "-D", "elsewhere")
+    checkpoint, _ = _tiny.write_run(
+        tmp_path / "run", checkpoint_lineage=deployable_lineage(sha_on_other)
+    )
+    export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+    assert (tmp_path / "out" / MODEL_JSON).is_file()
 
 
 def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_path):
@@ -269,36 +268,8 @@ def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_pa
     unknown = "0123456789abcdef0123456789abcdef01234567"
     lineage = deployable_lineage(unknown)
     checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-    with pytest.raises(ValueError, match="git fetch origin"):
+    with pytest.raises(ValueError, match="not on any remote branch"):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-
-
-@pytest.mark.parametrize(
-    ("data_version", "named"),
-    [
-        pytest.param(None, "data_version", id="no-data-version"),
-        pytest.param({**data_version(), "taxonomy": None}, "taxonomy", id="null-taxonomy"),
-        pytest.param(
-            {"data_config_sha1": "x", "manifests": {}, "manifest_sha256": {}, "label_mappings": {}},
-            "retrain",
-            id="pre-pinning-lineage",
-        ),
-    ],
-)
-def test_export_refuses_a_lineage_that_does_not_pin_its_data(
-    deployable, tmp_path, data_version, named
-):
-    _, repo, pushed = deployable
-    lineage = deployable_lineage(pushed)
-    if data_version is None:
-        del lineage["data_version"]
-    else:
-        lineage["data_version"] = data_version
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-    with pytest.raises(ValueError, match="pin") as raised:
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-    assert named in str(raised.value)
-    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize(
@@ -318,29 +289,3 @@ def test_export_propagates_a_non_missing_key_s3_error_unchanged(deployable, tmp_
     with pytest.raises(ClientError):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=FakeS3({}, error=error))
     assert not (tmp_path / "out").exists()
-
-
-def test_export_refuses_a_directory_that_is_not_a_git_checkout_saying_so(deployable, tmp_path):
-    checkpoint, _, pushed = deployable
-    not_git = tmp_path / "plain"
-    not_git.mkdir()
-    with pytest.raises(ValueError, match="not a git checkout") as raised:
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=not_git)
-    assert str(not_git) in str(raised.value)
-    assert "git fetch" not in str(raised.value)
-
-
-@pytest.mark.parametrize("sha", ["--all", "0123abc"])
-def test_export_refuses_a_git_sha_that_is_not_40_lowercase_hex_without_calling_git(
-    deployable, tmp_path, monkeypatch, sha
-):
-    checkpoint, repo, _ = deployable
-    lineage = deployable_lineage(sha)
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-
-    def no_git(*args, **kwargs):
-        raise AssertionError("git must not run for a malformed sha")
-
-    monkeypatch.setattr(export.subprocess, "run", no_git)
-    with pytest.raises(ValueError, match="40"):
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)

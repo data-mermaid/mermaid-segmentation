@@ -28,13 +28,14 @@ def test_main_opens_the_pinned_version_and_forwards_the_cli_flags(
         yaml.safe_dump(
             {
                 "data": {
+                    "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
                     "datasets": {
                         "coralscapes_v2": {
                             "version": pin.version,
                             "manifest_sha256": pin.manifest_sha256,
                             "train": {"groups": ["train"]},
                         }
-                    }
+                    },
                 }
             }
         )
