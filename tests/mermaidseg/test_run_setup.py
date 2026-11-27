@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import re
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,9 @@ import pytest
 import torch
 import yaml
 
+from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.dataset_reconciliation.label_space import META_YAML
 from mermaidseg.io import ConfigDict
 from mermaidseg.run_setup import (
     MODEL_CHECKPOINT_KEYS,
@@ -28,27 +32,6 @@ from tests.mermaidseg.conftest import (
     label_space_section,
 )
 from tests.mermaidseg.data.conftest import VERSION
-
-# Channels: animalia, cnidaria, hexacorallia, scleractinia, poritidae, porites and tubular are set.
-PORITES_CONCEPT_ROW = [
-    2.0,
-    1.0,
-    2.0,
-    1.0,
-    2.0,
-    1.0,
-    1.0,
-    2.0,
-    1.0,
-    1.0,
-    2.0,
-    1.0,
-    1.0,
-    2.0,
-    2.0,
-    1.0,
-    1.0,
-]
 
 
 def test_resolved_config_yaml_holds_the_overridden_values(tmp_path):
@@ -145,14 +128,6 @@ def test_build_registry_registers_one_reader_per_source(label_space_run, tmp_pat
     assert registry.datasets[1] is label_space_run.readers[("pacific_labeled_corals", "val")]
 
 
-def test_build_registry_builds_the_lookups_of_a_matching_label_space(label_space_run):
-    registry, _ = _build(label_space_run)
-
-    # pacific's porites (global id 3) is outside the class subset.
-    assert registry.source_to_target.tolist() == [0, 1, 2, 0]
-    assert registry.source_to_concepts[3].tolist() == PORITES_CONCEPT_ROW
-
-
 def test_build_registry_builds_a_run_over_part_of_the_label_space(label_space_run):
     coralscapes = ("coralscapes_v2", "train")
     readers = {coralscapes: label_space_run.readers[coralscapes]}
@@ -245,3 +220,113 @@ def test_build_registry_refuses_a_stale_label_space_naming_each_mismatch(
     message = str(excinfo.value)
     for pattern in patterns:
         assert re.search(pattern, message), (pattern, message)
+
+
+def _repo_removal_list(run: SimpleNamespace) -> None:
+    run.training_cfg.concept_removal = str(run.concepts_csv)
+
+
+def _repo_label_space_gone(run: SimpleNamespace) -> None:
+    run.training_cfg.label_space = str(run.directory.parent / "gone")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_other_subset, _other_concepts, _repo_removal_list, _repo_label_space_gone],
+    ids=["label-keys", "concepts-csv", "removal-list", "repo-label-space-gone"],
+)
+def test_build_registry_with_a_label_space_dir_ignores_the_repo_inputs(label_space_run, mutate):
+    mutate(label_space_run)
+
+    registry, _ = build_registry(
+        label_space_run.readers,
+        label_space_run.training_cfg,
+        section=label_space_run.section,
+        schema_config=label_space_run.schema_config,
+        label_space_dir=label_space_run.directory,
+    )
+
+    assert registry.source_to_target.tolist() == [0, 1, 2, 0]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "pattern"),
+    [
+        (_other_pin, _PIN),
+        (_other_dataset_manifest, r"dataset coralscapes_v2.*other"),
+        (_other_taxonomy_manifest, r"taxonomy.*other"),
+        (_unknown_reader_label, _LABEL),
+    ],
+    ids=["dataset-pin", "dataset-manifest", "taxonomy-manifest", "reader-label"],
+)
+def test_build_registry_with_a_label_space_dir_still_refuses_pin_and_label_mismatches(
+    label_space_run, mutate, pattern
+):
+    mutate(label_space_run)
+
+    with pytest.raises(ValueError, match=pattern):
+        build_registry(
+            label_space_run.readers,
+            label_space_run.training_cfg,
+            section=label_space_run.section,
+            schema_config=label_space_run.schema_config,
+            label_space_dir=label_space_run.directory,
+        )
+
+
+def _label_space_copy_recording_inputs(run: SimpleNamespace, **recorded: str) -> Path:
+    """A copy of the run's label space whose meta records the sha1s of a mask and a removal list.
+
+    The cfg names both files and the mask sidecar records the copy's concept table;
+    ``recorded`` overrides what the copy's meta records. The repo label space is gone.
+    """
+    root = run.directory.parent
+    copy = root / "bundle_label_space"
+    shutil.copytree(run.directory, copy)
+    mask, removal = root / "mask.csv", root / "removal.csv"
+    mask.write_text("source_id,concept\n")
+    removal.write_text("concept\n")
+    meta_file = copy / META_YAML
+    meta = yaml.safe_load(meta_file.read_text())
+    meta["concept_source_mask_sha1"] = file_sha1(mask)
+    meta["concept_removal_sha1"] = file_sha1(removal)
+    meta.update(recorded)
+    meta_file.write_text(yaml.safe_dump(meta))
+    meta_path(mask).write_text(
+        yaml.safe_dump({"source_ids": ["1"], "concepts_csv_sha1": meta["concepts_csv_sha1"]})
+    )
+    meta_path(removal).write_text("{}\n")
+    cfg = run.training_cfg
+    cfg.concept_source_mask, cfg.concept_removal = str(mask), str(removal)
+    cfg.label_space = str(root / "gone")
+    return copy
+
+
+@pytest.mark.parametrize(
+    ("recorded", "stale_key"),
+    [
+        ({}, None),
+        ({"concept_source_mask_sha1": "stale"}, "concept_source_mask_sha1"),
+        ({"concept_removal_sha1": "stale"}, "concept_removal_sha1"),
+    ],
+    ids=["matches", "mask-differs", "removal-differs"],
+)
+def test_source_mask_with_a_label_space_dir_checks_the_mask_and_removal_against_its_meta(
+    label_space_run, recorded, stale_key
+):
+    copy = _label_space_copy_recording_inputs(label_space_run, **recorded)
+    schema = ConceptSchema.from_csv(
+        label_space_run.concepts_csv, sources={"coralscapes_v2", "pacific_labeled_corals"}
+    )
+
+    def load():
+        return load_run_concept_source_mask(
+            label_space_run.training_cfg, schema, label_space_dir=copy
+        )
+
+    if stale_key is None:
+        assert load().path == label_space_run.training_cfg.concept_source_mask
+        return
+    with pytest.raises(ValueError) as excinfo:
+        load()
+    assert f"{stale_key} stale" in str(excinfo.value)

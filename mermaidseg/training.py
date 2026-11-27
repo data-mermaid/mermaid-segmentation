@@ -380,7 +380,11 @@ def run(args: argparse.Namespace) -> None:
         schema_config=resolve_repo_path(args.concept_schema_config),
         device=device,
     )
-    print0(dist_ctx, f"Froze concept channels to the datasets of {args.concept_schema_config}")
+    print0(
+        dist_ctx,
+        f"Classes and concept channels from {cfg.training.label_space} "
+        f"({registry.num_target_classes - 1} classes, {schema.num_channels} channels)",
+    )
 
     train_datasets = _assemble_train_datasets(dataset_dict, section)
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]

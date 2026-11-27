@@ -19,6 +19,9 @@ of at most ``max_images_per_dataset`` images. A component is averaged over the
 batches in which it has labelled pixels. Results are reported per dataset and overall
 (all batches pooled).
 
+The classes and concept channels come from the bundle's own ``label_space/``, not from the
+repository path the bundle config names.
+
 With ``apply_source_mask``, the run's ``training.concept_source_mask`` zeros the masked
 source x concept targets as in the training loss (used for the CoralNet train sources).
 """
@@ -40,6 +43,7 @@ from mermaidseg.data.config import DataSection, DatasetEntry, Split, SplitSelect
 from mermaidseg.data.factory import build_datasets
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.evaluation.reporting import write_json
+from mermaidseg.export import LABEL_SPACE_DIR
 from mermaidseg.inference.bundle import ModelBundle
 from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.data_parallel import build_step
@@ -164,9 +168,16 @@ def evaluate_val_loss(
     ``(dataset, "val")``, only those images (see :func:`mermaidseg.data.factory.build_datasets`).
 
     Raises:
-        ValueError: No dataset of ``section`` has a ``split`` block.
+        ValueError: No dataset of ``section`` has a ``split`` block, or ``bundle`` has no
+            ``label_space/``.
     """
     t0 = time.time()
+    label_space_dir = Path(bundle.path) / LABEL_SPACE_DIR
+    if not label_space_dir.is_dir():
+        raise ValueError(
+            f"bundle {bundle.path} has no label_space/; it was exported before label spaces "
+            "existed, so re-export it from a retrained run"
+        )
     cfg = _bundle_config(bundle)
     resolution = bundle.input_size[0]
     cfg.run_name = name
@@ -189,6 +200,7 @@ def evaluate_val_loss(
         section=section,
         schema_config=schema_config,
         device=device,
+        label_space_dir=label_space_dir,
     )
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
     _check_layout(bundle, registry, channel_names)
@@ -196,7 +208,9 @@ def evaluate_val_loss(
 
     source_mask = None
     if apply_source_mask:
-        source_mask = load_run_concept_source_mask(cfg.training, schema)
+        source_mask = load_run_concept_source_mask(
+            cfg.training, schema, label_space_dir=label_space_dir
+        )
         if source_mask is None:
             logger.info("[%s] the bundle config has no concept_source_mask; targets unmasked", name)
         else:

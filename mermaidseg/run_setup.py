@@ -66,23 +66,48 @@ def concept_removal_list(training_cfg: Any, mapping_path: str | Path) -> list[st
     return load_concept_removal(resolve_repo_path(path), concepts_csv=mapping_path)
 
 
+def _check_input_sha1(
+    meta: Mapping[str, Any], training_cfg: Any, key: str, meta_key: str, directory: Path
+) -> None:
+    """Raise ValueError unless the file ``training_cfg[key]`` names has the sha1 ``meta`` records."""
+    value = training_cfg[key]
+    current = file_sha1(resolve_repo_path(value)) if value else None
+    if current != meta.get(meta_key):
+        raise ValueError(
+            f"{key}: {value or 'none'} has sha1 {current}, but the label space {directory} "
+            f"records {meta_key} {meta.get(meta_key)}"
+        )
+
+
 def load_run_concept_source_mask(
-    training_cfg: Any, schema: ConceptSchema
+    training_cfg: Any, schema: ConceptSchema, *, label_space_dir: Path | None = None
 ) -> ConceptSourceMask | None:
     """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``.
 
-    The mask must be built for the concept table whose sha1 the run's label space records.
+    The mask must be built for the concept table whose sha1 the label space records. That label
+    space is ``label_space_dir``, else the one ``training.label_space`` names. With
+    ``label_space_dir`` (a trained bundle's), the mask and removal files must also be those the
+    label space was built from.
+
+    Raises:
+        ValueError: With ``label_space_dir``, the mask or removal file differs from the one the
+            label space records.
     """
     path = training_cfg.concept_source_mask
     if not path:
         return None
-    meta_file = resolve_repo_path(training_cfg.label_space) / META_YAML
-    concepts_csv_sha1 = yaml.safe_load(meta_file.read_text())["concepts_csv_sha1"]
+    directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
+    meta = yaml.safe_load((directory / META_YAML).read_text())
+    if label_space_dir is not None:
+        _check_input_sha1(
+            meta, training_cfg, "concept_source_mask", "concept_source_mask_sha1", directory
+        )
+        _check_input_sha1(meta, training_cfg, "concept_removal", "concept_removal_sha1", directory)
     removal = training_cfg.concept_removal
     return load_concept_source_mask(
         resolve_repo_path(path),
         schema,
-        concepts_csv_sha1=concepts_csv_sha1,
+        concepts_csv_sha1=meta["concepts_csv_sha1"],
         removed_concepts=load_concept_removal(resolve_repo_path(removal)) if removal else [],
     )
 
@@ -179,12 +204,15 @@ def _check_label_space_current(
     training_cfg: Any,
     section: DataSection,
     readers: Sequence[VersionDataset],
+    *,
+    check_inputs: bool,
 ) -> None:
     """Raise ValueError naming every way ``space`` is stale for this run.
 
-    The run's dataset and taxonomy pins, its label keys and input files must be those the label
-    space was built from, and every label of its readers must have a row. The label space may
-    hold datasets the run does not build.
+    The run's dataset and taxonomy pins must be those the label space was built from, and every
+    label of its readers must have a row. With ``check_inputs``, its label keys and input files
+    must be those the label space was built from too. The label space may hold datasets the run
+    does not build.
     """
     problems = [
         *_pin_mismatches(
@@ -192,7 +220,7 @@ def _check_label_space_current(
             data_version(section),
             [ds.source_name for ds in readers],
         ),
-        *_input_mismatches(space.meta, training_cfg),
+        *(_input_mismatches(space.meta, training_cfg) if check_inputs else []),
         *_missing_reader_labels(space, readers),
     ]
     if problems:
@@ -209,8 +237,13 @@ def build_registry(
     section: DataSection,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
     device: torch.device | str = "cpu",
+    label_space_dir: Path | None = None,
 ) -> tuple[SourceLabelRegistry, ConceptSchema]:
     """Label registry over ``dataset_dict``, from the label space of ``training.label_space``.
+
+    With ``label_space_dir`` (a trained bundle's label space), that directory is read instead and
+    only the dataset pins and reader labels are checked: the label space is fixed, so the
+    repository's label keys and input files are not compared with it.
 
     The registry reads one reader per source: its train split, else the first split listed.
     Every split of a source shares its global offset (see
@@ -224,6 +257,7 @@ def build_registry(
             the label space.
         schema_config: Data config whose datasets the built datasets must be among.
         device: Device of the registry's lookup tensors.
+        label_space_dir: Label space directory to read in place of ``training.label_space``.
 
     Raises:
         SystemExit: A built dataset is not in ``schema_config``.
@@ -242,14 +276,21 @@ def build_registry(
             f"built datasets {sorted(missing)} are missing from the frozen concept schema "
             f"({schema_config})"
         )
-    if "label_space" not in training_cfg:
+    if label_space_dir is None and "label_space" not in training_cfg:
         raise ValueError(
             "the run config has no training.label_space; it was trained before label spaces "
             "existed, so retrain it or evaluate with a config that names one"
         )
-    directory = resolve_repo_path(training_cfg.label_space)
+    directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
     space = read_label_space(directory)
-    _check_label_space_current(directory, space, training_cfg, section, registry_datasets)
+    _check_label_space_current(
+        directory,
+        space,
+        training_cfg,
+        section,
+        registry_datasets,
+        check_inputs=label_space_dir is None,
+    )
     schema = ConceptSchema.from_label_space(space)
     registry = SourceLabelRegistry(registry_datasets, space).to(device)
     return registry, schema
