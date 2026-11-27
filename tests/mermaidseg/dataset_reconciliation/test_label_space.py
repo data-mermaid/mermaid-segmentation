@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from mermaidseg.dataset_reconciliation import label_space as label_space_module
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.label_space import (
     LabelSpace,
@@ -410,8 +413,33 @@ def test_rewriting_a_directory_replaces_every_table_and_keeps_acknowledged_csv(
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
 
+def _fail_yaml_dump(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("mermaidseg.dataset_reconciliation.label_space.yaml.safe_dump", fail)
+
+
+def _fail_second_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_replace = os.replace
+    calls = []
+
+    def replace(src: Any, dst: Any) -> None:
+        calls.append(src)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(label_space_module.os, "replace", replace)
+
+
+@pytest.mark.parametrize(
+    "inject_failure",
+    [_fail_yaml_dump, _fail_second_replace],
+    ids=["while-writing-tables", "second-rename"],
+)
 def test_a_failure_while_writing_leaves_the_existing_directory_and_no_partial_sibling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject_failure: Callable[..., None]
 ) -> None:
     space = _round_trip_space(tmp_path)
     directory = tmp_path / "space"
@@ -419,15 +447,35 @@ def test_a_failure_while_writing_leaves_the_existing_directory_and_no_partial_si
     (directory / "acknowledged.csv").write_text("kept")
     before = _snapshot(directory)
 
-    def fail(*_args: Any, **_kwargs: Any) -> str:
-        raise OSError("disk full")
-
-    monkeypatch.setattr("mermaidseg.dataset_reconciliation.label_space.yaml.safe_dump", fail)
+    inject_failure(monkeypatch)
     with pytest.raises(OSError, match="disk full"):
         write_label_space(directory, space)
 
     assert _snapshot(directory) == before
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_a_crashed_swap_blocks_the_write_and_creates_nothing(tmp_path: Path) -> None:
+    leftover = tmp_path / ".space.x.old"
+    leftover.mkdir()
+
+    with pytest.raises(ValueError, match=r"\.space\.x\.old.*restore"):
+        write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
+
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(("space", ".space"))) == [
+        ".space.x.old"
+    ]
+
+
+def test_the_written_directory_mode_follows_the_umask(tmp_path: Path) -> None:
+    space = _round_trip_space(tmp_path)
+    old_umask = os.umask(0o022)
+    try:
+        write_label_space(tmp_path / "space", space)
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE((tmp_path / "space").stat().st_mode) == 0o755
 
 
 def _drop_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -509,12 +557,22 @@ def test_a_malformed_acknowledgement_raises(tmp_path: Path, kind: str, reason: s
         check_label_space(space, acks, _HIERARCHY)
 
 
-def _ranked_space(tmp_path: Path, target: str, ranks: dict[str, str]) -> LabelSpace:
-    """A label "acropora" trained as ``target`` whose concept row sets the given rank values."""
+def _ranked_space(
+    tmp_path: Path, target: str, ranks: dict[str, str], subset: Sequence[str] | None = None
+) -> LabelSpace:
+    """A label "acropora" mapped to ``target`` whose concept row sets the given rank values.
+
+    ``subset`` defaults to ``[target]``, so the label is kept.
+    """
     table = concept_table()
     for rank, value in ranks.items():
         table.loc[table["source_label_class_name"] == "acropora", rank] = value
-    return _resolve(tmp_path, [_label(1, "acropora", target)], subset=[target], table=table)
+    return _resolve(
+        tmp_path,
+        [_label(1, "acropora", target)],
+        subset=[target] if subset is None else subset,
+        table=table,
+    )
 
 
 _OTHER_ROOT = {"soft coral": None, "xeniidae": "soft coral", "other": None, "dead coral": "other"}
@@ -529,14 +587,19 @@ _ORDER_OTHER_ROOT = {
 
 
 @pytest.mark.parametrize(
-    ("ranks", "detail"),
-    [({"family": "xeniidae"}, "family 'xeniidae'"), ({"genus": "Xeniidae"}, "genus 'xeniidae'")],
-    ids=["family", "genus-case-insensitive"],
+    ("ranks", "detail", "subset"),
+    [
+        ({"family": "xeniidae"}, "family 'xeniidae'", None),
+        ({"genus": "Xeniidae"}, "genus 'xeniidae'", None),
+        # The target is outside the subset, so the label drops; its concept row is still checked.
+        ({"family": "xeniidae"}, "family 'xeniidae'", ["Sand"]),
+    ],
+    ids=["family", "genus-case-insensitive", "dropped-label"],
 )
 def test_a_value_under_another_root_than_the_target_raises(
-    tmp_path: Path, ranks: dict[str, str], detail: str
+    tmp_path: Path, ranks: dict[str, str], detail: str, subset: list[str] | None
 ) -> None:
-    space = _ranked_space(tmp_path, "Dead coral", ranks)
+    space = _ranked_space(tmp_path, "Dead coral", ranks, subset)
 
     with pytest.raises(ValueError, match=rf"coralnet.*acropora.*rank_disagreement.*{detail}"):
         check_label_space(space, _NO_ACKS, _OTHER_ROOT)
@@ -554,8 +617,17 @@ def test_a_value_under_another_root_than_the_target_raises(
         # order is not a checked rank, whatever root scleractinia is under.
         ("Dead coral", {"order": "scleractinia"}, _ORDER_OTHER_ROOT),
         ("Sponge", {"family": "porifera"}, _DESCENDANT),
+        # a target outside the hierarchy has no root to disagree with.
+        ("Mystery", {"family": "xeniidae"}, _OTHER_ROOT),
     ],
-    ids=["target-and-unlisted-ranks", "ancestor", "same-root", "unchecked-rank", "descendant"],
+    ids=[
+        "target-and-unlisted-ranks",
+        "ancestor",
+        "same-root",
+        "unchecked-rank",
+        "descendant",
+        "target-not-in-hierarchy",
+    ],
 )
 def test_ranks_on_the_targets_line_or_root_or_unchecked_pass(
     tmp_path: Path, target: str, ranks: dict[str, str], hierarchy: dict[str, str | None]

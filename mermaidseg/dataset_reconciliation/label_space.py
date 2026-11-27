@@ -377,13 +377,37 @@ def _current_umask() -> int:
     return previous
 
 
+def _crashed_swap_leftovers(directory: Path) -> list[Path]:
+    """The ``.{name}.*.old`` backups beside ``directory``; they remain only after a crashed swap."""
+    if not directory.parent.is_dir():
+        return []
+    prefix = f".{directory.name}."
+    return sorted(
+        p
+        for p in directory.parent.iterdir()
+        if p.name.startswith(prefix) and p.name.endswith(".old")
+    )
+
+
 def write_label_space(directory: Path, space: LabelSpace) -> None:
     """Write ``classes.csv``, ``concepts.csv``, ``source_labels.csv`` and the meta YAML.
 
     The files are written to a temporary sibling of ``directory`` and swapped onto it, so a
     failure leaves the previous file set. Other files of an existing ``directory``, such as
     ``acknowledged.csv``, are carried over.
+
+    Raises:
+        ValueError: ``directory`` is missing and a ``.{name}.*.old`` backup sits beside it. A kill
+            between the two renames of the swap leaves that state; restore the backup by renaming
+            it to ``directory``.
     """
+    if not directory.exists():
+        leftovers = _crashed_swap_leftovers(directory)
+        if leftovers:
+            raise ValueError(
+                f"{directory} is missing but {[str(p) for p in leftovers]} remains from a crashed "
+                f"write; restore it by renaming it to {directory}"
+            )
     directory.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(dir=directory.parent, prefix=f".{directory.name}.", suffix=".partial")
