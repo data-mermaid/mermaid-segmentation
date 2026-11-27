@@ -22,7 +22,6 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import torch
-import torch.distributed as dist
 import yaml
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 
@@ -45,7 +44,6 @@ from mermaidseg.training import (
 )
 from scripts.train import build_parser
 from tests.conftest import cbm_test_config, dinov3_encoder_mocker
-from tests.mermaidseg.conftest import init_gloo, spawn_gloo
 from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
 
 
@@ -725,26 +723,7 @@ def _index_dataset() -> ConcatDataset:
     return ConcatDataset([TensorDataset(torch.arange(_LOADER_ITEMS))])
 
 
-def _shuffled_loader_worker(rank: int, world_size: int, init_method: str, queue) -> None:
-    init_gloo(rank, world_size, init_method)
-    try:
-        # Rank 1 starts from a different seed; the broadcast must align it with rank 0.
-        generator = torch.Generator().manual_seed(_LOADER_SEED + rank)
-        loader = make_shuffled_loader(
-            DistContext(rank=rank, world_size=world_size, local_rank=rank),
-            _index_dataset(),
-            generator,
-            batch_size=_LOADER_BATCH,
-            drop_last=True,
-            num_workers=0,
-        )
-        passes = [[batch[0].tolist() for batch in loader] for _ in range(2)]
-        queue.put((rank, passes))
-    finally:
-        dist.destroy_process_group()
-
-
-def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
+def test_distributed_shuffled_loader_matches_single_process_over_two_passes(lockstep_ranks):
     reference_loader = DataLoader(
         _index_dataset(),
         shuffle=True,
@@ -753,7 +732,21 @@ def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
         generator=torch.Generator().manual_seed(_LOADER_SEED),
     )
     expected = [[batch[0].tolist() for batch in reference_loader] for _ in range(2)]
-    rank0, rank1 = spawn_gloo(_shuffled_loader_worker, 2)
+
+    def two_passes(rank: int) -> list[list[list[int]]]:
+        # Rank 1 starts from a different seed; the broadcast must align it with rank 0.
+        generator = torch.Generator().manual_seed(_LOADER_SEED + rank)
+        loader = make_shuffled_loader(
+            DistContext(rank=rank, world_size=2, local_rank=rank),
+            _index_dataset(),
+            generator,
+            batch_size=_LOADER_BATCH,
+            drop_last=True,
+            num_workers=0,
+        )
+        return [[batch[0].tolist() for batch in loader] for _ in range(2)]
+
+    rank0, rank1 = lockstep_ranks(2).run(two_passes)
     for pass_index in range(2):
         interleaved = [
             shard0 + shard1

@@ -807,8 +807,13 @@ def test_a_non_finite_grad_norm_skips_the_update_and_its_callback(fixed_meta_mod
     ],
 )
 def test_ddp_step_is_built_once_and_rebuilt_when_a_part_is_replaced(
-    fixed_meta_model, single_rank_group, swapped
+    fixed_meta_model, monkeypatch, swapped
 ):
+    # No process group: a stand-in DDP that only keeps the wrapped module is enough here.
+    monkeypatch.setattr(meta_module, "is_distributed", lambda: True)
+    monkeypatch.setattr(
+        meta_module, "DistributedDataParallel", lambda module, **_: SimpleNamespace(module=module)
+    )
     meta = fixed_meta_model(training={"distributed": True, "world_size": 1})
     first = meta._get_ddp_step()
     assert meta._get_ddp_step() is first
