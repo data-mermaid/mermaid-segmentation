@@ -89,13 +89,11 @@ def _resolve(
     *,
     subset: Sequence[str],
     roll_up: bool = False,
-    offset: int = 0,
     name: str = "coralnet",
     table: pd.DataFrame | None = None,
 ) -> LabelSpace:
     return resolve_label_space(
         {name: _tables(tmp_path, labels, name=name)},
-        {name: offset},
         _TAXONOMY,
         SimpleNamespace(class_subset=list(subset), label_roll_up=roll_up),
         _schema(tmp_path, source=name, table=table),
@@ -191,7 +189,6 @@ def test_n_counts_the_train_images_only(tmp_path: Path) -> None:
 
     space = resolve_label_space(
         {"coralnet": tables},
-        {"coralnet": 0},
         _TAXONOMY,
         SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
         _schema(tmp_path),
@@ -204,7 +201,6 @@ def test_n_counts_the_train_images_only(tmp_path: Path) -> None:
 def test_n_is_zero_for_a_dataset_without_a_train_split(tmp_path: Path) -> None:
     space = resolve_label_space(
         {"coralnet": _tables(tmp_path, [_label(1, "sand", "Sand")])},
-        {"coralnet": 0},
         _TAXONOMY,
         SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
         _schema(tmp_path),
@@ -217,7 +213,6 @@ def test_n_is_zero_for_a_dataset_without_a_train_split(tmp_path: Path) -> None:
 def test_concepts_table_omits_a_removed_channel(tmp_path: Path) -> None:
     space = resolve_label_space(
         {"coralnet": _tables(tmp_path, [_label(1, "sand", "Sand")])},
-        {"coralnet": 0},
         _TAXONOMY,
         SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
         _schema(tmp_path, removed=["tubular"]),
@@ -248,7 +243,6 @@ def test_resolving_no_tables_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one dataset"):
         resolve_label_space(
             {},
-            {},
             _TAXONOMY,
             SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
             _schema(tmp_path),
@@ -272,7 +266,6 @@ def test_coverage_is_logged_per_source_at_info_when_some_labels_map_and_warns_wh
     with caplog.at_level("INFO", logger=label_space_module.logger.name):
         resolve_label_space(
             tables,
-            {"coralnet": 0, "mermaid": 2},
             _TAXONOMY,
             SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
             _schema(tmp_path),
@@ -298,7 +291,7 @@ def test_source_to_target_follows_each_rows_benthic_attribute(tmp_path: Path) ->
         _label(3, "Mystery", None),
         _label(4, "Blank", ""),
     ]
-    space = _resolve(tmp_path, labels, subset=["Acropora", "Sand"], offset=10)
+    space = _resolve(tmp_path, labels, subset=["Acropora", "Sand"])
 
     source_to_target, _ = space.lookups({"coralnet": 10})
 
@@ -306,9 +299,7 @@ def test_source_to_target_follows_each_rows_benthic_attribute(tmp_path: Path) ->
 
 
 def test_a_gap_id_inside_a_sources_range_maps_to_background(tmp_path: Path) -> None:
-    space = _resolve(
-        tmp_path, [_label(1, "a", "a"), _label(3, "b", "b")], subset=["a", "b"], offset=10
-    )
+    space = _resolve(tmp_path, [_label(1, "a", "a"), _label(3, "b", "b")], subset=["a", "b"])
 
     source_to_target, _ = space.lookups({"coralnet": 10})
 
@@ -337,7 +328,6 @@ def test_a_not_given_binary_concept_is_zero_beside_a_false_one_in_the_same_row(
     schema = _schema(tmp_path, table=table)
     space = resolve_label_space(
         {"coralnet": _tables(tmp_path, [_label(1, "acropora", "Acropora")])},
-        {"coralnet": 0},
         _TAXONOMY,
         SimpleNamespace(class_subset=["Acropora"], label_roll_up=False),
         schema,
@@ -355,7 +345,6 @@ def test_a_rank_value_removed_to_not_given_leaves_that_ranks_channels_zero(
 ) -> None:
     space = resolve_label_space(
         {"coralnet": _tables(tmp_path, [_label(1, "acropora", "Acropora")])},
-        {"coralnet": 0},
         _TAXONOMY,
         SimpleNamespace(class_subset=["Acropora"], label_roll_up=False),
         _schema(tmp_path, removed=["genus__acropora"]),
@@ -366,31 +355,6 @@ def test_a_rank_value_removed_to_not_given_leaves_that_ranks_channels_zero(
 
     # Genus channels are 11 (genus__none) and 12 (genus__porites); the other ranks keep their codes.
     assert source_to_concepts[1].tolist() == [2, 1, 2, 1, 2, 1, 1, 2, 2, 1, 1, 0, 0, 1, 2, 1]
-
-
-@pytest.mark.parametrize(
-    ("mermaid_label_id", "mermaid_offset"),
-    [(3, 0), (1, 2)],
-    ids=["same-offset", "overlapping-range"],
-)
-def test_lookups_refuse_offsets_that_give_two_datasets_one_global_id(
-    tmp_path: Path, mermaid_label_id: int, mermaid_offset: int
-) -> None:
-    space = _resolve(tmp_path, [_label(3, "sand", "Sand")], subset=["Sand"])
-    both = LabelSpace(
-        classes=space.classes,
-        concepts=space.concepts,
-        source_labels=pd.concat(
-            [
-                space.source_labels,
-                space.source_labels.assign(dataset="mermaid", label_id=mermaid_label_id),
-            ]
-        ),
-        meta={},
-    )
-
-    with pytest.raises(ValueError, match=r"global id 3.*coralnet.*mermaid"):
-        both.lookups({"coralnet": 0, "mermaid": mermaid_offset})
 
 
 # ---------- write_label_space / read_label_space ----------

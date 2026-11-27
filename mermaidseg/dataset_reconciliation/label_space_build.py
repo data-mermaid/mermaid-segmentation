@@ -9,7 +9,6 @@ from typing import Any
 import pandas as pd
 
 from mermaidseg.data.config import TAXONOMY_NAME, DataSection, entry_split_groups
-from mermaidseg.data.factory import source_offsets
 from mermaidseg.dataset_reconciliation.artifact_meta import (
     concept_sidecar_meta,
     file_sha1,
@@ -118,7 +117,6 @@ def build_label_space(
     )
     space = resolve_label_space(
         tables,
-        source_offsets(tables),
         taxonomy.benthic_attributes,
         training_cfg,
         schema,

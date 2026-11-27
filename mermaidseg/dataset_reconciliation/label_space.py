@@ -110,12 +110,8 @@ class LabelSpace:
         Args:
             offsets: Global offset of each dataset of the run; the labels of other datasets in
                 ``source_labels`` are left out.
-
-        Raises:
-            ValueError: Two datasets produce the same global id.
         """
         labels = self.source_labels[self.source_labels["dataset"].isin(list(offsets))]
-        _check_global_ids(labels, offsets)
         global_ids = [
             offsets[d] + int(i) for d, i in zip(labels["dataset"], labels["label_id"], strict=True)
         ]
@@ -257,19 +253,6 @@ def _dataset_rows(
     return rows
 
 
-def _check_global_ids(source_labels: pd.DataFrame, offsets: Mapping[str, int]) -> None:
-    """Raise when two datasets produce the same global id ``offset + label_id``."""
-    owner: dict[int, str] = {}
-    for dataset, label_id in zip(source_labels["dataset"], source_labels["label_id"], strict=True):
-        gid = offsets[dataset] + int(label_id)
-        if gid in owner and owner[gid] != dataset:
-            raise ValueError(
-                f"global id {gid} is produced by both '{owner[gid]}' and '{dataset}'; "
-                "give the sources disjoint offsets"
-            )
-        owner[gid] = dataset
-
-
 def _log_target_coverage(source_labels: pd.DataFrame) -> None:
     """Log, per source, how many of its labels reach a target class; warn when none do.
 
@@ -286,7 +269,6 @@ def _log_target_coverage(source_labels: pd.DataFrame) -> None:
 
 def resolve_label_space(
     tables: Mapping[str, VersionTables],
-    offsets: Mapping[str, int],
     benthic_attributes: pa.Table,
     training_cfg: Any,
     schema: ConceptSchema,
@@ -300,7 +282,6 @@ def resolve_label_space(
 
     Args:
         tables: Dataset name -> its synced tables.
-        offsets: Global offset of each dataset (see ``mermaidseg.data.factory.source_offsets``).
         benthic_attributes: ``benthic_attributes.parquet`` of the pinned taxonomy.
         training_cfg: The ``training`` section (``class_subset``, ``label_roll_up``).
         schema: The frozen concept channels, after concept removal.
@@ -311,8 +292,8 @@ def resolve_label_space(
         The label space, with an empty ``meta``.
 
     Raises:
-        ValueError: ``tables`` is empty, ``class_subset`` is unset, a train group is not in its
-            dataset, or two datasets produce the same global id.
+        ValueError: ``tables`` is empty, ``class_subset`` is unset, or a train group is not in
+            its dataset.
     """
     if not tables:
         raise ValueError("a label space requires at least one dataset")
@@ -342,7 +323,6 @@ def resolve_label_space(
             ranks,
         )
     source_labels = pd.DataFrame(rows, columns=SOURCE_LABEL_COLUMNS)
-    _check_global_ids(source_labels, offsets)
     _log_target_coverage(source_labels)
     return LabelSpace(
         classes=_classes_table(names, benthic_attributes),

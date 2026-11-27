@@ -21,7 +21,6 @@ from botocore.exceptions import ClientError
 
 from mermaidseg.data import PointDataset
 from mermaidseg.data.config import DataSection
-from mermaidseg.data.factory import source_offsets
 from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.label_space import (
@@ -427,9 +426,7 @@ def write_test_label_space(
 
     Writes it to ``directory`` and returns it as read back.
     """
-    space = resolve_label_space(
-        tables, source_offsets(tables), taxonomy, training_cfg, schema, train_groups={}
-    )
+    space = resolve_label_space(tables, taxonomy, training_cfg, schema, train_groups={})
     space.meta.update(
         {
             "data_version": section_data_version(section),
