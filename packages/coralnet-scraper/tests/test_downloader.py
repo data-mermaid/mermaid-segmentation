@@ -581,6 +581,16 @@ def test_verify_existing_fails_a_source_whose_overview_lists_no_total(http_serve
     assert res.errors == ["overview_total_missing"]
 
 
+def test_verify_existing_reports_a_permission_denied_source_as_inaccessible(http_server, fake_s3):
+    http_server.script("/source/1/", Reply(200, _fixture("source_denied.html").encode()))
+
+    res = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
+
+    assert res.ok is False
+    assert res.errors == ["cannot access source 1: Permission denied"]
+    assert fake_s3.objects == {}
+
+
 def test_an_overview_total_changed_during_the_walk_redoes_it_against_the_new_total(
     http_server, fake_s3
 ):
