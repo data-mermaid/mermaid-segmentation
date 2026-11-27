@@ -58,12 +58,12 @@ To submit only some runs, name them: `bash slurm/launch_final.sh cbm_final`.
 | Run | What it trains | Resources |
 |---|---|---|
 | `cbm_final` | 300k iterations at 256 px, batch 32 | 1 GPU, 32 CPUs, 96 GB (the `train.sbatch` defaults) |
-| `cbm_final_res768` | 50k iterations at 768 px from `cbm_final`'s `model_step300000` weights, batch 8 × accumulation 4 | 4 GPUs (DDP under torchrun), 192 GB |
+| `cbm_final_res768` | 50k iterations at 768 px from `cbm_final`'s `model_final` weights, batch 8 × accumulation 4 | 4 GPUs (DDP under torchrun), 192 GB |
 
 The 768 px run waits for the 256 px run:
 
 - If you submit both together, `cbm_final_res768` depends on `cbm_final` ending successfully (`afterok`).
-- If `cbm_final` is not in the same submission, the launcher submits `cbm_final_res768` only when `outputs/model_checkpoints/cbm_final/model_step300000` exists and has not changed for 10 minutes. Otherwise it prints `waiting : cbm_final_res768` and submits nothing for it. Run the launcher again later.
+- If `cbm_final` is not in the same submission, the launcher submits `cbm_final_res768` only when `outputs/model_checkpoints/cbm_final/model_final` exists and has not changed for 10 minutes. Otherwise it prints `waiting : cbm_final_res768` and submits nothing for it. Run the launcher again later.
 
 The run settings are in `configs/training_config_cbm_final.yaml`, `configs/training_config_cbm_final_hires.yaml` and the header comment of `slurm/launch_final.sh`.
 
@@ -81,7 +81,7 @@ The first lines of the job output say whether the job resumes, starts from an in
 
 ## Continue a run after a time limit or preemption
 
-A job has a time limit of 71 h 59 min (`slurm/train.sbatch`). A run that needs more time continues in a new job. Every job of a run continues from the newest checkpoint in `outputs/model_checkpoints/<run>/` (`model_preempt*`, `model_step*` or `model_epoch*`). The trainer writes a rolling `model_preempt<step>` checkpoint every 2000 optimizer steps, so a stopped job loses at most 2000 steps. A resume refuses a data config whose dataset or taxonomy pins differ from the checkpoint's.
+A job has a time limit of 71 h 59 min (`slurm/train.sbatch`). A run that needs more time continues in a new job. Every job of a run continues from the newest checkpoint in `outputs/model_checkpoints/<run>/` (`model_preempt*`, `model_step*`, `model_final` or `model_epoch*`). A `model_final` checkpoint marks a finished run, so a resume from it exits without training. The trainer writes a rolling `model_preempt<step>` checkpoint every 2000 optimizer steps, so a stopped job loses at most 2000 steps. A resume refuses a data config whose dataset or taxonomy pins differ from the checkpoint's.
 
 To continue a run that stopped, run the launcher again:
 

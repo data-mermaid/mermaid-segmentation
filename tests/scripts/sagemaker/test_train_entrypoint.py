@@ -80,7 +80,7 @@ def test_trainer_argv_matches_the_slurm_launcher(repo, job, name, ngpu):
         assert ours_init is None
     else:
         assert ours_init is not None
-        assert Path(ours_init).name == Path(slurm_init).name == "model_step300000"
+        assert Path(ours_init).name == Path(slurm_init).name == "model_final"
 
 
 # ---------- build_trainer_argv ----------
@@ -401,14 +401,14 @@ def test_main_passes_the_init_channel_file_as_init_weights(tmp_path, monkeypatch
     monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
     init_dir = tmp_path / "init"
     init_dir.mkdir()
-    (init_dir / "model_step300000").touch()
+    (init_dir / "model_final").touch()
     monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
 
     entrypoint.main([])
 
     assert len(execs) == 1
     argv = execs[0]
-    assert argv[argv.index("--init-weights") + 1] == str(init_dir / "model_step300000")
+    assert argv[argv.index("--init-weights") + 1] == str(init_dir / "model_final")
 
 
 def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, monkeypatch):
@@ -419,7 +419,7 @@ def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, mo
     (init_dir / "other.pt").touch()
     monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
 
-    with pytest.raises(ValueError, match=r"model_step300000.*'model_checkpoints', 'other\.pt'"):
+    with pytest.raises(ValueError, match=r"model_final.*'model_checkpoints', 'other\.pt'"):
         entrypoint.main([])
 
     assert execs == []

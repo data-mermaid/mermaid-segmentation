@@ -1200,6 +1200,29 @@ def test_a_step_checkpoint_marks_its_epoch_complete_only_at_the_last_update(run_
     assert _checkpoint_flags(result.run_dir / "model_step4") == (4, True)
 
 
+@pytest.fixture(scope="module")
+def off_cadence_run(run_scenario) -> _RunResult:
+    """Three updates with a checkpoint cadence of four: no interval checkpoint is due."""
+    return run_scenario(
+        _RecordingTrainModel(steps=[1, 2, 3]),
+        training_overrides={"checkpoint_every_steps": 4, "iterations_per_train_epoch": 3},
+    )
+
+
+def test_a_run_always_ends_with_a_final_checkpoint_of_its_last_step(off_cadence_run):
+    assert list(off_cadence_run.run_dir.glob("model_step*")) == []
+    assert _checkpoint_flags(off_cadence_run.run_dir / "model_final") == (3, True)
+
+
+def test_resuming_the_final_checkpoint_exits_with_status_zero_without_training(
+    run_scenario, off_cadence_run
+):
+    resumed = run_scenario(checkpoint=off_cadence_run.run_dir / "model_final", catch_exit=True)
+    assert resumed.system_exit is not None
+    assert resumed.system_exit.code == 0
+    assert resumed.recorder.calls == []
+
+
 def test_steps_off_the_checkpoint_cadence_write_nothing(run_scenario):
     result = run_scenario(
         _RecordingTrainModel(steps=[1, 2, 3]),
@@ -1221,12 +1244,13 @@ def step_and_preempt_run(run_scenario) -> _RunResult:
     )
 
 
-def test_only_preempt_checkpoints_are_written_atomically(step_and_preempt_run):
+def test_only_preempt_and_final_checkpoints_are_written_atomically(step_and_preempt_run):
     assert step_and_preempt_run.save_atomic == {
         "model_step2": False,
         "model_preempt3": True,
         "model_step6": False,
         "model_preempt6": True,
+        "model_final": True,
     }
 
 

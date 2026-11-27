@@ -170,7 +170,7 @@ def test_build_request_for_res768():
                         "S3DataType": "S3Prefix",
                         "S3Uri": (
                             "s3://fake-bucket/runs/mermaidseg-cbm-final-20260101T000000Z-abc123/"
-                            "checkpoints/model_checkpoints/cbm_final/model_step300000"
+                            "checkpoints/model_checkpoints/cbm_final/model_final"
                         ),
                         "S3DataDistributionType": "FullyReplicated",
                     }
@@ -383,7 +383,7 @@ def test_res768_with_a_completed_source_creates_the_job_with_the_init_channel(aw
     assert aws.s3.heads == [
         {
             "Bucket": "fake-bucket",
-            "Key": f"runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_step300000",
+            "Key": f"runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_final",
         }
     ]
     assert aws.calls == [
@@ -424,10 +424,7 @@ def test_unreadable_init_checkpoint_exits_naming_uri_and_code(aws):
     code = "404"
     aws.s3.head_error = _client_error(code)
     args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
-    uri = (
-        f"s3://fake-bucket/runs/{_SOURCE_JOB}/checkpoints/"
-        "model_checkpoints/cbm_final/model_step300000"
-    )
+    uri = f"s3://fake-bucket/runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_final"
 
     with pytest.raises(SystemExit, match=rf"^ERROR: .*{re.escape(uri)}.*{code}"):
         launch.main(args)

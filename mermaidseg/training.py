@@ -558,6 +558,23 @@ def run(args: argparse.Namespace) -> None:
             print0(dist_ctx, "No training epochs ran.")
         else:
             final_epoch = max(metrics_all)
+
+            # Skipped windows leave global_step short of the schedule, so no interval step
+            # checkpoint is guaranteed to cover the last updates; this one always does.
+            def _write_final() -> None:
+                assert lineage is not None  # on_main_process runs only on rank 0
+                write_checkpoint(
+                    run_dir / "model_final",
+                    meta_model,
+                    config=cfg_logger,
+                    lineage=lineage,
+                    epoch=final_epoch,
+                    epoch_complete=True,
+                    metrics={},
+                    atomic=True,
+                )
+
+            on_main_process(_write_final)
             print0(
                 dist_ctx, "Final train metrics     :", metrics_all[final_epoch].get("train_metrics")
             )
