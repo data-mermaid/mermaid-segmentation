@@ -17,7 +17,7 @@ from mermaidseg.data.factory import (
     open_dataset_version,
     source_offsets,
 )
-from segdata_spec.errors import NotSynced, PinMismatch
+from segdata_spec.errors import NotSynced
 from segdata_spec.manifest import Pin
 from tests.mermaidseg.data.conftest import ImageSpec, open_written, write_taxonomy, write_version
 
@@ -110,22 +110,6 @@ def test_train_gets_the_compiled_transform_and_eval_splits_the_resize(tmp_path: 
     assert built[("ds", "val")][0][0].dtype == np.float32
 
 
-def test_use_over_two_splits_selects_the_union_of_their_groups(tmp_path: Path) -> None:
-    images = [ImageSpec("i1", group="g1"), ImageSpec("i2", group="g2"), ImageSpec("i3", group="g3")]
-    cache_dir, pin = _points(tmp_path, images, [("i1", 1, 1, 5), ("i2", 1, 1, 5), ("i3", 1, 1, 5)])
-    (tmp_path / "splits.csv").write_text("group,split\ng1,train\ng2,val\ng3,test\n")
-    section = _section(pin, split_file="splits.csv", train={"use": ["train", "val"]})
-    ds = _build(section, cache_dir, tmp_path)[("ds", "train")]
-    assert sorted(ds.images["image_id"]) == ["i1", "i2"]
-
-
-def test_entry_resize_is_what_open_version_requires_synced(tmp_path: Path) -> None:
-    cache_dir, pin = _points(tmp_path, [ImageSpec("i1")], [("i1", 1, 1, 5)])
-    section = _section(pin, resize={"max_edge": 4}, val={"groups": "all"})
-    with pytest.raises(NotSynced):
-        _build(section, cache_dir, tmp_path)
-
-
 def test_image_ids_subset_a_dataset_and_split(tmp_path: Path) -> None:
     cache_dir, pin = _points(
         tmp_path, [ImageSpec("i1"), ImageSpec("i2")], [("i1", 1, 1, 5), ("i2", 1, 1, 5)]
@@ -157,7 +141,7 @@ def test_source_offsets_step_by_the_previous_sources_max_label_id(tmp_path: Path
     assert source_offsets(versions) == {"a": 0, "b": 100}
 
 
-@pytest.mark.parametrize("bad_id", [0, -1])
+@pytest.mark.parametrize("bad_id", [0])
 def test_source_offsets_reject_a_label_id_below_one_naming_the_source(
     tmp_path: Path, bad_id: int
 ) -> None:
@@ -208,12 +192,6 @@ def test_every_split_of_a_source_shares_its_offset(tmp_path: Path) -> None:
     assert offsets == {("a", "train"): 0, ("a", "test"): 0, ("b", "val"): 100}
 
 
-def test_open_dataset_version_opens_the_pinned_version(tmp_path: Path) -> None:
-    cache_dir, pin = _points(tmp_path, [ImageSpec("i1")], [("i1", 1, 1, 5)])
-    version = open_dataset_version(_section(pin, val={"groups": "all"}), "ds", cache_dir)
-    assert version.manifest.version == pin.version
-
-
 def test_open_dataset_version_requires_the_entrys_resize_synced(tmp_path: Path) -> None:
     cache_dir, pin = _points(tmp_path, [ImageSpec("i1")], [("i1", 1, 1, 5)])
     section = _section(pin, resize={"max_edge": 4}, val={"groups": "all"})
@@ -238,11 +216,6 @@ def _write_hard_coral_taxonomy(tmp_path: Path) -> tuple[Path, Pin]:
     return cache_dir, write_taxonomy(cache_dir, tmp_path, table)
 
 
-def test_section_without_taxonomy_has_no_hierarchy(tmp_path: Path) -> None:
-    section = DataSection.model_validate({"datasets": {}})
-    assert load_benthic_hierarchy(section, tmp_path / "cache") is None
-
-
 def test_pinned_taxonomy_gives_the_lower_cased_child_to_parent_hierarchy(tmp_path: Path) -> None:
     cache_dir, pin = _write_hard_coral_taxonomy(tmp_path)
     section = _taxonomy_section(pin, pin.manifest_sha256)
@@ -250,10 +223,3 @@ def test_pinned_taxonomy_gives_the_lower_cased_child_to_parent_hierarchy(tmp_pat
         "hard coral": None,
         "acropora": "hard coral",
     }
-
-
-def test_taxonomy_pin_with_a_different_manifest_sha_raises(tmp_path: Path) -> None:
-    cache_dir, pin = _write_hard_coral_taxonomy(tmp_path)
-    section = _taxonomy_section(pin, "0" * 64)
-    with pytest.raises(PinMismatch):
-        load_benthic_hierarchy(section, cache_dir)

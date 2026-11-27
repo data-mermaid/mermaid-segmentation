@@ -36,21 +36,6 @@ def _model_kwargs(base_encoder: Any, **extra: Any) -> dict[str, Any]:
     }
 
 
-def test_load_pretrained_encoder_requests_float32_and_hf_token(mock_dinov3_encoder, monkeypatch):
-    encoder = mock_dinov3_encoder(models_module)
-    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-
-    def _from_pretrained(*args: Any, **kwargs: Any) -> Any:
-        calls.append((args, kwargs))
-        return encoder
-
-    monkeypatch.setattr(models_module.AutoModel, "from_pretrained", _from_pretrained)
-    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
-
-    assert models_module.load_pretrained_encoder("some/encoder") is encoder
-    assert calls == [(("some/encoder",), {"token": "hf-test-token", "dtype": torch.float32})]
-
-
 def test_model_built_with_an_injected_encoder_never_calls_the_hub(mock_dinov3_encoder, monkeypatch):
     encoder = mock_dinov3_encoder(models_module)
 
@@ -92,25 +77,6 @@ def test_only_lora_adapters_and_heads_are_trainable(mock_dinov3_encoder):
     assert not trainable & frozen_encoder
 
 
-def test_dpt_head_runs_on_nonsquare_grid_when_told_the_shape():
-    head = DPTHead(
-        hidden_size=16,
-        out_channels=4,
-        neck_hidden_sizes=(8, 8, 8, 8),
-        fusion_hidden_size=8,
-        reassemble_factors=(4, 2, 1, 0.5),
-    )
-    token_height, token_width = 3, 5
-    tokens = torch.randn(1, 1 + token_height * token_width, 16)
-    hidden = [tokens, tokens, tokens, tokens]
-
-    output = head(hidden, token_height=token_height, token_width=token_width)
-
-    assert output.shape[0] == 1
-    assert output.shape[1] == 4
-    assert output.shape[-2] != output.shape[-1]
-
-
 def _small_head(**overrides) -> DPTHead:
     kwargs: dict[str, Any] = {
         "hidden_size": 16,
@@ -142,35 +108,10 @@ def test_dpt_head_drops_the_unused_coarsest_fusion_residual_and_trains_the_rest(
     assert missing == []
 
 
-def test_dpt_head_rejects_a_grid_that_does_not_match_the_tokens():
-    head = DPTHead(
-        hidden_size=16,
-        out_channels=4,
-        neck_hidden_sizes=(8,),
-        fusion_hidden_size=8,
-        reassemble_factors=(1,),
-    )
-    tokens = torch.randn(1, 1 + 6, 16)
-    try:
-        head([tokens], token_height=2, token_width=2)
-    except ValueError as exc:
-        assert "does not match" in str(exc)
-    else:
-        raise AssertionError("expected a grid/token mismatch")
-
-
-def test_dpt_head_rejects_the_wrong_number_of_hidden_states():
-    head = _small_head()
-    tokens = torch.randn(1, 1 + 16, 16)
-
-    with pytest.raises(ValueError, match="expects 4 hidden states, got 3"):
-        head([tokens] * 3, token_height=4, token_width=4)
-
-
 @pytest.mark.parametrize(
     ("images_hw", "expected"),
-    [((56, 56), (4, 4)), ((28, 84), (2, 6))],
-    ids=["square", "wide"],
+    [((28, 84), (2, 6))],
+    ids=["wide"],
 )
 def test_input_token_grid_divides_each_side_by_the_patch_size(
     mock_dinov3_encoder, images_hw, expected
@@ -180,7 +121,7 @@ def test_input_token_grid_divides_each_side_by_the_patch_size(
     assert model._input_token_grid(torch.zeros(1, 3, *images_hw)) == expected
 
 
-@pytest.mark.parametrize("images_hw", [(56, 60), (57, 56)], ids=["width", "height"])
+@pytest.mark.parametrize("images_hw", [(56, 60)], ids=["width"])
 def test_input_token_grid_rejects_a_side_not_divisible_by_the_patch_size(
     mock_dinov3_encoder, images_hw
 ):

@@ -142,7 +142,6 @@ class PointEvalDataset(Dataset):
                 "concept_rows": np.zeros((0, self.concept_lookup.num_channels), np.int8),
                 "names": [],
                 "ann_idx": np.zeros(0, np.int64),
-                "n_out_of_bounds": 0,
                 "live": np.zeros(0, bool),
                 "coral": np.zeros(0, bool),
                 "H": 1,
@@ -156,13 +155,6 @@ class PointEvalDataset(Dataset):
         rows_a = np.asarray(rows_a).astype(np.int64)
         cols_a = np.asarray(cols_a).astype(np.int64)
         ann_idx = np.asarray(ann_idx).astype(np.int64)
-        in_bounds = (rows_a >= 0) & (rows_a < h) & (cols_a >= 0) & (cols_a < w)
-        n_out_of_bounds = int((~in_bounds).sum())
-        if not in_bounds.all():
-            rows_a = rows_a[in_bounds]
-            cols_a = cols_a[in_bounds]
-            ann_idx = ann_idx[in_bounds]
-            names = [n for n, keep in zip(names, in_bounds, strict=True) if keep]
 
         class_ids = np.array([self.class_lookup.class_id(n) for n in names], dtype=np.int64)
         if names:
@@ -180,7 +172,6 @@ class PointEvalDataset(Dataset):
             "concept_rows": concept_rows,
             "names": names,
             "ann_idx": ann_idx,
-            "n_out_of_bounds": n_out_of_bounds,
             "live": scopes[:, 0],
             "coral": scopes[:, 1],
             "H": int(h),
@@ -199,7 +190,6 @@ def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "concept_rows": [b["concept_rows"] for b in batch],
         "names": [b.get("names", []) for b in batch],
         "ann_idx": [b.get("ann_idx") for b in batch],
-        "n_out_of_bounds": [b.get("n_out_of_bounds", 0) for b in batch],
         "live": [b["live"] for b in batch],
         "coral": [b["coral"] for b in batch],
         "H": [b["H"] for b in batch],

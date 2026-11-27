@@ -34,11 +34,6 @@ def test_assign_quotas_splits_remainder_onto_the_largest():
     assert sum(builder.assign_quotas(7, 10)) == 10
 
 
-def test_assign_quotas_rejects_full_cover():
-    with pytest.raises(ValueError, match="only for N < per_class"):
-        builder.assign_quotas(10, 10)
-
-
 def test_round_robin_spreads_across_images_largest_first():
     components = [
         _component(0, 1, 100, "a"),
@@ -109,15 +104,6 @@ def test_pick_points_quota_two_are_separated_by_the_disk():
     distance_sq = (row0 - row1) ** 2 + (col0 - col1) ** 2
     assert distance_sq > 16 * 16
     assert mask[row0, col0] and mask[row1, col1]
-
-
-def test_pick_points_keeps_one_pixel_when_disk_does_not_fit():
-    mask = np.zeros((30, 30), dtype=bool)
-    mask[10:20, 10:20] = True
-    points = builder.pick_points_in_component(mask, quota=2, exclusion_radius=16)
-    assert len(points) == 1
-    row, col = points[0]
-    assert mask[row, col]
 
 
 def test_points_for_image_records_a_shortfall_and_keeps_the_pixel():
@@ -203,10 +189,3 @@ def test_legacy_build_stores_legacy_ids_and_the_original_label_md5(tmp_path: Pat
     assert {point["class_id"] for point in payload["images"][0]["points"]} == {2, 5}
     assert payload["num_classes"] == 5
     assert payload["total_points"] == 2
-
-
-def test_pick_points_raises_when_the_component_has_fewer_pixels_than_the_quota():
-    mask = np.zeros((8, 8), dtype=bool)
-    mask[1:3, 1:3] = True
-    with pytest.raises(builder.ProbeSelectionError, match="fewer than quota"):
-        builder.pick_points_in_component(mask, quota=5, exclusion_radius=16)

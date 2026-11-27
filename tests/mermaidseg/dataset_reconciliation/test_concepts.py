@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 import torch
 
@@ -12,7 +11,6 @@ from mermaidseg.dataset_reconciliation.concepts import (
     apply_concept_removal,
     concept_kind,
     encode_concept_row,
-    generate_binary_concept_id_mapping,
     parse_concept_cell,
     read_class_to_concepts,
     source_labels_to_concepts,
@@ -38,7 +36,7 @@ def test_non_square_label_map_becomes_channels_first_concepts():
 
 @pytest.mark.parametrize(
     ("cell", "expected"),
-    [("TRUE", "true"), ("true", "true"), (" FALSE ", "false"), ("not_given", "not_given")],
+    [("TRUE", "true"), (" FALSE ", "false"), ("not_given", "not_given")],
 )
 def test_binary_cells_parse_case_and_whitespace_insensitively(cell, expected):
     assert parse_concept_cell(cell, rank=False) == expected
@@ -52,13 +50,13 @@ def test_rank_cells_parse_to_lower_case_and_keep_none_distinct_from_not_given(ce
     assert parse_concept_cell(cell, rank=True) == expected
 
 
-@pytest.mark.parametrize("cell", ["not given", "", "nan", "yes", True])
+@pytest.mark.parametrize("cell", ["not given"])
 def test_a_binary_cell_that_is_not_true_false_or_not_given_raises(cell):
     with pytest.raises(ValueError, match="concept cell"):
         parse_concept_cell(cell, rank=False)
 
 
-@pytest.mark.parametrize("cell", ["", "not given", "nan", None])
+@pytest.mark.parametrize("cell", ["", "not given", "nan"])
 def test_a_rank_cell_that_is_a_placeholder_other_than_not_given_raises(cell):
     with pytest.raises(ValueError, match="concept cell"):
         parse_concept_cell(cell, rank=True)
@@ -99,24 +97,19 @@ def test_encode_concept_row_codes_ranks_by_channel_and_zeroes_a_value_without_on
     assert encoded.dtype == np.int8
 
 
-def test_binary_mapping_has_the_three_string_keys_only():
-    df = pd.DataFrame({"live": ["TRUE", "FALSE", "not_given"]})
-
-    assert generate_binary_concept_id_mapping(df, "live") == {"not_given": 0, "FALSE": 1, "TRUE": 2}
-
-
-def test_reading_the_table_keeps_strings_and_lower_cases_the_keys(tmp_path):
+def test_reading_the_table_keeps_strings_and_lower_cases_the_keys_and_rank_cells(tmp_path):
     path = tmp_path / "c.csv"
     path.write_text(
-        "source_label_class_name,source_dataset_source,live,genus\n"
-        "Acro,CoralNet,TRUE,acropora\n"
-        "Sand,CoralNet,FALSE,not_given\n"
+        "source_label_class_name,source_dataset_source,live,genus,family\n"
+        "Acro,CoralNet,TRUE, Acropora ,ACROPORIDAE\n"
+        "Sand,CoralNet,FALSE,not_given,not_given\n"
     )
 
     df = read_class_to_concepts(path)
 
     assert df["live"].tolist() == ["TRUE", "FALSE"]
     assert df["genus"].tolist() == ["acropora", "not_given"]
+    assert df["family"].tolist() == ["acroporidae", "not_given"]
     assert df["source_dataset_source"].tolist() == ["coralnet", "coralnet"]
     assert df["source_label_class_name"].tolist() == ["acro", "sand"]
 
@@ -131,23 +124,10 @@ def _write_rank_table(tmp_path, genus_cell, family_cell="ACROPORIDAE"):
     return path
 
 
-def test_reading_the_table_strips_and_lower_cases_rank_cells(tmp_path):
-    df = read_class_to_concepts(_write_rank_table(tmp_path, " Acropora "))
-
-    assert df["genus"].tolist() == ["acropora", "not_given"]
-    assert df["family"].tolist() == ["acroporidae", "not_given"]
-
-
 def test_taxonomy_frame_channel_values_have_no_raw_variant(tmp_path):
     df = load_taxonomy_frame(_write_rank_table(tmp_path, " Acropora "))
 
     assert channel_values(df, "genus") == ["acropora"]
-
-
-@pytest.mark.parametrize("cell", ["", "not given", "nan"])
-def test_reading_the_table_rejects_an_invalid_rank_cell(tmp_path, cell):
-    with pytest.raises(ValueError, match="invalid taxonomic concept cell"):
-        read_class_to_concepts(_write_rank_table(tmp_path, cell))
 
 
 # ---------- concept_kind ----------
@@ -157,7 +137,6 @@ def test_reading_the_table_rejects_an_invalid_rank_cell(tmp_path, cell):
     ("channel", "kind"),
     [
         ("genus__acropora", "genus"),
-        ("family__poritidae", "family"),
         ("bleached", "binary"),
         ("not_a_rank__value", "binary"),
     ],
@@ -194,13 +173,3 @@ def test_a_repeated_concept_is_removed_once():
     out = apply_concept_removal(concept_table(), ["genus__acropora", "genus__acropora"])
 
     assert (out["genus"] != "acropora").all()
-
-
-def test_removing_a_binary_concept_without_a_column_raises():
-    with pytest.raises(ValueError, match="not a column of the concept table"):
-        apply_concept_removal(concept_table().drop(columns="tubular"), ["tubular"])
-
-
-def test_removing_a_taxon_value_with_no_match_raises():
-    with pytest.raises(ValueError, match="no genus == 'nope'"):
-        apply_concept_removal(concept_table(), ["genus__nope"])

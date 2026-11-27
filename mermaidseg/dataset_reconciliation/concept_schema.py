@@ -142,11 +142,7 @@ class ConceptSchema:
 
     def binary_names(self) -> list[str]:
         """Binary concept names in channel order; each is its own single channel."""
-        names = [k for k in self.concept_value2id if k not in TAXONOMIC_CONCEPTS]
-        missing = [n for n in names if n not in self.channel_names]
-        if missing:
-            raise ValueError(f"binary concepts without a channel of the same name: {missing}")
-        return names
+        return [k for k in self.concept_value2id if k not in TAXONOMIC_CONCEPTS]
 
     def channel_id2name(self) -> dict[int, str]:
         """Map 1-indexed channel id to channel name (e.g. ``kingdom__animalia``)."""

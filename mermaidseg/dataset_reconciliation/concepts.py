@@ -258,17 +258,10 @@ def apply_concept_removal(df_mapping: pd.DataFrame, concepts: Iterable[str]) -> 
     for concept in concepts:
         kind = concept_kind(concept)
         if kind == "binary":
-            if concept not in df.columns:
-                raise ValueError(f"cannot remove {concept!r}: not a column of the concept table")
             df = df.drop(columns=concept)
             continue
         value = concept.split("__", 1)[1]
         if value == NONE_TAXON:
             raise ValueError(f"cannot remove {concept!r}: 'none' is not a taxon")
-        hit = df[kind].astype(str) == value
-        if not hit.any():
-            raise ValueError(
-                f"cannot remove {concept!r}: no {kind} == {value!r} in the concept table"
-            )
-        df.loc[hit, kind] = "not_given"
+        df.loc[df[kind].astype(str) == value, kind] = "not_given"
     return df

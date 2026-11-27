@@ -216,15 +216,9 @@ def load_concept_source_mask(
       from the run by ``training.concept_removal``) are skipped, anything else is an error;
     - with ``concepts_csv``, its sha1 matches the one recorded in the ``.meta.yaml`` sidecar, so a
       mask built for another concept table is refused;
-    - the sidecar lists the sources the builder counted (``source_ids``).
     """
     path = Path(path)
-    meta = read_sidecar(
-        path,
-        artifact="concept source mask",
-        builder="build_concept_source_mask",
-        required=("source_ids",),
-    )
+    meta = read_sidecar(path, artifact="concept source mask")
     if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
         raise ValueError(
             f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
@@ -233,9 +227,6 @@ def load_concept_source_mask(
         )
 
     df = pd.read_csv(path, dtype={"source_id": str, "concept": str})
-    missing_cols = {"source_id", "concept"} - set(df.columns)
-    if missing_cols:
-        raise ValueError(f"{path} is missing columns {sorted(missing_cols)}")
 
     binary = set(schema.binary_names())
     removed = set(removed_concepts)

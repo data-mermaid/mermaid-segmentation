@@ -39,24 +39,20 @@ def _bundle(id2label: dict[int, str], concept_id2name: dict[int, str]) -> Simple
     return SimpleNamespace(id2label=id2label, concept_id2name=concept_id2name)
 
 
-def test_layout_check_accepts_a_bundle_that_matches_the_registry():
+@pytest.mark.parametrize(
+    ("registry_classes", "concept_names", "match"),
+    [
+        ({1: "acropora", 2: "rubble"}, NAMES, "rubble"),
+        ({1: "acropora", 2: "sand"}, ["bleached", "other", "sand"], "'anthropogenic'"),
+        ({1: "acropora", 2: "sand"}, [*NAMES, "extra"], "lengths: bundle 3 vs registry 4"),
+    ],
+    ids=["class", "concept", "length"],
+)
+def test_layout_check_names_what_differs(registry_classes, concept_names, match):
     bundle = _bundle({0: "ignore", 1: "acropora", 2: "sand"}, dict(enumerate(NAMES, start=1)))
-    registry = SimpleNamespace(target_id2label={1: "acropora", 2: "sand"})
-    _check_layout(bundle, registry, NAMES)
-
-
-def test_layout_check_names_a_differing_class():
-    bundle = _bundle({0: "ignore", 1: "acropora", 2: "sand"}, dict(enumerate(NAMES, start=1)))
-    registry = SimpleNamespace(target_id2label={1: "acropora", 2: "rubble"})
-    with pytest.raises(ValueError, match="rubble"):
-        _check_layout(bundle, registry, NAMES)
-
-
-def test_layout_check_names_a_differing_concept():
-    bundle = _bundle({0: "ignore", 1: "sand"}, dict(enumerate(NAMES, start=1)))
-    registry = SimpleNamespace(target_id2label={1: "sand"})
-    with pytest.raises(ValueError, match="'anthropogenic'"):
-        _check_layout(bundle, registry, ["bleached", "other", "sand"])
+    registry = SimpleNamespace(target_id2label=registry_classes)
+    with pytest.raises(ValueError, match=match):
+        _check_layout(bundle, registry, concept_names)
 
 
 def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file(tmp_path):
@@ -111,13 +107,6 @@ def test_val_blocks_only_keeps_the_val_block_of_each_dataset_that_has_one():
     entry = kept.datasets["a"]
     assert (entry.train, entry.test) == (None, None)
     assert entry.val is not None and entry.val.groups == ["g1"]
-
-
-def test_layout_check_reports_a_length_difference_when_one_list_extends_the_other():
-    bundle = _bundle({0: "ignore", 1: "sand"}, dict(enumerate(NAMES, start=1)))
-    registry = SimpleNamespace(target_id2label={1: "sand"})
-    with pytest.raises(ValueError, match="lengths: bundle 3 vs registry 4"):
-        _check_layout(bundle, registry, [*NAMES, "extra"])
 
 
 class _Harness:

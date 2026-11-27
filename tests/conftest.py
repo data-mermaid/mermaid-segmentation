@@ -73,12 +73,6 @@ class FakeMetaModel:
 
 
 @pytest.fixture()
-def fake_meta_model():
-    """Return a fresh FakeMetaModel on each call."""
-    return FakeMetaModel()
-
-
-@pytest.fixture()
 def make_config():
     """Factory that builds a ConfigDict.
 

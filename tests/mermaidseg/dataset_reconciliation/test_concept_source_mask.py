@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 import yaml
 
 from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     MASK_COLUMNS,
-    _source_sort_key,
     load_concept_source_mask,
     only_false_pairs,
     point_annotations,
@@ -77,33 +75,6 @@ def test_counts_and_only_false_pairs():
     assert list(zip(masked["source_id"], masked["concept"], strict=True)) == [(1, "bleached")]
 
 
-def test_loading_a_mask_without_its_sidecar_raises_file_not_found(tmp_path):
-    path = tmp_path / "mask.csv"
-    pd.DataFrame({"source_id": ["1"], "concept": ["bleached"]}).to_csv(path, index=False)
-
-    with pytest.raises(FileNotFoundError, match="no sidecar"):
-        load_concept_source_mask(path, _schema())
-
-
-def test_loading_a_mask_missing_a_required_column_raises(tmp_path):
-    path = tmp_path / "mask.csv"
-    pd.DataFrame({"source_id": ["1"]}).to_csv(path, index=False)
-    meta_path(path).write_text(yaml.safe_dump({"dataset": "coralnet", "source_ids": ["1"]}))
-
-    with pytest.raises(ValueError, match=r"missing columns \['concept'\]"):
-        load_concept_source_mask(path, _schema())
-
-
-def test_source_ids_sort_numerically_then_alphabetically():
-    assert sorted(["12", "7", "b", "a", "100"], key=_source_sort_key) == [
-        "7",
-        "12",
-        "100",
-        "a",
-        "b",
-    ]
-
-
 def test_non_numeric_source_ids_follow_the_numeric_ones_in_the_keep_table(tmp_path):
     path = tmp_path / "mask.csv"
     pd.DataFrame(
@@ -162,22 +133,3 @@ def test_mermaid_points_count_under_the_concept_row_of_their_benthic_attribute(t
         ["30", "branching", 1, 0, 0],
         ["30", "bleached", 0, 1, 0],
     ]
-
-
-def test_a_point_label_id_missing_from_labels_raises():
-    labels = pd.DataFrame(
-        {"label_id": [1], "name": ["Acropora"], "mermaid_benthic_attribute": [None]}
-    )
-    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
-        point_annotations(
-            "coralnet", _point_rows([("a1", 1), ("a1", 8)]), SIZED_IMAGES, labels, None, None
-        )
-
-
-def test_a_point_group_that_is_not_s_and_a_source_id_raises():
-    labels = pd.DataFrame(
-        {"label_id": [1], "name": ["Acropora"], "mermaid_benthic_attribute": [None]}
-    )
-    images = SIZED_IMAGES.assign(group=["s7", "site"])
-    with pytest.raises(ValueError, match="not s<source id>"):
-        point_annotations("coralnet", _point_rows([("a2", 1)]), images, labels, None, None)

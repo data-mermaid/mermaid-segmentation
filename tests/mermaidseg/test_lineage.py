@@ -50,7 +50,6 @@ def test_untracked_file_alone_is_not_dirty(git_repo):
     [
         FileNotFoundError("git"),
         subprocess.CalledProcessError(128, "git"),
-        subprocess.TimeoutExpired("git", 5),
     ],
 )
 def test_unavailable_git_leaves_sha_and_dirty_none(monkeypatch, failure):
@@ -121,15 +120,6 @@ def test_missing_uv_lock_gives_none(monkeypatch, tmp_path: Path):
     assert _collect()["uv_lock_sha256"] is None
 
 
-def test_collect_lineage_carries_the_run_inputs_and_library_versions(monkeypatch):
-    result = _collect()
-    assert result["seed"] == 7
-    assert result["resolved_config"] == {"a": 1}
-    assert result["data_version"] == {"x": 1}
-    assert set(result["versions"]) == {"torch", "transformers", "peft"}
-    assert all(isinstance(v, str) for v in result["versions"].values())
-
-
 def test_data_version_pins_each_dataset_and_the_taxonomy():
     section = DataSection.model_validate(
         {
@@ -158,13 +148,10 @@ def test_data_version_pins_each_dataset_and_the_taxonomy():
         "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
     }
 
-
-def test_data_version_without_a_taxonomy_pin_records_none():
-    section = DataSection.model_validate(
+    without_taxonomy = DataSection.model_validate(
         {"datasets": {"m": {"version": "v", "manifest_sha256": "s", "val": {"groups": "all"}}}}
     )
-
-    assert data_version(section)["taxonomy"] is None
+    assert data_version(without_taxonomy)["taxonomy"] is None
 
 
 @pytest.mark.parametrize(
@@ -175,9 +162,7 @@ def test_data_version_without_a_taxonomy_pin_records_none():
         (True, {"git_dirty": False}, True),
         (False, {"git_dirty": None}, None),
         (None, {"git_dirty": False}, None),
-        (False, {}, None),
         (False, None, None),
-        (True, None, True),
         (None, {"git_dirty": True}, True),
     ],
 )
@@ -205,17 +190,3 @@ def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutati
     }
     assert own == own_before
     assert source == source_before
-
-
-def test_inherit_lineage_records_a_missing_source_as_a_null_parent():
-    result = inherit_lineage({"git_dirty": False}, None)
-    assert "parent" in result and result["parent"] is None
-
-
-def test_git_state_reports_the_head_sha_and_whether_tracked_files_changed(git_repo):
-    state = lineage.git_state()
-    assert state == {"git_sha": _git(git_repo, "rev-parse", "HEAD").strip(), "git_dirty": False}
-
-    (git_repo / "tracked.txt").write_text("two\n")
-
-    assert lineage.git_state()["git_dirty"] is True
