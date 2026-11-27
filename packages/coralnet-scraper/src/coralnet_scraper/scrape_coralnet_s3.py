@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 import uuid
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 _MIN_LISTING_RATIO = 0.95  # a listing below this share of the previous one stops the run
+DEFAULT_BREAKER_COOLDOWN_S = 600.0  # pause after a circuit-breaker trip before probing
 _SOURCE_PREFIX = re.compile(r"/s(\d+)/$")
 
 _IMAGE_COUNT_ATTR = {
@@ -135,6 +137,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--delay-seconds", type=float, default=0.0)
     p.add_argument(
+        "--breaker-cooldown",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Pause this long when the circuit breaker trips, then probe the next source; "
+            f"0 stops at the trip (default: {DEFAULT_BREAKER_COOLDOWN_S:g})"
+        ),
+    )
+    p.add_argument(
         "--scraper-workers",
         type=int,
         default=None,
@@ -173,6 +185,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Delete image objects missing from a verified image list, before its marker",
     )
     p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --prune, log the orphan image objects instead of deleting them",
+    )
+    p.add_argument(
         "--allow-source-drop",
         action="store_true",
         help="Run even when CoralNet lists under 95%% of the sources it listed last run",
@@ -201,9 +218,35 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Only marked sources whose live image count differs from the marker's",
     )
+    invalidate.add_argument(
+        "--dry-run",
+        dest="invalidate_dry_run",
+        action="store_true",
+        help="Log the sources that would be invalidated; delete nothing",
+    )
+    invalidate.add_argument(
+        "--yes", action="store_true", help="Confirm --all, which invalidates every source"
+    )
     args = p.parse_args(argv)
-    if args.command is not None and (args.prune or args.allow_source_drop):
-        p.error(f"--prune and --allow-source-drop do not apply to {args.command}")
+    if args.breaker_cooldown is not None and not (
+        math.isfinite(args.breaker_cooldown) and args.breaker_cooldown >= 0
+    ):
+        p.error("--breaker-cooldown must be a non-negative number of seconds")
+    if args.command is not None and (
+        args.prune or args.allow_source_drop or args.dry_run or args.breaker_cooldown is not None
+    ):
+        p.error(
+            "--prune, --dry-run, --allow-source-drop and --breaker-cooldown "
+            f"do not apply to {args.command}"
+        )
+    if args.command is None and args.dry_run and not args.prune:
+        p.error("--dry-run needs --prune")
+    if (
+        args.command == "invalidate"
+        and args.invalidate_all
+        and not (args.yes or args.invalidate_dry_run)
+    ):
+        p.error("invalidate --all needs --yes (or --dry-run to preview)")
     return args
 
 
@@ -295,6 +338,8 @@ def _invalidate(
 ) -> int:
     """Delete the completion marker and ``_partial/`` of the sources ``args`` selects.
 
+    With ``--dry-run`` it logs the keys it would delete, and deletes nothing.
+
     Returns:
         1 when ``--changed`` could not read some source's live count, else 0.
     """
@@ -306,9 +351,15 @@ def _invalidate(
     else:
         ids, unchecked = _changed_source_ids(downloader, s3, bucket, prefix)
     for sid in ids:
-        s3.delete_object(Bucket=bucket, Key=s3_io.object_key_complete_marker(prefix, sid))
-        s3_io.delete_prefix(s3, bucket, s3_io.partial_prefix(prefix, sid))
-    logger.info("Invalidated %d sources: %s", len(ids), ids)
+        marker_key = s3_io.object_key_complete_marker(prefix, sid)
+        partial = s3_io.partial_prefix(prefix, sid)
+        if args.invalidate_dry_run:
+            logger.info("Source %s: would delete %s and %s", sid, marker_key, partial)
+            continue
+        s3.delete_object(Bucket=bucket, Key=marker_key)
+        s3_io.delete_prefix(s3, bucket, partial)
+    verb = "Would invalidate" if args.invalidate_dry_run else "Invalidated"
+    logger.info("%s %d sources: %s", verb, len(ids), ids)
     if unchecked:
         logger.error("Could not check %d sources: %s", len(unchecked), unchecked)
     return 1 if unchecked else 0
@@ -319,6 +370,8 @@ def _verify_existing(
 ) -> int:
     """Verify each unmarked source of ``ids`` already on S3; marked ones are skipped.
 
+    Sources with no confirmed images or no images are logged as skipped and are not failures.
+
     Returns:
         1 when any source fails verification, else 0. Each failure is logged as an error.
     """
@@ -327,12 +380,16 @@ def _verify_existing(
         if s3_io.key_exists(s3, bucket, s3_io.object_key_complete_marker(prefix, sid)):
             continue
         try:
-            failures = downloader.verify_existing(sid, bucket, prefix)
+            result = downloader.verify_existing(sid, bucket, prefix)
         except Exception as e:
             logger.exception("Source %s: verification raised", sid)
-            failures = [type(e).__name__]
-        if failures:
-            failed[sid] = failures
+            failed[sid] = [type(e).__name__]
+            continue
+        if result.skipped_no_confirmed or result.skipped_no_images:
+            reason = "no confirmed images" if result.skipped_no_confirmed else "no images"
+            logger.info("Source %s skipped: %s", sid, reason)
+        elif not result.ok:
+            failed[sid] = result.errors
     for sid in sorted(failed):
         logger.error("Source %s not verified: %s", sid, ", ".join(failed[sid]))
     return 1 if failed else 0
@@ -393,6 +450,9 @@ def main(argv: list[str] | None = None) -> int:
     if not _guard_discovery(s3, bucket, prefix, discovered, allow_drop=args.allow_source_drop):
         return 1
     _warn_if_unadopted(s3, bucket, prefix)
+    breaker_cooldown_s = (
+        DEFAULT_BREAKER_COOLDOWN_S if args.breaker_cooldown is None else args.breaker_cooldown
+    )
     outcome = run_batch_download(
         ids,
         downloader=downloader,
@@ -400,7 +460,9 @@ def main(argv: list[str] | None = None) -> int:
         s3_prefix=prefix,
         s3_client=s3,
         prune=bool(args.prune),
+        dry_run=bool(args.dry_run),
         delay_seconds=float(args.delay_seconds),
+        breaker_cooldown_s=breaker_cooldown_s,
     )
     transport = downloader.transport_stats()
     report = _build_run_report(
@@ -410,7 +472,9 @@ def main(argv: list[str] | None = None) -> int:
             "requests_per_second": downloader.requests_per_second,
             "source_ids": args.source_ids,
             "prune": bool(args.prune),
+            "dry_run": bool(args.dry_run),
             "allow_source_drop": bool(args.allow_source_drop),
+            "breaker_cooldown_s": breaker_cooldown_s,
         },
         started_at=started_at,
         finished_at=datetime.now(UTC),

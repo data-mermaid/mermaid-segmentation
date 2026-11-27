@@ -99,7 +99,14 @@ def should_skip_download(
 
 
 _OUTAGE_CODES = frozenset(
-    {"login failed", "annotations_failed", "image_list_failed", "images_outage"}
+    {
+        "login failed",
+        "annotations_failed",
+        "image_list_failed",
+        "images_outage",
+        "overview_forbidden",
+        "overview_total_missing",
+    }
 )
 
 
@@ -131,7 +138,9 @@ def run_batch_download(
     s3_prefix: str,
     s3_client: Any,
     prune: bool = False,
+    dry_run: bool = False,
     delay_seconds: float = 0.0,
+    breaker_cooldown_s: float,
 ) -> BatchOutcome:
     """Download each source that is not skipped.
 
@@ -142,7 +151,10 @@ def run_batch_download(
         s3_prefix: Destination key prefix.
         s3_client: S3 client used for the skip check.
         prune: Let each downloaded source delete image objects its verified image list lacks.
+        dry_run: With ``prune``, log the orphan objects instead of deleting them.
         delay_seconds: Pause after each download.
+        breaker_cooldown_s: Seconds to pause when the circuit breaker trips before probing the
+            next source; 0 stops the run at the trip.
 
     Returns:
         A result per downloaded source, keyed by source id; sources skipped as complete are
@@ -150,11 +162,19 @@ def run_batch_download(
         A source whose skip check or download raises gets a failed result whose error code is
         the exception class name, and the run goes on. After
         :data:`CIRCUIT_BREAKER_THRESHOLD` consecutive outage failures (see
-        :func:`_is_outage_failure`) the run stops with ``stopped="circuit_open"``; an ok source
-        resets that streak, while skipped sources and other failures neither count nor reset it.
+        :func:`_is_outage_failure`) the breaker trips. With ``breaker_cooldown_s`` of 0 the run
+        stops with ``stopped="circuit_open"``; otherwise the trip stays pending until a source
+        is about to be downloaded (skipped sources do not consume it), then the run sleeps once
+        and probes that source: an ok result resets the streak and the run continues (a later
+        trip gets its own cooldown), an outage failure stops the run. A trip still pending
+        when the sources run out also returns ``stopped="circuit_open"``. A source that fails,
+        including a skip check that raises, while a trip is pending stops the run. Skipped
+        sources and other failures neither count nor reset the streak.
     """
     results: dict[int, DownloadResult] = {}
     failure_streak = 0
+    probing = False
+    trip_pending = False
     skipped_complete = 0
     for sid in tqdm(list(source_ids), desc="CoralNet sources"):
         raised = False
@@ -167,8 +187,12 @@ def run_batch_download(
             ):
                 skipped_complete += 1
                 continue
+            if trip_pending:
+                time.sleep(breaker_cooldown_s)
+                trip_pending = False
+                probing = True
             res = downloader.download_source(
-                sid, bucket_name=bucket, s3_prefix=s3_prefix, prune=prune
+                sid, bucket_name=bucket, s3_prefix=s3_prefix, prune=prune, dry_run=dry_run
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("Source %s failed: %s", sid, e)
@@ -177,12 +201,29 @@ def run_batch_download(
         if res.skipped_no_confirmed:
             logger.info("Skip source %s: zero confirmed images on website", sid)
         results[sid] = res
+        previous_streak = failure_streak
         failure_streak = _next_failure_streak(failure_streak, res, raised=raised)
-        if failure_streak >= CIRCUIT_BREAKER_THRESHOLD:
+        if res.ok:
+            probing = False
+        if failure_streak > previous_streak and failure_streak >= CIRCUIT_BREAKER_THRESHOLD:
+            if probing or trip_pending or breaker_cooldown_s <= 0:
+                logger.error(
+                    "Stopping the run: %d consecutive sources failed (last: %s)",
+                    failure_streak,
+                    sid,
+                )
+                return BatchOutcome(results, STOPPED_CIRCUIT_OPEN, skipped_complete)
             logger.error(
-                "Stopping the run: %d consecutive sources failed (last: %s)", failure_streak, sid
+                "Circuit breaker tripped: %d consecutive sources failed (last: %s); "
+                "pausing %.0f s before probing the next source",
+                failure_streak,
+                sid,
+                breaker_cooldown_s,
             )
-            return BatchOutcome(results, STOPPED_CIRCUIT_OPEN, skipped_complete)
+            trip_pending = True
         if delay_seconds > 0:
             time.sleep(delay_seconds)
+    if trip_pending:
+        logger.error("Stopping the run: the circuit breaker tripped with no source left to probe")
+        return BatchOutcome(results, STOPPED_CIRCUIT_OPEN, skipped_complete)
     return BatchOutcome(results, None, skipped_complete)

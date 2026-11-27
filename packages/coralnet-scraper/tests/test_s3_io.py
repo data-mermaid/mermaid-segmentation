@@ -21,6 +21,20 @@ def test_read_csv_s3_returns_none_when_key_missing(code):
     assert s3_io.read_csv_s3(client, "bkt", "k.csv") is None
 
 
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "NotFound"])
+def test_object_size_returns_none_for_a_missing_key(code):
+    client = MagicMock()
+    client.head_object.side_effect = _client_error(code)
+    assert s3_io.object_size(client, "bkt", "k.csv") is None
+
+
+def test_object_size_propagates_other_client_errors():
+    client = MagicMock()
+    client.head_object.side_effect = _client_error("AccessDenied")
+    with pytest.raises(ClientError):
+        s3_io.object_size(client, "bkt", "k.csv")
+
+
 def test_read_csv_s3_propagates_other_client_errors():
     client = MagicMock()
     client.get_object.side_effect = _client_error("AccessDenied")
