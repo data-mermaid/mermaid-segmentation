@@ -20,6 +20,7 @@ from mermaidseg.dataset_reconciliation.label_space import (
     check_label_space,
     label_keys_sha1,
     read_label_space,
+    read_label_space_meta,
     resolve_label_space,
     write_label_space,
 )
@@ -371,7 +372,11 @@ def _round_trip_space(tmp_path: Path) -> LabelSpace:
         classes=space.classes,
         concepts=space.concepts,
         source_labels=space.source_labels,
-        meta={"name": "tiny", "datasets": {"coralnet": {"version": VERSION}}},
+        meta={
+            "name": "tiny",
+            "concepts_csv_sha1": "abc",
+            "datasets": {"coralnet": {"version": VERSION}},
+        },
     )
 
 
@@ -526,6 +531,71 @@ def test_read_refuses_a_hand_edited_table_naming_the_file(
 
     with pytest.raises(ValueError, match=file):
         read_label_space(tmp_path / "space")
+
+
+def test_read_refuses_a_dataset_under_two_versions_naming_both(tmp_path: Path) -> None:
+    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
+    path = tmp_path / "space" / "source_labels.csv"
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    df.loc[0, "version"] = "20990101-abcdef0"
+    df.to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match=r"coralnet.*" + VERSION + r".*20990101-abcdef0"):
+        read_label_space(tmp_path / "space")
+
+
+def _gap_in_class_ids(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(class_id=[0, 1, 2, 4])
+
+
+def _reordered_class_ids(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(class_id=[1, 0, 2, 3])
+
+
+def _reordered_channel_ids(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(channel_id=list(reversed(df["channel_id"])))
+
+
+@pytest.mark.parametrize(
+    ("file", "edit"),
+    [
+        ("classes.csv", _gap_in_class_ids),
+        ("classes.csv", _reordered_class_ids),
+        ("concepts.csv", _reordered_channel_ids),
+    ],
+    ids=["class-gap", "class-reordered", "channels-reordered"],
+)
+def test_read_refuses_ids_that_are_not_row_order_ids_naming_the_file(
+    tmp_path: Path, file: str, edit: Callable[[pd.DataFrame], pd.DataFrame]
+) -> None:
+    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
+    path = tmp_path / "space" / file
+    edit(pd.read_csv(path, dtype=str, keep_default_na=False)).to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match=file):
+        read_label_space(tmp_path / "space")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "- concepts_csv_sha1\n- x\n", "name: tiny\n"],
+    ids=["empty", "list", "missing-sha1"],
+)
+def test_read_refuses_a_malformed_meta_naming_the_file(tmp_path: Path, text: str) -> None:
+    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
+    (tmp_path / "space" / "label_space.meta.yaml").write_text(text)
+
+    for read in (read_label_space, read_label_space_meta):
+        with pytest.raises(ValueError, match="label_space.meta.yaml"):
+            read(tmp_path / "space")
+
+
+def test_read_label_space_meta_returns_the_meta(tmp_path: Path) -> None:
+    directory = tmp_path / "space"
+    directory.mkdir()
+    (directory / "label_space.meta.yaml").write_text("concepts_csv_sha1: abc\nname: tiny\n")
+
+    assert read_label_space_meta(directory) == {"concepts_csv_sha1": "abc", "name": "tiny"}
 
 
 # ---------- check_label_space ----------

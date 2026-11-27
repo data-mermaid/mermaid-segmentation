@@ -26,11 +26,11 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
     load_concept_source_mask,
 )
 from mermaidseg.dataset_reconciliation.label_space import (
-    META_YAML,
     SOURCE_LABELS_CSV,
     LabelSpace,
     label_keys_sha1,
     read_label_space,
+    read_label_space_meta,
 )
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
@@ -97,7 +97,7 @@ def load_run_concept_source_mask(
     if not path:
         return None
     directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
-    meta = yaml.safe_load((directory / META_YAML).read_text())
+    meta = read_label_space_meta(directory)
     if label_space_dir is not None:
         _check_input_sha1(
             meta, training_cfg, "concept_source_mask", "concept_source_mask_sha1", directory

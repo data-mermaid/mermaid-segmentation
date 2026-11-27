@@ -432,10 +432,40 @@ def _read_table(directory: Path, file: str, columns: list[str]) -> pd.DataFrame:
     return df.astype(dict.fromkeys(_INT_COLUMNS[file], "int64"))
 
 
+def _check_row_order_ids(directory: Path, classes: pd.DataFrame, concepts: pd.DataFrame) -> None:
+    """Raise unless ``class_id`` is 0..n-1 and ``channel_id`` is 1..n in row order."""
+    if classes["class_id"].tolist() != list(range(len(classes))):
+        raise ValueError(
+            f"{directory / CLASSES_CSV} class_id is not 0..{len(classes) - 1} in order"
+        )
+    if concepts["channel_id"].tolist() != list(range(1, len(concepts) + 1)):
+        raise ValueError(
+            f"{directory / CONCEPTS_CSV} channel_id is not 1..{len(concepts)} in order"
+        )
+
+
+def _check_one_version_per_dataset(path: Path, source_labels: pd.DataFrame) -> None:
+    """Raise when a dataset of ``source_labels`` appears under more than one version."""
+    versions = source_labels.groupby("dataset")["version"].unique()
+    many = {d: sorted(v) for d, v in versions.items() if len(v) > 1}
+    if many:
+        raise ValueError(f"{path} has datasets under more than one version: {many}")
+
+
 def _check_source_labels(
-    path: Path, source_labels: pd.DataFrame, classes: pd.DataFrame, concepts: pd.DataFrame
+    directory: Path,
+    source_labels: pd.DataFrame,
+    classes: pd.DataFrame,
+    concepts: pd.DataFrame,
 ) -> None:
-    """Raise when ``source_labels`` repeats a label or names an unknown class or concept."""
+    """Raise when the tables are inconsistent.
+
+    Inconsistent means: ids out of row order, a dataset under two versions, a repeated label, or
+    a class or concept that ``source_labels`` names and its table lacks.
+    """
+    path = directory / SOURCE_LABELS_CSV
+    _check_row_order_ids(directory, classes, concepts)
+    _check_one_version_per_dataset(path, source_labels)
     duplicated = source_labels.duplicated(["dataset", "version", "label_id"], keep=False)
     if duplicated.any():
         repeated = sorted(
@@ -460,18 +490,36 @@ def _check_source_labels(
         raise ValueError(f"{path} names concepts not in {CONCEPTS_CSV}: {unknown_concepts}")
 
 
+def read_label_space_meta(directory: Path) -> dict:
+    """Read the provenance of the label space in ``directory``.
+
+    Raises:
+        ValueError: ``label_space.meta.yaml`` is not a mapping or lacks ``concepts_csv_sha1``.
+    """
+    path = directory / META_YAML
+    meta = yaml.safe_load(path.read_text())
+    if not isinstance(meta, dict):
+        raise ValueError(f"{path} is not a YAML mapping")
+    if "concepts_csv_sha1" not in meta:
+        raise ValueError(f"{path} lacks concepts_csv_sha1")
+    return meta
+
+
 def read_label_space(directory: Path) -> LabelSpace:
     """Read a label space written by :func:`write_label_space`.
 
     Raises:
-        ValueError: A table misses a column, ``source_labels.csv`` repeats a
-            ``(dataset, version, label_id)``, or names a class or concept that its table lacks.
+        ValueError: A table misses a column; ``class_id`` is not 0..n-1 or ``channel_id`` not
+            1..n in row order; a dataset appears under more than one version;
+            ``source_labels.csv`` repeats a ``(dataset, version, label_id)`` or names a class or
+            concept that its table lacks; or the meta file is not a mapping with
+            ``concepts_csv_sha1``.
     """
     classes = _read_table(directory, CLASSES_CSV, CLASS_COLUMNS)
     concepts = _read_table(directory, CONCEPTS_CSV, CONCEPT_COLUMNS)
     source_labels = _read_table(directory, SOURCE_LABELS_CSV, SOURCE_LABEL_COLUMNS)
-    _check_source_labels(directory / SOURCE_LABELS_CSV, source_labels, classes, concepts)
-    meta = yaml.safe_load((directory / META_YAML).read_text())
+    _check_source_labels(directory, source_labels, classes, concepts)
+    meta = read_label_space_meta(directory)
     return LabelSpace(classes=classes, concepts=concepts, source_labels=source_labels, meta=meta)
 
 
