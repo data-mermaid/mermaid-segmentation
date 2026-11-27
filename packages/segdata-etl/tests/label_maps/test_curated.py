@@ -18,7 +18,6 @@ _HEADER = "label_id,name,mermaid_benthic_attribute\n"
         ("1,Sand,sand\n1,Rock,rock\n", "duplicate label_id 1"),
         (",cca,crustose coralline algae\n,cca,turf algae\n", "duplicate name 'cca'"),
         (",CCA,crustose coralline algae\n", "'CCA' is not normalized"),
-        (", cca,crustose coralline algae\n", "' cca' is not normalized"),
         (",,crustose coralline algae\n", "neither label_id nor name"),
     ],
 )

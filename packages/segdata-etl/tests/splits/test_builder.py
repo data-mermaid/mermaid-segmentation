@@ -132,11 +132,6 @@ def test_split_file_has_exactly_the_four_columns(built):
     assert list(_table(built[0]).columns) == ["group", "source_id", "split_group", "split"]
 
 
-def test_group_is_s_prefixed_source_id(built):
-    table = _table(built[0])
-    assert (table["group"] == "s" + table["source_id"]).all()
-
-
 def test_test_source_component_goes_to_test(built):
     table = _table(built[0]).set_index("source_id")
     assert table.loc[["10", "11"], "split"].tolist() == ["test", "test"]

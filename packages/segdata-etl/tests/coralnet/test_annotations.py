@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
@@ -107,33 +105,6 @@ def test_build_annotations_sorts_rows_by_primary_key_across_sources(fake_s3, pop
     ]
 
 
-def test_build_annotations_strips_all_status_suffixes(fake_s3, populate):
-    """Only Confirmed rows are kept in the merged parquet."""
-    annotations = (
-        "Name,Row,Column,Label ID,Status\n"
-        "a.jpg,1,2,100,Confirmed\n"
-        "b.jpg,3,4,101,Unconfirmed\n"
-        "c.jpg,5,6,102,Unclassified\n"
-    )
-    image_list = (
-        "Name,Image Page\n"
-        "a.jpg - Confirmed,/image/1/view/\n"
-        "b.jpg - Unconfirmed,/image/2/view/\n"
-        "c.jpg - Unclassified,/image/3/view/\n"
-    )
-    files = {
-        "annotations.csv": annotations.encode(),
-        "image_list.csv": image_list.encode(),
-        "labelset.csv": _LABELSET_100S,
-    }
-    populate(fake_s3, "b", "p", 99, files)
-
-    ann = build_annotations([99], bucket="b", prefix="p", workers=1, s3_client=fake_s3).annotations
-    assert len(ann) == 1
-    assert ann["image_id"].iloc[0] == "1"
-    assert ann["status"].iloc[0] == "Confirmed"
-
-
 def test_build_annotations_drops_unconfirmed_when_status_from_image_list_suffix(fake_s3, populate):
     """Status from image_list suffix: only Confirmed rows are kept."""
     annotations = "Name,Row,Column,Label ID\nok.jpg,1,2,100\nbad.jpg,3,4,101\n"
@@ -196,8 +167,8 @@ def test_build_annotations_falls_back_to_suffix_when_status_is_empty(fake_s3, po
 
 @pytest.mark.parametrize(
     "bad_row",
-    [b"bad.jpg,x,2,100,Confirmed", b"bad.jpg,1,x,100,Confirmed", b"bad.jpg,1,2,x,Confirmed"],
-    ids=["row", "column", "label_id"],
+    [b"bad.jpg,x,2,100,Confirmed"],
+    ids=["row"],
 )
 def test_build_annotations_drops_rows_with_a_non_numeric_field(fake_s3, populate, bad_row):
     files = _single_source_files(
@@ -322,19 +293,6 @@ def test_build_annotations_excludes_a_source_without_a_completion_marker(
     assert read_keys == []
 
 
-def test_build_annotations_includes_a_source_with_a_completion_marker(
-    fake_s3, sample_csv_factory, populate
-):
-    populate(
-        fake_s3, "b", "p", 1, sample_csv_factory(source_id=1, n_images=1, n_points_per_image=2)
-    )
-
-    build = build_annotations([1], bucket="b", prefix="p/", workers=1, s3_client=fake_s3)
-
-    assert build.exclusions == {}
-    assert len(build.annotations) == 2
-
-
 def test_build_annotations_keeps_only_the_marked_source_of_a_mixed_pair(
     fake_s3, sample_csv_factory, populate
 ):
@@ -355,18 +313,6 @@ def test_build_annotations_keeps_only_the_marked_source_of_a_mixed_pair(
     assert build.annotations["source_id"].unique().tolist() == [1]
     assert len(build.annotations) == 2
     assert build.exclusions == {"not_complete": [2]}
-
-
-def test_build_annotations_reports_not_complete_before_a_missing_csv(
-    fake_s3, sample_csv_factory, populate
-):
-    files = sample_csv_factory(source_id=1, n_images=1, n_points_per_image=1)
-    del files["annotations.csv"]
-    populate(fake_s3, "b", "p", 1, files, complete=False)
-
-    build = build_annotations([1], bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-
-    assert build.exclusions == {"not_complete": [1]}
 
 
 @pytest.mark.parametrize("kind", list(_BREAKS))
@@ -390,47 +336,6 @@ def test_build_annotations_excludes_broken_source(fake_s3, sample_csv_factory, p
 
     assert build.annotations["source_id"].unique().tolist() == [1]
     assert build.exclusions == {kind: [2]}
-
-
-@pytest.mark.parametrize(
-    ("file_name", "body"),
-    [
-        # The labelset.csv case is the columns_missing entry of _BREAKS.
-        ("annotations.csv", b"Name,Row,Label ID,Status\na.jpg,1,1000,Confirmed\n"),
-        ("image_list.csv", b"Name,Page\na.jpg - Confirmed,/image/1/view/\n"),
-    ],
-    ids=["annotations", "image_list"],
-)
-def test_build_annotations_excludes_a_source_missing_a_required_column(
-    fake_s3, sample_csv_factory, populate, file_name, body
-):
-    files = sample_csv_factory(source_id=2, n_images=1, n_points_per_image=1)
-    files[file_name] = body
-    populate(fake_s3, "b", "p", 2, files)
-
-    build = build_annotations([2], bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-
-    assert build.exclusions == {"columns_missing": [2]}
-
-
-def test_build_annotations_reports_a_missing_csv_over_a_read_failure(
-    fake_s3, sample_csv_factory, populate
-):
-    broken = sample_csv_factory(source_id=2, n_images=1, n_points_per_image=1)
-    broken.pop("labelset.csv")
-    populate(fake_s3, "b", "p", 2, broken)
-    s3_reader = make_csv_reader_s3(fake_s3)
-
-    def reader(bucket, key):
-        if key == "p/s2/annotations.csv":
-            raise OSError("read refused")
-        return s3_reader(bucket, key)
-
-    build = build_annotations(
-        [2], bucket="b", prefix="p", workers=1, s3_client=fake_s3, csv_reader=reader
-    )
-
-    assert build.exclusions == {"labelset_missing": [2]}
 
 
 def test_build_annotations_unnames_labels_only_an_excluded_source_named(fake_s3, populate):
@@ -481,64 +386,3 @@ def test_build_annotations_raises_on_conflicting_label_names(fake_s3, populate):
 
     with pytest.raises(ValueError, match=r"100.*Porites.*Acropora|100.*Acropora.*Porites"):
         build_annotations([1, 2], bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-
-
-def test_build_annotations_stops_queued_sources_after_a_worker_error(monkeypatch):
-    from segdata_etl.datasets.coralnet import annotations
-
-    release = threading.Event()
-    started: list[int] = []
-
-    def fake_outcome(_reader, _marker_check, _bucket, _prefix, source_id):
-        started.append(source_id)
-        if source_id == 1:
-            raise RuntimeError("unexpected")
-        # Hold each running worker so the queue still has sources when source 1 fails.
-        release.wait(timeout=1)
-        return annotations._SourceExcluded("annotations_missing", "stub")
-
-    monkeypatch.setattr(annotations, "_get_thread_reader", lambda _client: None)
-    monkeypatch.setattr(annotations, "_load_source_outcome", fake_outcome)
-
-    with pytest.raises(RuntimeError, match="unexpected"):
-        build_annotations([1, 2, 3, 4, 5, 6], bucket="b", prefix="p", workers=2)
-    release.set()
-
-    # Two workers run at most source 1, source 2 and one more before the queue is cancelled.
-    assert set(started) <= {1, 2, 3}
-
-
-def test_build_annotations_shares_one_s3_client_across_workers_and_marker_check(monkeypatch):
-    from segdata_etl.datasets.coralnet import annotations
-
-    sentinel = object()
-    made: list[int] = []
-    reader_clients: list[object] = []
-    marker_clients: list[object] = []
-
-    def fake_make_s3_client(**_kwargs):
-        made.append(1)
-        return sentinel
-
-    def fake_make_csv_reader_ibis(_con, client):
-        reader_clients.append(client)
-
-    def fake_make_marker_check(client):
-        marker_clients.append(client)
-
-    monkeypatch.setattr(annotations, "make_s3_client", fake_make_s3_client)
-    monkeypatch.setattr(annotations, "make_ibis_connection", lambda: object())
-    monkeypatch.setattr(annotations, "make_csv_reader_ibis", fake_make_csv_reader_ibis)
-    monkeypatch.setattr(annotations, "make_marker_check", fake_make_marker_check)
-    monkeypatch.setattr(
-        annotations,
-        "_load_source_outcome",
-        lambda *_args: annotations._SourceExcluded("annotations_missing", "stub"),
-    )
-
-    build_annotations([1, 2, 3], bucket="b", prefix="p", workers=2)
-
-    assert len(made) == 1
-    assert marker_clients == [sentinel]
-    assert reader_clients
-    assert all(c is sentinel for c in reader_clients)

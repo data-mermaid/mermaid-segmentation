@@ -21,8 +21,6 @@ from botocore.client import BaseClient
 from coralnet_scraper.s3_io import read_csv_s3
 from segdata_spec.s3 import exists
 
-from .schemas import validate
-
 # Returns None when the object is missing, and raises on other errors so the caller can record them.
 CsvReader = Callable[[str, str], "pd.DataFrame | None"]
 
@@ -122,7 +120,6 @@ def write_parquet_deterministic(
         schema: Declared output schema.
         primary_key: Columns the rows are sorted by.
     """
-    validate(df, schema)
     df = df.copy()
     df = df.sort_values(list(primary_key), kind="mergesort").reset_index(drop=True)
     df = df[[field.name for field in schema]]

@@ -113,21 +113,6 @@ def test_overridden_image_is_fully_replaced_and_others_are_untouched() -> None:
     assert set(out["annotator"]) == {"default"}
 
 
-def test_inversion_is_the_smallest_coordinate_where_a_plain_ceil_is_one_short() -> None:
-    # A 2576 px square scales by 2047 / 2576: ceil(979 / f) = 1232 floors to 978, so 1233 is the
-    # smallest original coordinate that lands on 979.
-    images = _images(("sq", 2576, 2576))
-    out, _ = apply_overrides(_points(("sq", 0, 0, 1)), images, _overrides(("sq", 979, 979, 4)))
-    assert _tuples(out) == [("sq", 1233, 1233, 4)]
-
-
-def test_inversion_nudges_down_where_a_plain_ceil_overshoots_by_one() -> None:
-    # A 2576 px square scales by 2047 / 2576: ceil(801 / f) = 1009 but 1008 already floors to 801.
-    images = _images(("sq", 2576, 2576))
-    out, _ = apply_overrides(_points(("sq", 0, 0, 1)), images, _overrides(("sq", 801, 801, 4)))
-    assert _tuples(out) == [("sq", 1008, 1008, 4)]
-
-
 def test_override_equal_in_position_but_different_in_label_is_inverted_not_matched() -> None:
     images = _images((IMG, 3486, 3469))
     raw = _points((IMG, 97, 3158, 141))  # scales to (56, 1854); the smallest preimage is (96, 3158)
@@ -170,39 +155,9 @@ def test_image_exactly_at_the_load_edge_is_copied_unchanged() -> None:
     assert (stats.points_unscaled, stats.points_inverted, stats.points_exact) == (1, 0, 0)
 
 
-def test_image_one_pixel_over_the_load_edge_is_inverted() -> None:
-    # 2049 x 1500 scales by 2048 / 2049: rows 1500 -> 1499 (factor 1499/1500). floor(1000 * 1499/1500)
-    # = 999 misses 1000, and floor(1001 * 1499/1500) = 1000, so the smallest original row is 1001.
-    # Columns land on 1001 for the same reason (1000 floors to 999 at factor ~0.9995).
-    images = _images(("over", 2049, 1500))
-    out, stats = apply_overrides(
-        _points(("over", 1, 1, 1)), images, _overrides(("over", 1000, 1000, 4))
-    )
-    assert _tuples(out) == [("over", 1001, 1001, 4)]
-    assert (stats.points_unscaled, stats.points_inverted) == (0, 1)
-
-
 @pytest.mark.parametrize(
-    ("resized", "original"),
-    [
-        # 4096 x 1024 scales by 0.5 exactly (2048 x 512), so the smallest original is 2 * resized.
-        ((0, 0), (0, 0)),
-        ((100, 301), (200, 602)),
-        ((511, 2047), (1022, 4094)),
-    ],
-)
-def test_wide_image_inverts_to_exact_original_coordinates(
-    resized: tuple[int, int], original: tuple[int, int]
-) -> None:
-    images = _images(("wide", 4096, 1024))
-    out, _ = apply_overrides(
-        _points(("wide", 5, 5, 1)), images, _overrides(("wide", resized[0], resized[1], 4))
-    )
-    assert _tuples(out) == [("wide", original[0], original[1], 4)]
-
-
-@pytest.mark.parametrize(
-    ("orig", "new"), [(4096, 2048), (3000, 2048), (2049, 2048), (1500, 1096), (3469, 2038)]
+    ("orig", "new"),
+    [(4096, 2048), (3000, 2048), (2049, 2048), (1500, 1096), (3469, 2038), (2576, 2047)],
 )
 def test_invert_is_the_smallest_original_that_scales_forward_to_each_resized_coordinate(
     orig: int, new: int

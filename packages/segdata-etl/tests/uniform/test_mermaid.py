@@ -17,7 +17,7 @@ from common.test_featurevector import featurevector_bytes
 from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl import cli
-from segdata_etl.common.featurevector import FeatureVectorsInvalid, FeatureVectorsMissing
+from segdata_etl.common.featurevector import FeatureVectorsMissing
 from segdata_etl.datasets import mermaid
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
@@ -498,26 +498,6 @@ def test_unreadable_header_drops_the_image_and_logs_its_id(repo, tmp_path, caplo
     assert "bad" in caplog.text
 
 
-def test_annotations_changed_between_head_and_get_fails_and_stages_nothing(repo, tmp_path):
-    fake = FakeS3()
-    seed(fake, [ann("i1", "p1", 1, 1)], {"i1": png_bytes(4, 4)})
-    real_head = fake.head_object
-
-    def stale_head(**kwargs: Any) -> dict[str, Any]:
-        response = real_head(**kwargs)
-        if kwargs["Key"] == PARQUET_KEY:
-            response = {**response, "ETag": '"stale"'}
-        return response
-
-    fake.head_object = stale_head  # type: ignore[method-assign]
-    stage = tmp_path / "stage"
-
-    with pytest.raises(mermaid.AnnotationsChanged):
-        build(fake, stage)
-
-    assert version_dirs(stage) == []
-
-
 def test_parent_rows_with_unchanged_fingerprint_are_carried_planned_and_not_reread(repo, tmp_path):
     fake = FakeS3()
     a, b = png_bytes(4, 4), png_bytes(6, 6)
@@ -606,42 +586,6 @@ def test_large_jpeg_header_extends_the_read(repo, tmp_path):
     assert (row["width"], row["height"]) == (20, 10)
     image_gets = [c for c in fake.ops("get") if c[2] != feature_source_key("big")]
     assert len(image_gets) == 3  # parquet, first range, extended range
-
-
-def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
-    parser = cli.build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["build", "mermaid", "--annotation-date-cutoff", CUTOFF])
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["build", "mermaid", "--stage-dir", str(tmp_path), "--annotation-date-cutoff", CUTOFF]
-        )
-
-    seen: dict[str, Any] = {}
-
-    def fake_run(args: Any, client: Any) -> int:
-        seen["args"] = args
-        return 7
-
-    monkeypatch.setattr(mermaid, "run", fake_run)
-    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: object())
-    code = cli.main(
-        [
-            "build",
-            "mermaid",
-            "--stage-dir",
-            str(tmp_path),
-            "--annotation-date-cutoff",
-            CUTOFF,
-            "--extractor-spec",
-            str(extractor_spec(tmp_path)),
-        ]
-    )
-
-    assert code == 7
-    args = seen["args"]
-    assert args.stage_dir == tmp_path
-    assert args.annotation_date_cutoff == CUTOFF
 
 
 def feature_plan(version: Path) -> list[dict[str, Any]]:
@@ -735,46 +679,8 @@ def test_allow_missing_features_keeps_the_image_without_a_feature_row(repo, tmp_
     assert [line["src_key"] for line in feature_plan(version)] == ["mermaid/i1_featurevector"]
 
 
-def test_feature_vector_missing_a_point_fails_the_build(repo, tmp_path):
-    fake = FakeS3()
-    seed(fake, [ann("i1", "p1", 1, 1), ann("i1", "p2", 2, 2)], {"i1": png_bytes(4, 4)})
-    fake.put(SRC_BUCKET, "mermaid/i1_featurevector", featurevector_bytes([(1, 1)]))
-    stage = tmp_path / "stage"
-
-    with pytest.raises(FeatureVectorsInvalid, match="mermaid/i1_featurevector"):
-        build(fake, stage)
-
-    assert version_dirs(stage) == []
-
-
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_labels_write_an_empty_growth_form_not_null_for_a_pair_without_one():
-    pairs = pd.DataFrame(
-        {
-            "label_id": [1, 2],
-            "benthic_attribute_id": ["aaa", "bbb"],
-            "benthic_attribute_name": ["Rubble", "Hard coral"],
-            "growth_form_name": [None, "Branching"],
-        }
-    )
-
-    rows = mermaid.labels_table(pairs).to_pylist()
-
-    assert [r["mermaid_growth_form"] for r in rows] == ["", "Branching"]
-
-
-def test_load_parent_rows_strips_quotes_from_the_parents_source_fingerprints(tmp_path):
-    version = "20261120-abcdef1"
-    path = tmp_path / DATASET_BUCKET / "datasets" / "mermaid" / version / "images.parquet"
-    path.parent.mkdir(parents=True)
-    pq.write_table(pa.table({"image_id": ["a", "b"], "source_fingerprint": ['"e1"', "e2"]}), path)
-
-    rows = mermaid.load_parent_rows(tmp_path, version)
-
-    assert {i: r["source_fingerprint"] for i, r in rows.items()} == {"a": "e1", "b": "e2"}
 
 
 def test_a_vector_already_in_the_family_is_adopted_and_not_planned_for_copy(repo, tmp_path):

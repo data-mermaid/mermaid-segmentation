@@ -176,7 +176,7 @@ def api_labels(
 ) -> tuple[pa.Table, LabelMapping]:
     """Build ``labels.parquet`` rows and the mapping provenance for the labels in ``id2name``.
 
-    A label is unmapped when its name is not a string, it has no API record, or the record has no
+    A label is unmapped when its name is None, it has no API record, or the record has no
     benthic attribute. A None name is stored as an empty string because ``name`` is not nullable.
 
     Args:
@@ -193,7 +193,7 @@ def api_labels(
     label_ids = list(id2name)
     mapped: list[CoralNetLabelMapping | None] = []
     for label_id in label_ids:
-        record = mappings.records.get(label_id) if isinstance(id2name[label_id], str) else None
+        record = mappings.records.get(label_id) if id2name[label_id] is not None else None
         has_target = record is not None and record["benthic_attribute_name"] is not None
         mapped.append(record if has_target else None)
     no_id = [

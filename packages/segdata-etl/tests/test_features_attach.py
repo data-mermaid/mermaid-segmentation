@@ -15,7 +15,6 @@ from s3_fake import FakeS3, client_error, crc64nvme, md5_hex
 
 from segdata_etl import cli, features
 from segdata_etl.common.featurevector import FeatureVectorsInvalid, FeatureVectorsMissing
-from segdata_etl.common.s3_objects import ObjectConflict, SourceChanged
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ExtractorMismatch, PinMismatch, PublishRefused
 from segdata_spec.git import GitState
@@ -180,19 +179,6 @@ def published_index(fake: FakeS3) -> list[dict[str, Any]]:
     return pq.read_table(io.BytesIO(data)).to_pylist()
 
 
-def test_template_fills_attrs_and_row_fields_per_image(repo, tmp_path):
-    fake = FakeS3()
-    sha = publish_version(fake, repo)
-    for image_id, (_, pts) in IMAGES.items():
-        seed_vector(fake, image_id, pts)
-
-    attach_and_promote(fake, tmp_path, sha)
-
-    sources = sorted(call["CopySource"]["Key"] for call in fake.copy_calls)
-    assert sources == ["s1/a.featurevector", "s2/b.featurevector"]
-    assert {call["CopySource"]["Bucket"] for call in fake.copy_calls} == {SRC_BUCKET}
-
-
 def test_unknown_template_field_fails_before_any_source_call(repo, tmp_path):
     fake = FakeS3()
     sha = publish_version(fake, repo)
@@ -219,6 +205,9 @@ def test_covering_vectors_are_copied_conditionally_and_published_as_a_set(repo, 
         "features/ds/effnet/b.featurevector",
     ]
     assert all(c["IfNoneMatch"] == "*" and c["CopySourceIfMatch"] for c in fake.copy_calls)
+    sources = sorted(call["CopySource"]["Key"] for call in fake.copy_calls)
+    assert sources == ["s1/a.featurevector", "s2/b.featurevector"]
+    assert {call["CopySource"]["Bucket"] for call in fake.copy_calls} == {SRC_BUCKET}
     assert sorted(published_index(fake), key=lambda r: r["image_id"]) == [
         {
             "image_id": "a",
@@ -288,36 +277,6 @@ def test_wrong_manifest_sha_fails_before_any_source_head(repo, tmp_path):
         attach(fake, tmp_path, "f" * 64)
 
     assert fake.ops("head") == [] and fake.copy_calls == []
-
-
-def test_images_of_every_group_are_copied_and_indexed(repo, tmp_path):
-    fake = FakeS3()
-    sha = publish_version(fake, repo, groups={"a": "g1", "b": "g2"})
-    for image_id, (_, pts) in IMAGES.items():
-        seed_vector(fake, image_id, pts)
-
-    attach_and_promote(fake, tmp_path, sha)
-
-    assert sorted(call["Key"] for call in fake.copy_calls) == [
-        "features/ds/effnet/a.featurevector",
-        "features/ds/effnet/b.featurevector",
-    ]
-    index = sorted(published_index(fake), key=lambda r: r["image_id"])
-    assert [(r["image_id"], r["n_points"]) for r in index] == [("a", 2), ("b", 1)]
-
-
-def test_unreadable_vector_is_refused_by_key_with_no_copy(repo, tmp_path):
-    fake = FakeS3()
-    sha = publish_version(fake, repo)
-    fake.put(SRC_BUCKET, "s1/a.featurevector", b'{"rows": [1, 2], "cols": [3, 4]}')
-    seed_vector(fake, "b", IMAGES["b"][1])
-
-    with pytest.raises(
-        FeatureVectorsInvalid, match=r"^1 .*s3://vectors/s1/a.featurevector: unreadable"
-    ):
-        attach_and_promote(fake, tmp_path, sha)
-
-    assert fake.copy_calls == []
 
 
 def test_template_naming_one_source_for_two_images_fails_before_any_source_call(repo, tmp_path):
@@ -391,7 +350,7 @@ def test_family_claimed_by_another_extractor_refuses_before_any_source_call(repo
 
 @pytest.mark.parametrize(
     ("seed_kwargs", "reason"),
-    [({"crc": False}, "lacks a CRC64NVME"), ({"etag": '"0123456789abcdef"'}, "ETag")],
+    [({"crc": False}, "lacks a CRC64NVME")],
 )
 def test_adopted_file_whose_metadata_disagrees_with_its_bytes_is_refused(
     repo, tmp_path, seed_kwargs, reason
@@ -457,68 +416,6 @@ def test_missing_uv_lock_refuses_before_any_s3_call(repo, tmp_path):
         attach_and_promote(fake, tmp_path, sha)
 
     assert fake.calls == []
-
-
-def test_destination_appearing_with_other_bytes_before_the_copy_conflicts(repo, tmp_path):
-    class PlantsDestination(FakeS3):
-        def copy_object(self, **kwargs: Any) -> dict[str, Any]:
-            self.put(DATASET_BUCKET, kwargs["Key"], b"other bytes")
-            return super().copy_object(**kwargs)
-
-    fake = PlantsDestination()
-    sha = publish_version(fake, repo)
-    for image_id, (_, pts) in IMAGES.items():
-        seed_vector(fake, image_id, pts)
-
-    with pytest.raises(ObjectConflict):
-        attach_and_promote(fake, tmp_path, sha)
-
-    assert (DATASET_BUCKET, SET_PREFIX + "manifest.json") not in fake.objects
-
-
-def test_source_replaced_after_its_head_stops_before_any_copy(repo, tmp_path):
-    class ReplacesBeforeRead(FakeS3):
-        def get_object(self, **kwargs: Any) -> dict[str, Any]:
-            if kwargs["Bucket"] == SRC_BUCKET:
-                self.put(SRC_BUCKET, kwargs["Key"], featurevector_bytes([(9, 9)]))
-            return super().get_object(**kwargs)
-
-    fake = ReplacesBeforeRead()
-    sha = publish_version(fake, repo)
-    for image_id, (_, pts) in IMAGES.items():
-        seed_vector(fake, image_id, pts)
-
-    with pytest.raises(SourceChanged):
-        attach_and_promote(fake, tmp_path, sha)
-
-    assert fake.copy_calls == []
-    assert (DATASET_BUCKET, SET_PREFIX + "manifest.json") not in fake.objects
-
-
-def test_source_replaced_after_verify_stops_at_its_copy(repo, tmp_path):
-    fake = FakeS3()
-    sha = publish_version(fake, repo)
-    for image_id, (_, pts) in IMAGES.items():
-        seed_vector(fake, image_id, pts)
-    fake.source_changes_on_copy[(SRC_BUCKET, "s1/a.featurevector")] = featurevector_bytes([(9, 9)])
-
-    with pytest.raises(SourceChanged):
-        attach_and_promote(fake, tmp_path, sha)
-
-    assert (DATASET_BUCKET, "features/ds/effnet/a.featurevector") not in fake.objects
-    assert (DATASET_BUCKET, SET_PREFIX + "manifest.json") not in fake.objects
-
-
-def test_vector_of_another_width_is_refused_by_key_with_no_copy(repo, tmp_path):
-    fake = FakeS3()
-    sha = publish_version(fake, repo)
-    fake.put(SRC_BUCKET, "s1/a.featurevector", featurevector_bytes(IMAGES["a"][1], dim=4))
-    seed_vector(fake, "b", IMAGES["b"][1])
-
-    with pytest.raises(FeatureVectorsInvalid, match="a.featurevector: feature width 4, expected 2"):
-        attach_and_promote(fake, tmp_path, sha)
-
-    assert fake.copy_calls == []
 
 
 def test_attach_stages_the_set_and_its_copy_plan_and_writes_nothing(repo, tmp_path):

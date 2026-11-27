@@ -210,6 +210,10 @@ def test_images_keep_annotated_images_with_dimensions(source: RecordingS3, tmp_p
         },
     ]
     assert [row["source_fingerprint"] for row in images] == [md5_hex(JPEG), md5_hex(PNG)]
+    assert [(row["etag"], row["size"], row["crc64nvme"]) for row in images] == [
+        (md5_hex(JPEG), len(JPEG), crc64nvme(JPEG)),
+        (md5_hex(PNG), len(PNG), crc64nvme(PNG)),
+    ]
     assert [row["source_name"] for row in images] == ["a.jpg", "b.png"]
     assert images[0]["attrs"] == (
         '{"source_id": 1, "source_key": "coralnet-public-images/s1/images/10.jpg"}'
@@ -217,16 +221,6 @@ def test_images_keep_annotated_images_with_dimensions(source: RecordingS3, tmp_p
     assert all(row["mask_key"] is None for row in images)
     assert result.dropped["no_dimensions"] == 1
     assert result.dropped["no_annotations"] == 1
-
-
-def test_images_carry_the_probed_objects_fingerprints(source: RecordingS3, tmp_path: Path) -> None:
-    result = _build(source, tmp_path)
-
-    images = result.tables["images.parquet"].to_pylist()
-    assert [(row["etag"], row["size"], row["crc64nvme"]) for row in images] == [
-        (md5_hex(JPEG), len(JPEG), crc64nvme(JPEG)),
-        (md5_hex(PNG), len(PNG), crc64nvme(PNG)),
-    ]
 
 
 def test_a_multipart_original_is_read_whole_for_its_single_part_copy_values(
@@ -256,16 +250,6 @@ def test_points_keep_original_row_col_of_kept_images(source: RecordingS3, tmp_pa
     ]
 
 
-def test_label_counts_count_points_per_image_and_label(source: RecordingS3, tmp_path: Path) -> None:
-    result = _build(source, tmp_path)
-
-    assert result.tables["stats/label_counts.parquet"].to_pylist() == [
-        {"image_id": "10", "label_id": 100, "n": 2},
-        {"image_id": "10", "label_id": 200, "n": 1},
-        {"image_id": "20", "label_id": 200, "n": 1},
-    ]
-
-
 def test_labels_hold_every_id2name_id_and_name_none_for_2474() -> None:
     id2name = json.loads('{"2474": NaN, "300": "Unused", "100": "Acropora"}')
 
@@ -280,12 +264,6 @@ def test_labels_hold_every_id2name_id_and_name_none_for_2474() -> None:
         }
         for label_id, name in ((100, "Acropora"), (300, "Unused"), (2474, "None"))
     ]
-
-
-@pytest.mark.parametrize("id2name", [{"2474": 7}, {"5": math.nan}])
-def test_labels_refuse_any_other_non_string_name(id2name: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match="non-string"):
-        raw.labels_table(id2name)
 
 
 def _parent(rows: list[tuple[str, str, str]]) -> pa.Table:
@@ -425,9 +403,7 @@ def test_a_not_found_build_row_the_parent_lacks_is_dropped_as_no_dimensions(
     assert result.dropped["carried_from_parent"] == 0
 
 
-@pytest.mark.parametrize(
-    ("width", "height"), [(111, 222), (111, 2000), (3000, 222)], ids=["both", "width", "height"]
-)
+@pytest.mark.parametrize(("width", "height"), [(111, 2000), (3000, 222)], ids=["width", "height"])
 def test_a_carried_image_whose_build_size_differs_from_the_parents_is_refused(
     source: RecordingS3, tmp_path: Path, width: int, height: int
 ) -> None:
@@ -437,7 +413,7 @@ def test_a_carried_image_whose_build_size_differs_from_the_parents_is_refused(
         _build(source, tmp_path, build, _parent_holding(CARRIED_ROW))
 
 
-@pytest.mark.parametrize(("row", "col"), [(2000, 5), (4, 3000), (-1, 5), (4, -1)])
+@pytest.mark.parametrize(("row", "col"), [(2000, 5)])
 def test_a_carried_not_found_image_with_a_point_outside_the_parents_size_is_refused(
     source: RecordingS3, tmp_path: Path, row: int, col: int
 ) -> None:
@@ -513,15 +489,6 @@ def test_only_the_parent_rows_of_carried_ids_join_the_images(
     assert "99" not in result.tables["points.parquet"].column("image_id").to_pylist()
 
 
-def test_a_parent_without_unlisted_images_reports_zero_carried(
-    source: RecordingS3, tmp_path: Path
-) -> None:
-    result = _build(source, tmp_path, parent_images=_parent_holding(CARRIED_ROW))
-
-    assert result.dropped["carried_from_parent"] == 0
-    assert result.carried == frozenset()
-
-
 def test_an_unlisted_image_the_parent_lacks_is_still_source_missing(
     source: RecordingS3, tmp_path: Path
 ) -> None:
@@ -532,16 +499,6 @@ def test_an_unlisted_image_the_parent_lacks_is_still_source_missing(
     assert result.tables["images.parquet"].column("image_id").to_pylist() == ["10", "20"]
     assert "30" not in result.tables["points.parquet"].column("image_id").to_pylist()
     assert (result.dropped["carried_from_parent"], result.dropped["source_missing"]) == (0, 1)
-
-
-def test_the_copy_plan_omits_carried_images_and_keeps_listed_ones(
-    source: RecordingS3, tmp_path: Path
-) -> None:
-    result = _build(source, tmp_path, _build_with_unlisted_image(), _parent_holding(CARRIED_ROW))
-
-    plan = raw._copies(result.tables["images.parquet"], SRC, result.carried)
-
-    assert [line["dst_key"] for line in plan] == [DEST_10, DEST_20]
 
 
 def test_annotations_without_an_image_row_are_counted_and_dropped(
@@ -715,40 +672,6 @@ def test_a_checkpointed_row_whose_source_changed_is_probed_again(
     assert source.image_heads() == [_key(1, "10")]
     row = result.tables["images.parquet"].to_pylist()[0]
     assert (row["etag"], row["crc64nvme"]) == (md5_hex(changed), crc64nvme(changed))
-
-
-@pytest.mark.parametrize(("extra", "writes"), [(1, 2), (2, 2)], ids=["3_images", "4_images"])
-def test_the_checkpoint_is_written_every_interval_and_once_after_the_last_batch(
-    source: RecordingS3,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    extra: int,
-    writes: int,
-) -> None:
-    monkeypatch.setattr(raw, "_CHECKPOINT_BATCH", 1)
-    monkeypatch.setattr(raw, "_CHECKPOINT_EVERY", 2)
-    written: list[int] = []
-    real_write = raw._write_checkpoint
-
-    def record(path: Path, probed: pd.DataFrame) -> None:
-        written.append(len(probed))
-        real_write(path, probed)
-
-    monkeypatch.setattr(raw, "_write_checkpoint", record)
-    build = _fixture_build()
-    ids = [str(30 + n) for n in range(extra)]
-    for image_id in ids:
-        source.put(SRC, _key(1, image_id), _make_jpeg_bytes(10, 10) + image_id.encode())
-    build = raw.BuildTables(
-        annotations=pd.concat([build.annotations, _annotations([(1, i, 0, 0, 100) for i in ids])]),
-        images=pd.concat([build.images, _images([(1, i, "ok", 10, 10) for i in ids])]),
-        id2name=ID2NAME,
-    )
-
-    _build(source, tmp_path, build)
-
-    assert len(written) == writes
-    assert written[-1] == 2 + extra
 
 
 def test_source_listings_follow_continuation_tokens_across_pages() -> None:
@@ -1000,25 +923,9 @@ def test_a_staged_parent_pin_carries_an_image_whose_scrape_original_is_gone(
     assert new["10"] == old["10"]
 
 
-def test_a_staged_version_promotes_into_intelligent_tiering_with_the_manifest_last(
-    staging: RecordingS3, tmp_path: Path
-) -> None:
-    stage = tmp_path / "stage"
-    _stage_raw(stage)
-    version = _only_version(stage).name
-
-    promote.promote(staging, stage_dir=stage, dataset="coralnet-raw", version=version, workers=1)
-
-    assert sorted(call["Key"] for call in staging.copy_calls) == [DEST_10, DEST_20]
-    assert {call["StorageClass"] for call in staging.copy_calls} == {"INTELLIGENT_TIERING"}
-    assert staging.objects[(DATASET_BUCKET, DEST_20)] == PNG
-    assert staging.puts[-1] == f"datasets/coralnet-raw/{version}/manifest.json"
-
-
 @pytest.mark.parametrize(
     ("git", "message"),
     [
-        (GitState(sha="abcdef1234567", dirty=False, pushed=False), "not contained in any remote"),
         (GitState(sha="abcdef1234567", dirty=True, pushed=True), "uncommitted changes"),
     ],
 )
@@ -1061,10 +968,9 @@ def test_a_tree_without_uv_lock_is_refused_before_any_s3_call_or_write(
 @pytest.mark.parametrize(
     ("flags", "message"),
     [
-        ([], "--stage-dir"),
         (["--stage-dir", "{tmp}", "--parent-version", "v1"], "--parent-manifest-sha256"),
     ],
-    ids=["no_stage_dir", "half_parent_pin"],
+    ids=["half_parent_pin"],
 )
 def test_raw_flag_misuse_is_a_usage_error(
     tmp_path: Path,

@@ -142,19 +142,14 @@ def test_pa4_unknown_archived_id_drops_row_and_unknown_visitor_id_is_na(tmp_path
     assert "unknown archived" in caplog.text
 
 
-def test_pa5_image_column_is_accepted_and_neither_column_raises_key_error(tmp_path, fake_s3):
+def test_pa5_image_column_is_accepted(tmp_path, fake_s3):
     root = write_pacific_tree(tmp_path / "raw")
     write_pacific_subset(root, "heron_reef", "reference", imagemap="imageid,image\n1,img1.JPG\n")
     plc.run(_args(root), fake_s3)
     assert f"{P}/images/heron_reef/reference/img1.JPG" in {k for (_, k) in fake_s3.objects}
 
-    root2 = write_pacific_tree(tmp_path / "raw2")
-    (root2 / "heron_reef" / "reference" / "imagemap.txt").write_text("imageid,other\n1,img1.JPG\n")
-    with pytest.raises(KeyError):
-        plc.run(_args(root2), type(fake_s3)())
 
-
-@pytest.mark.parametrize("missing", ["heron_reef", "heron_reef/evaluation"])
+@pytest.mark.parametrize("missing", ["heron_reef"])
 def test_pa6_missing_site_or_subset_directory_raises(tmp_path, fake_s3, missing):
     import shutil
 

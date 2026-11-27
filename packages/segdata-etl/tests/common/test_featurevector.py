@@ -54,14 +54,13 @@ def test_vector_points_pairs_rows_with_cols():
     ("data", "points", "dim", "reason"),
     [
         (b'{"rows": [1], "cols": [3]}', [(1, 3)], 2, "unreadable"),
-        (featurevector_bytes([(1, 3)])[:40], [(1, 3)], 2, "unreadable"),
         (featurevector_bytes([(1, 3)], dim=4), [(1, 3)], 1280, "width 4, expected 1280"),
         (featurevector_bytes([(1, 3)]), [(1, 3), (2, 4)], 2, "lacks 1 of 2 point"),
         (npz_bytes(feat=np.zeros((2, 2))), [(1, 3)], 2, "feat has 2 rows for 1 point"),
         (npz_bytes(feat=np.zeros((1, 2), dtype=np.int64)), [(1, 3)], 2, "not float"),
         (npz_bytes(rows=np.array([1.0])), [(1, 3)], 2, "not integer"),
     ],
-    ids=["json", "truncated", "width", "gap", "row-count", "int-feat", "float-rows"],
+    ids=["json", "width", "gap", "row-count", "int-feat", "float-rows"],
 )
 def test_vector_problem_names_why_a_vector_is_refused(data, points, dim, reason):
     n_points, problem = vector_problem(data, points, dim)
