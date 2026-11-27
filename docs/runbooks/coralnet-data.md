@@ -116,7 +116,7 @@ Use an unused tag; see [Run](../../packages/segdata-etl/README.md#run).
 
 ## Reuse a published raw version
 
-Pass the pin of the latest published `coralnet-raw` version to the scraper. An image that the pinned version holds then counts as present: `verify-existing` does not require it in the scrape, and a scraper run does not download it again. Use this for a bucket with sources that have no `_complete.json`, and for every rescrape after the first publish.
+Pass the pin of the latest published `coralnet-raw` version to the scraper. An image that has no scrape object and that the pinned version holds then counts as present: `verify-existing` does not require it in the scrape, and a scraper run does not download it again. A zero-byte scrape object counts as missing even when pinned, and a scraper run downloads it again. Use this for a bucket with sources that have no `_complete.json`, and for every rescrape after the first publish.
 
 Before you start, get these:
 
@@ -134,7 +134,7 @@ The pin flags go before the subcommand name. See the [scraper flags](../../packa
    ```
 
    This sends one overview request per source and reads every source's CSVs from S3. A source with zero Confirmed images or zero images is logged as skipped, gets no marker, and does not fail the command. Exit code 1 means at least one source failed verification. A marker whose `pinned_images` is more than 0 also records the pin under `parent`.
-3. Run the scraper with the same pin. It downloads each source that has no marker. Image objects already on S3 and images in the pinned version are skipped.
+3. Run the scraper with the same pin. It downloads each source that has no marker. Non-empty image objects already on S3 are skipped. An image with no scrape object that the pinned version holds is skipped; a zero-byte object is downloaded again.
 
    ```bash
    uv run --package coralnet-scraper coralnet-scrape --parent-version <raw> --parent-manifest-sha256 <sha>
