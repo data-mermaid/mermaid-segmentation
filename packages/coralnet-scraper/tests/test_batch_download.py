@@ -532,3 +532,35 @@ def test_a_non_outage_failure_while_probing_keeps_probing(fake_s3):
     assert outcome.stopped == "circuit_open"
     assert attempted == [1, 2, 3, 4, 5, 6, 7]
     assert sleep.call_args_list == [call(600)]
+
+
+def test_delay_and_cooldown_sleep_in_order_around_the_probe(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: True, 7: True})
+    downloader = _ScriptedDownloader(script)
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome = bd.run_batch_download(
+            list(script),
+            downloader=downloader,
+            bucket="b",
+            s3_prefix="p",
+            s3_client=fake_s3,
+            delay_seconds=2,
+            breaker_cooldown_s=600,
+        )
+
+    assert outcome.stopped is None
+    assert downloader.attempted == [1, 2, 3, 4, 5, 6, 7]
+    # Delay after sources 1-5 (5 trips the breaker), cooldown before probing 6, then delay after
+    # the probe and after source 7.
+    assert sleep.call_args_list == [
+        call(2),
+        call(2),
+        call(2),
+        call(2),
+        call(2),
+        call(600),
+        call(2),
+        call(2),
+    ]
