@@ -109,7 +109,7 @@ At the end, `build-annotations` logs a summary at error level: the number of exc
 
 `build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and `segdata build coralnet raw` drops those images. A `not_found` image is carried instead when a parent pin holds its `image_id`; see [Stage coralnet-raw](#stage-coralnet-raw).
 
-A source is pinned when its `_complete.json` marker has a `parent` key: the scraper verified it against a published `coralnet-raw` version, and some of its images are only in that version. `build-images` reads the marker of each source it builds, and logs the `not_found` images of pinned sources as one count, `not_found in pinned sources: <n>`. A marker that cannot be read (an S3 error other than not-found, malformed JSON, or JSON that is not an object) raises `RuntimeError`.
+A source is pinned when its `_complete.json` marker has a `parent` key: the scraper verified it against a published `coralnet-raw` version, and some of its images are only in that version. `build-images` reads the marker of each source it builds, and logs the `not_found` images of pinned sources as one count, `not_found in pinned sources: <n> (checked against the parent by the raw build)`. A marker that cannot be read (an S3 error other than not-found, malformed JSON, or JSON that is not an object) raises `RuntimeError`.
 
 Exit codes:
 

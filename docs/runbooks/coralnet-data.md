@@ -170,7 +170,7 @@ The pin flags go before the subcommand name. See the [scraper flags](../../packa
    uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> --upload-to-s3
    ```
 
-   `build-images` logs the `not_found` images of sources whose marker has `parent` as `not_found in pinned sources: <n>`. `build-images` does not count `not_found` images of sources whose marker has `parent` toward exit code 1, because the pinned version is expected to hold them. `build coralnet raw` checks this and stops with `PinnedImageLost` if it does not.
+   `build-images` logs the `not_found` images of sources whose marker has `parent` as `not_found in pinned sources: <n> (checked against the parent by the raw build)`. `build-images` does not count `not_found` images of sources whose marker has `parent` toward exit code 1, because the pinned version is expected to hold them. `build coralnet raw` checks them against the parent pin and stops with `PinnedImageLost` if the parent lacks one.
 6. Stage the next raw version with the same pin. See [Stage the raw version](#stage-the-raw-version).
 
 ## Tune the request rate
@@ -370,7 +370,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `build-annotations` excluded a source with `csv_read_failed` | Rebuild first. If it repeats, run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
 | `build-annotations` excluded a source with `columns_missing` or `annotations_empty` | The CSV on S3 is bad, or, for `annotations_empty`, the source may have no annotations. Run `invalidate --source-ids <id>`, run the scraper without flags to export it again, then rebuild. |
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
-| `build-images` reports `not_found` outside `not_found in pinned sources` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. For `coralnet-raw` with a parent pin whose published parent holds the image, no re-upload is needed: the build carries the image. |
+| `build-images` reports `not_found` outside `not_found in pinned sources: <n> (checked against the parent by the raw build)` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. For `coralnet-raw` with a parent pin whose published parent holds the image, no re-upload is needed: the build carries the image. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
 | `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. `invalidate` deletes the marker and `_partial/`, so the scraper runs the walk and the export again. Only the deleted images download again, because the image stage skips non-empty objects. `segdata build coralnet raw` drops the image until then. |
 
