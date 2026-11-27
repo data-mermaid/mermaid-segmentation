@@ -30,8 +30,8 @@ def prune_rolling_checkpoints(
 ) -> None:
     """Remove other rolling preempt checkpoints in ``directory``.
 
-    Interval checkpoints (``model_step*``, ``model_epoch*``) use other prefixes and
-    are left in place. ``.partial`` files from an interrupted atomic save are removed
+    Interval checkpoints (``model_step*``) use another prefix and are left in place,
+    as are ``model_epoch*`` files from older runs. ``.partial`` files from an interrupted atomic save are removed
     too. ``keep_name`` is the checkpoint that was just renamed into place.
     """
     if not prefix or not os.path.isdir(directory):

@@ -201,7 +201,7 @@ def build_train_parser() -> argparse.ArgumentParser:
         default=0,
         help=(
             "Also write one rolling model_preempt{step} checkpoint every N optimizer "
-            "updates (0 disables). model_step / model_epoch interval checkpoints are unchanged."
+            "updates (0 disables). model_step interval checkpoints are unchanged."
         ),
     )
     parser.add_argument(

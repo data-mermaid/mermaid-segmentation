@@ -619,7 +619,7 @@ def test_ddp_loss_step_returns_only_the_scalar_loss():
 def test_resume_at_an_epoch_boundary_then_validate_then_train(
     minimal_config, make_meta_model, tmp_path
 ):
-    """A resume at an epoch's last update builds DDP inside validation, then trains."""
+    """A resume at an epoch's last update validates without the DDP wrapper, then trains."""
     cfg = copy.deepcopy(minimal_config)
     cfg.training.distributed = True
     cfg.training.iterations_per_train_epoch = 1

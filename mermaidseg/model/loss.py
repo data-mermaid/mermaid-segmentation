@@ -1,10 +1,12 @@
 """Classification and concept-bottleneck losses."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 
+from mermaidseg.config import lookup_class
 from mermaidseg.dataset_reconciliation.concept_ranks import (
     TAXONOMIC_CONCEPTS,
     binary_offset,
@@ -225,3 +227,23 @@ class ConceptBottleneckLoss(torch.nn.Module):
 LOSS_CLASSES: dict[str, type[ConceptBottleneckLoss]] = {
     "ConceptBottleneckLoss": ConceptBottleneckLoss,
 }
+
+
+def build_loss(
+    loss_cfg: Mapping[str, Any], concept_value2id: dict[str, dict[str, list[int]]]
+) -> ConceptBottleneckLoss:
+    """The loss that ``training.loss`` names, over the run's concept layout.
+
+    Args:
+        loss_cfg: The ``training.loss`` section: ``type`` plus the loss class's keyword
+            arguments. It is not modified.
+        concept_value2id: Concept name to value-to-id mapping, used unless ``loss_cfg``
+            sets its own.
+
+    Raises:
+        ValueError: If ``type`` is not a key of ``LOSS_CLASSES``.
+    """
+    loss_kwargs = dict(loss_cfg)
+    loss_cls = lookup_class(LOSS_CLASSES, "loss", loss_kwargs.pop("type"))
+    loss_kwargs.setdefault("concept_value2id", concept_value2id)
+    return loss_cls(**loss_kwargs)

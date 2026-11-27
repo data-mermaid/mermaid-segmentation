@@ -5,9 +5,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import torch
-from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 
 from mermaidseg.logger import Logger
@@ -18,8 +16,8 @@ from mermaidseg.model.meta import MetaModel
 def run_epoch(
     meta_model: MetaModel,
     evaluator: Evaluator,
-    train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None,
+    train_loader: DataLoader[tuple[torch.Tensor, ...]],
+    val_loader: DataLoader[tuple[torch.Tensor, ...]] | None,
     logger: Logger | None,
     *,
     epoch: int,
@@ -111,7 +109,7 @@ def run_epoch(
 def _log_metric_dict(
     logger: Logger | None,
     prefix: str,
-    metric_results: dict[str, float | NDArray[np.float64]],
+    metric_results: dict[str, float],
     step: int,
 ) -> None:
     if logger is None or not metric_results:
