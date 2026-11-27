@@ -95,7 +95,11 @@ class LabelSpace:
 
         Args:
             offsets: Global offset of each dataset in ``source_labels``.
+
+        Raises:
+            ValueError: Two datasets produce the same global id.
         """
+        _check_global_ids(self.source_labels, offsets)
         labels = self.source_labels
         global_ids = [
             offsets[d] + int(i) for d, i in zip(labels["dataset"], labels["label_id"], strict=True)
@@ -431,7 +435,7 @@ def _cases(
     rank_of = dict(zip(space.concepts["name"], space.concepts["rank"], strict=True))
     cases: dict[tuple[str, str, str], str] = {}
     for row in space.source_labels.itertuples(index=False):
-        if row.concept_status == "missing":
+        if row.concept_status == "missing" and not row.drop_reason:
             cases[(row.dataset, row.native_name, "missing_concepts")] = (
                 f"no concept row for key {row.concept_key!r}"
             )
@@ -464,10 +468,11 @@ def check_label_space(
 ) -> None:
     """Refuse a label space with unacknowledged cases, or acknowledgements that match none.
 
-    Cases are a label without a concept row (``missing_concepts``), and a label whose true rank
+    Cases are a label that trains a class but has no concept row (``missing_concepts``), and a label whose true rank
     channel names a MERMAID benthic attribute that is neither its target nor an ancestor of it
     (``rank_disagreement``). A rank value naming no attribute, and a label without a target, are
-    not checked. Drops to background are not cases.
+    not checked. A label that drops to background is never a case, so an acknowledgement of one is
+    stale.
 
     Args:
         space: The label space.

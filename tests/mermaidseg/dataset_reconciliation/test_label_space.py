@@ -319,19 +319,29 @@ def test_a_rank_value_removed_to_not_given_leaves_that_ranks_channels_zero(
     assert source_to_concepts[1].tolist() == [2, 1, 2, 1, 2, 1, 1, 2, 2, 1, 1, 0, 0, 1, 2, 1]
 
 
-def test_lookups_refuse_offsets_that_give_two_datasets_one_global_id(tmp_path: Path) -> None:
-    space = _resolve(tmp_path, [_label(1, "sand", "Sand")], subset=["Sand"])
+@pytest.mark.parametrize(
+    ("mermaid_label_id", "mermaid_offset"),
+    [(3, 0), (1, 2)],
+    ids=["same-offset", "overlapping-range"],
+)
+def test_lookups_refuse_offsets_that_give_two_datasets_one_global_id(
+    tmp_path: Path, mermaid_label_id: int, mermaid_offset: int
+) -> None:
+    space = _resolve(tmp_path, [_label(3, "sand", "Sand")], subset=["Sand"])
     both = LabelSpace(
         classes=space.classes,
         concepts=space.concepts,
         source_labels=pd.concat(
-            [space.source_labels, space.source_labels.assign(dataset="mermaid")]
+            [
+                space.source_labels,
+                space.source_labels.assign(dataset="mermaid", label_id=mermaid_label_id),
+            ]
         ),
         meta={},
     )
 
-    with pytest.raises(ValueError, match=r"global id 1.*coralnet.*mermaid"):
-        both.lookups({"coralnet": 0, "mermaid": 0})
+    with pytest.raises(ValueError, match=r"global id 3.*coralnet.*mermaid"):
+        both.lookups({"coralnet": 0, "mermaid": mermaid_offset})
 
 
 # ---------- write_label_space / read_label_space ----------
@@ -482,7 +492,7 @@ def test_drops_to_background_do_not_raise(tmp_path: Path) -> None:
 
 def test_every_unacknowledged_case_is_reported_in_one_error(tmp_path: Path) -> None:
     labels = [_label(1, "zzz", "Sand"), _label(2, "porites", "Acropora")]
-    space = _resolve(tmp_path, labels, subset=["Acropora"])
+    space = _resolve(tmp_path, labels, subset=["Acropora", "Sand"])
 
     with pytest.raises(ValueError) as error:
         check_label_space(space, _NO_ACKS, _HIERARCHY)
@@ -491,8 +501,20 @@ def test_every_unacknowledged_case_is_reported_in_one_error(tmp_path: Path) -> N
     assert "rank_disagreement" in str(error.value)
 
 
-def test_a_stale_acknowledgement_raises(tmp_path: Path) -> None:
-    space = _resolve(tmp_path, [_label(1, "sand", "Sand")], subset=["Sand"])
+@pytest.mark.parametrize(
+    ("native_name", "attribute"),
+    [
+        ("ghost", None),  # no such label
+        ("zzz", None),  # unmapped: drops, so it is no case
+        ("zzz", "Porites"),  # not in the subset: drops, so it is no case
+    ],
+    ids=["unknown-label", "dropped-unmapped", "dropped-not-in-subset"],
+)
+def test_a_stale_acknowledgement_raises(
+    tmp_path: Path, native_name: str, attribute: str | None
+) -> None:
+    labels = [_label(1, "sand", "Sand"), _label(2, "zzz", attribute)]
+    space = _resolve(tmp_path, labels, subset=["Sand"])
 
-    with pytest.raises(ValueError, match=r"stale.*ghost"):
-        check_label_space(space, _acks(("coralnet", "ghost", "missing_concepts")), _HIERARCHY)
+    with pytest.raises(ValueError, match=rf"stale.*{native_name}"):
+        check_label_space(space, _acks(("coralnet", native_name, "missing_concepts")), _HIERARCHY)
