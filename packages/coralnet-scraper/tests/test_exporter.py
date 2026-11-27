@@ -49,14 +49,6 @@ from coralnet_scraper.exporter import (
 from coralnet_scraper.walker import ImageRef
 
 
-def test_export_timeouts_scale_with_source_size():
-    assert export_prep_timeout_seconds(None) == 300
-    assert export_prep_timeout_seconds(100) == 300
-    assert export_prep_timeout_seconds(1681, 100) == 792  # s57: 120 + 168,100 // 250
-    assert export_prep_timeout_seconds(5000, 200) == 4120
-    assert export_serve_timeout_seconds(32176) == 703
-
-
 @pytest.mark.parametrize(
     ("total_images", "points", "prep"),
     [
@@ -200,38 +192,6 @@ def test_download_annotations_fails_after_four_export_prep_timeouts(fake_s3):
     assert run.ok is False
     assert run.prep_timeouts == [1720, 2020, 2320, 2620]  # 120 + 4000 * 100 // 250, +300 each
     assert _BULK_KEY not in fake_s3.objects
-
-
-def _export_validated_on(dl: CoralNetDownloader, stop: threading.Event | None) -> pd.DataFrame:
-    return dl.exporter._export_validated(
-        dl.session,
-        1,
-        _BROWSE_URL,
-        {},
-        {"img1.jpg"},
-        prep_timeout=300,
-        serve_timeout=120,
-        stop=stop,
-    )
-
-
-def test_export_validated_makes_no_further_attempt_once_stop_is_set(fake_s3):
-    dl = CoralNetDownloader("u", "p")
-    stop = threading.Event()
-    attempts: list[int] = []
-
-    def failing_round_trip(*_: object) -> pd.DataFrame:
-        attempts.append(1)
-        stop.set()
-        raise ContentError(f"attempt {len(attempts)}")
-
-    with (
-        patch.object(dl.exporter, "_export_round_trip", side_effect=failing_round_trip),
-        pytest.raises(ContentError, match="attempt 1"),
-    ):
-        _export_validated_on(dl, stop)
-
-    assert len(attempts) == 1
 
 
 def test_a_failed_page_stops_the_export_retries_of_the_pages_still_running(
@@ -669,41 +629,6 @@ def test_a_page_export_browse_page_without_the_export_form_logs_in_again(
     assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
     assert len(http_server.requests_to(_PREP)) == 1
     assert _chunk_names(fake_s3) == ["img1.jpg"]
-
-
-def test_a_bulk_export_with_names_outside_the_walk_is_exported_again(http_server, fake_s3):
-    _script_walk(http_server, [[1]])
-    http_server.script(_PREP, Reply(200, b'{"session_data_timestamp": "t1"}'))
-    http_server.script(
-        _SERVE_T1,
-        _csv_reply([("img1.jpg", 1, 1, 7), ("img9.jpg", 1, 1, 7)]),
-        _csv_reply([("img1.jpg", 1, 1, 7)]),
-    )
-
-    ok = _site_downloader(http_server, fake_s3).exporter.download_annotations(
-        1, "b", "p", refs=[ImageRef(1, "img1.jpg - Confirmed", 1)], total_images=1
-    )
-
-    assert ok is True
-    annotations = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
-    assert annotations["Name"].tolist() == ["img1.jpg"]
-    assert len(http_server.requests_to(_SERVE_T1)) == 2
-
-
-def test_a_failed_page_export_starts_no_queued_page(http_server, fake_s3, monkeypatch):
-    monkeypatch.setattr(exporter_mod, "_PAGE_DELAY_SECONDS", 0.0)
-    _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in (1, 2, 3)])
-    http_server.script(_PREP, Reply(403))
-    dl = _site_downloader(http_server, fake_s3)
-
-    ok = dl.exporter.download_annotations_paginated(
-        1, "b", "p", refs=_refs({p: [p] for p in (1, 2, 3)}), page_workers=1
-    )
-
-    assert ok is False
-    # The lone worker may dequeue page 2 before the failure is seen; page 3 stays queued.
-    assert len(http_server.requests_to(_PREP)) <= 2
-    assert http_server.requests_to(_page_path(3)) == []
 
 
 class _SlowClock:

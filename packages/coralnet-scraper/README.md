@@ -89,7 +89,7 @@ A source fails when:
 - the source overview page could not be fetched (`overview fetch failed: <exception class>: <message>`, for 5xx responses, timeouts and connection errors). This failure counts toward the circuit breaker;
 - an exception was raised for it, as above.
 
-At the end the run logs a summary at error level: the number of failed sources, then one line per error kind with the sorted source ids. Image kinds give the image count per source, for example `images_missing_url: 202 (14 images)`. A failed source with no error code is listed under `no_error_code`.
+At the end the run logs a summary at error level: the number of failed sources, then one line per error kind with the sorted source ids. Image kinds give the image count per source, for example `images_missing_url: 202 (14 images)`.
 
 Exit code:
 
@@ -131,7 +131,7 @@ The scraper accepts a response only when its content is valid. A status of 200 i
 
   The image unit repeats the resolve step, so an expired pre-signed URL is resolved again. Waits are 5 to 120 s with jitter. There is no cap on total retry time. A page-level walk failure resumes from the last walk checkpoint. A count mismatch redoes the walk. These retries sit on top of the transport retries above, so one image can make up to about 4 × 6 requests. The first bulk `export_prep` read timeout is sized from the estimated annotation rows: the overview's image count times its points per image (100 when the overview gives none), at 250 rows/s plus 120 s, within 300 to 7200 s. After an `export_prep` read timeout, the next attempt waits an extra 60 s, because CoralNet may still be building the export. Once one page export fails, the other pages make no further attempts.
 - **Image-stage stop.** After 20 images in a row fail, the scraper skips the remaining queued images and the source gets `images_outage`.
-- **Circuit breaker.** After 5 consecutive outage-type failures the breaker trips. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `overview_forbidden`, `overview_total_missing`, `annotations_failed`, `image_list_failed` and `images_outage`. Other failed sources, for example `cannot access source <id>: <reason>`, `export_empty`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. A source skipped because it is complete neither counts toward the streak nor resets it.
+- **Circuit breaker.** After 5 consecutive outage-type failures the breaker trips. Outage-type failures are a raised exception, `login failed`, `overview fetch failed …`, `overview_forbidden`, `overview_total_missing`, `annotations_failed`, `image_list_failed` and `images_outage`. Other failed sources, for example `cannot access source <id>: <reason>`, `export_empty`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. A source skipped because it is complete neither counts toward the streak nor resets it.
 
   After a trip the run logs `Circuit breaker tripped: …` and waits `--breaker-cooldown` seconds (default 600) before the next source it does not skip as complete. That source is the probe:
 

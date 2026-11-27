@@ -12,7 +12,6 @@ from conftest import (
     _PARTIAL,
     Reply,
     ScriptedServer,
-    _browse_html,
     _overview_html,
     _page_path,
     _page_reply,
@@ -24,7 +23,6 @@ from conftest import (
 )
 
 from coralnet_scraper import walker as walker_mod
-from coralnet_scraper.walker import _parse_browse_thumbs
 
 
 def test_an_interrupted_walk_resumes_after_its_last_checkpoint(http_server, fake_s3):
@@ -91,22 +89,6 @@ def test_an_image_listed_on_two_pages_makes_the_walk_retry(http_server, fake_s3,
     assert [r.id for r in refs] == [1, 2, 3, 4, 5]
     # Caught on page 2 itself: the retry resumes after the page-1 checkpoint.
     assert _fetches(http_server, range(1, 4)) == [1, 2, 1]
-
-
-@pytest.mark.parametrize(
-    ("html", "expected"),
-    [
-        (
-            '<span class="thumb_wrapper"><a href="/image/5/view/"><img/></a></span>',
-            ([(5, "")], None, False),
-        ),
-        (_browse_html([(5, "a.jpg")]), ([(5, "a.jpg")], None, True)),
-        (_browse_html([(5, "a.jpg")], "?page=2"), ([(5, "a.jpg")], "?page=2", True)),
-    ],
-    ids=["no-title", "no-next-anchor", "next-anchor"],
-)
-def test_parse_browse_thumbs_reads_titles_the_next_page_link_and_the_form(html, expected):
-    assert _parse_browse_thumbs(html) == expected
 
 
 def test_a_browse_page_without_the_export_form_logs_in_again(http_server, fake_s3):

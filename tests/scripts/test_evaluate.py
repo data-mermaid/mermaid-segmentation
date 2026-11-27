@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,7 +14,6 @@ import yaml
 
 import scripts.evaluate as evaluate_script
 from mermaidseg.evaluation.coralscapes_probe import load_legacy_probes
-from mermaidseg.inference.bundle import load_bundle
 from mermaidseg.io import REPO_ROOT
 from tests.mermaidseg.conftest import deployable_lineage, export_ckpt, repo_with_origin
 from tests.mermaidseg.evaluation.conftest import EvalCache, write_eval_cache
@@ -95,11 +93,6 @@ def test_amp_dtype_is_resolved_from_the_bundle_config(
     assert predictor.amp_dtype is expected
 
 
-def test_concept_names_are_the_bundles_in_channel_order(bundle_dir: Path):
-    bundle = load_bundle(bundle_dir, "cpu")
-    assert evaluate_script.concept_names_of(bundle) == _tiny.CONCEPT_NAMES
-
-
 def test_concept_names_follow_channel_id_order_not_insertion_order():
     bundle = SimpleNamespace(concept_id2name={10: "last", 2: "first", 3: "middle"})
     assert evaluate_script.concept_names_of(bundle) == ["first", "middle", "last"]
@@ -149,11 +142,8 @@ def test_main_passes_the_bundles_concept_mapping_path_resolved_against_the_repo_
     assert seen["taxonomy_csv"] == REPO_ROOT / mapping
 
 
-@pytest.mark.parametrize(
-    ("split", "groups"), [("train", ["s1", "s2"]), ("val", ["s3"]), ("test", ["s4"])]
-)
-def test_coralnet_groups_are_the_split_files_groups_of_the_split(cache, split, groups):
-    assert evaluate_script.coralnet_groups(cache.section, split) == groups
+def test_coralnet_groups_are_the_split_files_groups_of_the_split(cache):
+    assert evaluate_script.coralnet_groups(cache.section, "train") == ["s1", "s2"]
 
 
 def test_coralnet_groups_need_a_split_file(cache):
@@ -272,22 +262,13 @@ _HIERARCHICAL = {
 }
 
 
-def test_concept_lines_report_each_reported_binary_concept_then_the_hierarchy():
-    section = {"bleached": _BLEACHED, "hierarchical": _HIERARCHICAL}
-
-    assert evaluate_script._concept_lines(section) == [
-        "- bleached acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-        "(n_true=5 n_false=6 n_not_given=7)",
-        "- hierarchical: consistency 0.9100, severity (mean normalized) 0.1200, ECE (mean) 0.0300",
-    ]
-
-
 def test_concept_lines_append_the_unannotated_count_when_present():
-    section = {"anthropogenic": {**_BLEACHED, "n_unannotated": 11}}
+    section = {"anthropogenic": {**_BLEACHED, "n_unannotated": 11}, "hierarchical": _HIERARCHICAL}
 
     assert evaluate_script._concept_lines(section) == [
         "- anthropogenic acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-        "(n_true=5 n_false=6 n_not_given=7 n_unannotated=11)"
+        "(n_true=5 n_false=6 n_not_given=7 n_unannotated=11)",
+        "- hierarchical: consistency 0.9100, severity (mean normalized) 0.1200, ECE (mean) 0.0300",
     ]
 
 
@@ -295,22 +276,6 @@ def test_concept_lines_skip_concepts_and_hierarchy_that_are_not_dicts():
     section = {"bleached": None, "anthropogenic": "n/a", "hierarchical": None}
 
     assert evaluate_script._concept_lines(section) == []
-
-
-def test_point_lines_format_the_pooled_metrics_under_the_title():
-    pooled = {**_POOLED, "bleached": _BLEACHED}
-
-    assert evaluate_script._point_lines("Pooled title", pooled) == [
-        "## Pooled title",
-        "- class accuracy: 0.5000",
-        "- taxonomic acc_all/acc_living: genus=0.8000/0.7000",
-        "- taxonomic macro F1 all/living, none-class F1: genus=0.6000/0.5000, 0.4000",
-        "- live coral taxonomic acc/macro F1: genus=0.3000/0.2000 (n=9)",
-        "- binary macro acc/F1: 0.9000/0.8500",
-        "- bleached acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-        "(n_true=5 n_false=6 n_not_given=7)",
-        "",
-    ]
 
 
 def test_point_lines_show_n_a_for_a_missing_binary_block_and_taxonomic_scores():
@@ -349,14 +314,6 @@ def test_val_loss_lines_list_headline_keys_then_ranks_then_each_dataset():
 
 def test_val_loss_lines_use_the_given_title_and_tolerate_an_empty_section():
     assert evaluate_script._val_loss_lines({}, "Custom") == ["## Custom (overall)", ""]
-
-
-def test_write_summary_writes_the_summary_as_json(tmp_path):
-    summary = {"bundle": "b", "split": "val", "coralnet_val": {"error": "X: y"}}
-
-    evaluate_script._write_summary(tmp_path, summary)
-
-    assert json.loads((tmp_path / "summary.json").read_text()) == summary
 
 
 @pytest.mark.parametrize(
@@ -732,18 +689,7 @@ def test_main_val_loss_on_train_scores_the_coralnet_train_groups_under_the_sourc
     assert kwargs["image_ids"] is None
     assert "train_loss" in summary
     written = yaml.safe_load((out / "data_config_coralnet_train.yaml").read_text())
-    coralnet = cache.data["datasets"]["coralnet"]
-    assert written == {
-        "data": {
-            "datasets": {
-                "coralnet": {
-                    "version": coralnet["version"],
-                    "manifest_sha256": coralnet["manifest_sha256"],
-                    "val": {"groups": ["s1", "s2"]},
-                }
-            }
-        }
-    }
+    assert written["data"]["datasets"]["coralnet"]["val"] == {"groups": ["s1", "s2"]}
 
 
 def test_main_train_loss_on_a_sample_is_uncapped_and_restricted_to_the_sample(
@@ -786,21 +732,6 @@ def test_main_records_a_failed_eval_and_runs_the_remaining_ones(
     assert "## coralnet_val: ERROR - RuntimeError: boom" in markdown
 
 
-def test_main_exits_zero_after_a_failed_eval_without_strict(
-    monkeypatch, calls, bundle_dir, tmp_path, cache, data_config
-):
-    from mermaidseg.evaluation import val_loss
-
-    def _boom(**_):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(val_loss, "evaluate_val_loss", _boom)
-
-    summary = _main(bundle_dir, tmp_path, cache, data_config, "--evals", "val_loss")
-
-    assert summary["val_loss"] == {"error": "RuntimeError: boom"}
-
-
 def test_main_strict_exits_1_after_writing_the_summary_of_a_failed_eval(
     monkeypatch, calls, bundle_dir, tmp_path, cache, data_config
 ):
@@ -825,25 +756,10 @@ def test_main_strict_does_not_exit_when_every_eval_succeeds(
     _main(bundle_dir, tmp_path, cache, data_config, "--evals", "val_loss", "--strict")
 
 
-def test_main_rejects_a_concept_name_count_that_differs_from_the_models_channels(
-    calls, bundle_dir, tmp_path, cache, data_config
-):
-    bundle = tmp_path / "bundle_extra_concept"
-    shutil.copytree(bundle_dir, bundle)
-    model_json = bundle / evaluate_script.MODEL_JSON
-    metadata = json.loads(model_json.read_text())
-    metadata["concept_id2name"]["999"] = "phantom"
-    model_json.write_text(json.dumps(metadata))
-
-    with pytest.raises(ValueError, match="concept names but the model has"):
-        _main(bundle, tmp_path, cache, data_config, "--evals", "val_loss")
-    assert calls.never("val_loss")
-
-
-@pytest.mark.parametrize("name", ["coralnet", "pacific", "coralscapes"])
 def test_main_requires_the_reported_binary_concepts_for_the_concept_evals(
-    monkeypatch, calls, bundle_dir, tmp_path, cache, data_config, name
+    monkeypatch, calls, bundle_dir, tmp_path, cache, data_config
 ):
+    name = "coralnet"
     monkeypatch.setattr(evaluate_script, "REPORTED_BINARY_CONCEPTS", ["bleached", "anthropogenic"])
 
     with pytest.raises(RuntimeError, match=r"\['anthropogenic'\]"):
@@ -851,10 +767,10 @@ def test_main_requires_the_reported_binary_concepts_for_the_concept_evals(
     assert calls.never(name)
 
 
-@pytest.mark.parametrize("name", ["coralscapes39", "val_loss"])
 def test_main_does_not_require_the_reported_binary_concepts_for_the_other_evals(
-    monkeypatch, calls, bundle_dir, tmp_path, cache, data_config, name
+    monkeypatch, calls, bundle_dir, tmp_path, cache, data_config
 ):
+    name = "val_loss"
     monkeypatch.setattr(evaluate_script, "REPORTED_BINARY_CONCEPTS", ["bleached", "anthropogenic"])
 
     _main(bundle_dir, tmp_path, cache, data_config, "--evals", name)

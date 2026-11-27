@@ -53,15 +53,13 @@ def _no_stamina_backoff() -> Iterator[None]:
 class Reply:
     """One scripted HTTP answer; ``delay_s`` stalls before the status line is sent.
 
-    A ``Content-Length`` in ``headers`` replaces the true body length. ``trickle_s`` sends
-    the body one byte at a time, sleeping that long between bytes.
+    A ``Content-Length`` in ``headers`` replaces the true body length.
     """
 
     status: int = 200
     body: bytes = b""
     headers: dict[str, str] = field(default_factory=dict)
     delay_s: float = 0.0
-    trickle_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -98,12 +96,7 @@ class ScriptedServer:
                     if "Content-Length" not in reply.headers:
                         self.send_header("Content-Length", str(len(reply.body)))
                     self.end_headers()
-                    if not reply.trickle_s:
-                        self.wfile.write(reply.body)
-                    for i in range(len(reply.body) if reply.trickle_s else 0):
-                        self.wfile.write(reply.body[i : i + 1])
-                        self.wfile.flush()
-                        time.sleep(reply.trickle_s)
+                    self.wfile.write(reply.body)
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # the client gave up waiting (read-timeout scripts)
 

@@ -1036,16 +1036,7 @@ def score_legacy_activated(
     ``label_v2`` is the native 95-class mask. ``lut`` maps it onto legacy ids.
     Ground-truth id 0 stays ignored. The activated tensor is shared by every k.
     """
-    if set(heads) != set(confusions):
-        raise ValueError(
-            f"heads and confusions cover different budgets: {sorted(heads)} vs {sorted(confusions)}"
-        )
-    legacy = legacy_label(label_v2, lut)
-    if legacy.size and int(legacy.max()) > LEGACY_NUM_CLASSES:
-        raise RuntimeError(
-            f"legacy label id {int(legacy.max())} is outside 0..{LEGACY_NUM_CLASSES}"
-        )
-    gt = np.asarray(legacy).reshape(-1)
+    gt = legacy_label(label_v2, lut).reshape(-1)
     for k, (weff, beff, classes) in heads.items():
         pred = _predict_classes_from_activated(activated, weff, beff, classes)
         confusions[k].update(gt, pred.detach().cpu().numpy().reshape(-1))

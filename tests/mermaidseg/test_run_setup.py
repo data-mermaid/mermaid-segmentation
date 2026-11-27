@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from types import SimpleNamespace
 
 import albumentations as A
 import pytest
@@ -18,7 +17,6 @@ from mermaidseg.run_setup import (
     MODEL_CHECKPOINT_KEYS,
     build_registry,
     concept_removal_list,
-    load_model_weights,
     load_run_concept_source_mask,
     read_checkpoint,
     target_labels,
@@ -48,27 +46,6 @@ def _save_checkpoint(path: Path, state_dict: dict, config: dict | None = None) -
     return path
 
 
-def test_load_model_weights_copies_the_saved_weights(tmp_path):
-    source = torch.nn.Linear(2, 2)
-    path = _save_checkpoint(tmp_path / "ckpt.pt", source.state_dict(), {"seed": 3})
-    target = torch.nn.Linear(2, 2)
-    load_model_weights(
-        SimpleNamespace(model=target),  # type: ignore[arg-type]
-        read_checkpoint(path, MODEL_CHECKPOINT_KEYS),
-    )
-    torch.testing.assert_close(target.weight, source.weight)
-
-
-def test_load_model_weights_rejects_a_state_dict_missing_a_model_key(tmp_path):
-    state = torch.nn.Linear(2, 2).state_dict()
-    del state["bias"]
-    checkpoint = read_checkpoint(
-        _save_checkpoint(tmp_path / "ckpt.pt", state), ("model_state_dict",)
-    )
-    with pytest.raises(RuntimeError, match="Missing key"):
-        load_model_weights(SimpleNamespace(model=torch.nn.Linear(2, 2)), checkpoint)  # type: ignore[arg-type]
-
-
 def test_read_checkpoint_refuses_a_checkpoint_that_pickles_a_compose_naming_the_file(tmp_path):
     path = _save_checkpoint(
         tmp_path / "ckpt.pt",
@@ -87,34 +64,28 @@ def test_read_checkpoint_names_the_file_and_the_missing_key(tmp_path):
         read_checkpoint(path, MODEL_CHECKPOINT_KEYS)
 
 
-@pytest.mark.parametrize("path", [None, ""])
+@pytest.mark.parametrize("path", [None])
 def test_concept_removal_list_is_empty_without_a_removal_file(path):
     assert concept_removal_list({"concept_removal": path}, "unused.csv") == []
 
 
-@pytest.mark.parametrize("path", [None, ""])
+@pytest.mark.parametrize("path", [None])
 def test_no_concept_source_mask_path_loads_no_mask(path):
     training_cfg = ConfigDict({"concept_source_mask": path})
     assert load_run_concept_source_mask(training_cfg, schema=None) is None  # type: ignore[arg-type]
 
 
-def test_target_labels_are_lower_cased():
-    assert target_labels(ConfigDict({"class_subset": ["Sand", "ACROPORA"]})) == [
-        "acropora",
-        "sand",
-    ]
-
-
-def test_target_labels_drop_duplicates_that_differ_only_in_case():
-    assert target_labels(ConfigDict({"class_subset": ["Sand", "sand", "SAND"]})) == ["sand"]
-
-
-def test_target_labels_are_sorted_whatever_the_config_order():
-    assert target_labels(ConfigDict({"class_subset": ["sand", "porites", "acropora"]})) == [
-        "acropora",
-        "porites",
-        "sand",
-    ]
+@pytest.mark.parametrize(
+    ("class_subset", "expected"),
+    [
+        (["Sand", "ACROPORA"], ["acropora", "sand"]),
+        (["Sand", "sand", "SAND"], ["sand"]),
+        (["sand", "porites", "acropora"], ["acropora", "porites", "sand"]),
+    ],
+    ids=["lower-cased", "case-duplicates", "sorted"],
+)
+def test_target_labels_are_the_lower_cased_unique_sorted_class_subset(class_subset, expected):
+    assert target_labels(ConfigDict({"class_subset": class_subset})) == expected
 
 
 # ---------- build_registry ----------

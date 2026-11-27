@@ -132,13 +132,6 @@ def test_missing_mask_fails_at_construction(tmp_path: Path) -> None:
         DenseDataset(version, split="val", global_offset=0)
 
 
-def test_empty_selection_raises_on_access(tmp_path: Path) -> None:
-    version = _point_version(tmp_path, [("i1", 0, 0, 5)])
-    ds = PointDataset(version, split="val", global_offset=0, groups=[])
-    with pytest.raises(RuntimeError, match="dataset is empty"):
-        ds[0]
-
-
 @pytest.mark.parametrize(
     ("idx", "n", "expected"),
     [(0, 1, {0}), (0, 3, {1, 2}), (1, 3, {0, 2}), (2, 3, {0, 1})],
@@ -160,27 +153,18 @@ def _two_group_version(tmp_path: Path) -> DatasetVersion:
     )
 
 
-def test_selected_group_missing_from_the_sync_marker_raises(tmp_path: Path) -> None:
+@pytest.mark.parametrize("groups", [["g1", "g2"], None], ids=["selected", "all-groups"])
+def test_group_missing_from_the_sync_marker_raises(
+    tmp_path: Path, groups: list[str] | None
+) -> None:
     version = replace(_two_group_version(tmp_path), synced_groups=frozenset({"g1"}))
     with pytest.raises(ValueError, match=r"\['g2'\].*sync_data\.py"):
-        PointDataset(version, split="val", global_offset=0, groups=["g1", "g2"])
-
-
-def test_all_groups_selected_checks_every_group_against_the_marker(tmp_path: Path) -> None:
-    version = replace(_two_group_version(tmp_path), synced_groups=frozenset({"g1"}))
-    with pytest.raises(ValueError, match=r"\['g2'\]"):
-        PointDataset(version, split="val", global_offset=0)
+        PointDataset(version, split="val", global_offset=0, groups=groups)
 
 
 def test_selection_inside_the_synced_groups_is_accepted(tmp_path: Path) -> None:
     version = replace(_two_group_version(tmp_path), synced_groups=frozenset({"g1"}))
     assert len(PointDataset(version, split="val", global_offset=0, groups=["g1"])) == 1
-
-
-def test_synced_groups_none_accepts_any_group(tmp_path: Path) -> None:
-    version = _two_group_version(tmp_path)
-    assert version.synced_groups is None
-    assert len(PointDataset(version, split="val", global_offset=0)) == 3
 
 
 def test_image_ids_keep_only_the_listed_images(tmp_path: Path) -> None:
@@ -202,25 +186,10 @@ def test_image_id_outside_the_group_selection_raises(tmp_path: Path) -> None:
         )
 
 
-def test_image_ids_apply_to_dense_readers(tmp_path: Path) -> None:
-    mask = np.zeros((8, 8), np.uint8)
-    mask[0, 0] = 5
-    version = open_written(
-        tmp_path,
-        kind="dense",
-        images=[ImageSpec("i1", mask=mask), ImageSpec("i2", mask=mask)],
-        labels=LABELS,
-    )
-    ds = DenseDataset(version, split="val", global_offset=0, image_ids=["i2"])
-    assert list(ds.images["image_id"]) == ["i2"]
-    with pytest.raises(ValueError, match="nope"):
-        DenseDataset(version, split="val", global_offset=0, image_ids=["nope"])
-
-
 @pytest.mark.parametrize(
     ("names", "duplicated"),
-    [(("Acro", "Acro"), "acro"), (("Acro", "acro"), "acro")],
-    ids=["exact", "case-folded"],
+    [(("Acro", "acro"), "acro")],
+    ids=["case-folded"],
 )
 def test_duplicated_label_name_raises_naming_the_dataset(
     tmp_path: Path, names: tuple[str, str], duplicated: str

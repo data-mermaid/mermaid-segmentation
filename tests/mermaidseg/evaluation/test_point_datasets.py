@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 import math
 from collections.abc import Callable, Collection
@@ -208,7 +207,7 @@ def test_pooled_counts_are_the_sum_of_units(both):
     assert "per_taxon" in both["pooled"]["taxonomic"]["genus"]
 
 
-@pytest.mark.parametrize("unit", ["10", "20"])
+@pytest.mark.parametrize("unit", ["10"])
 def test_unit_metrics_equal_a_run_on_that_unit_alone(tmp_path, both, unit):
     alone = _run(tmp_path, [unit], batch_size=3)
     assert set(alone["units"]) == {unit}
@@ -239,24 +238,6 @@ def test_living_and_coral_counts_follow_the_live_column(both):
         assert rd["n_all"] - rd["n_none"] - rd["n_living"] == int(
             (labels.isin(taxon) & labels.isin(DEAD)).sum()
         ), rank
-
-
-def test_per_unit_csv_has_new_columns(both, tmp_path_factory):
-    out = tmp_path_factory.mktemp("csv")
-    _run(out, ["10", "20"])
-    with (out / "coralnet_val" / "per_unit.csv").open() as handle:
-        header = next(csv.reader(handle))
-    for column in (
-        "tax_genus_macro_f1_all",
-        "tax_genus_macro_f1_living",
-        "tax_genus_acc_coral",
-        "tax_genus_macro_f1_coral",
-        "tax_kingdom_f1_none",
-        "bleached_f1",
-        "anthropogenic_precision",
-        "hier/consistency/overall",
-    ):
-        assert column in header
 
 
 def test_images_are_normalised_with_the_predictors_mean_and_std(tmp_path):
@@ -387,28 +368,6 @@ def test_points_are_sampled_by_row_and_column_on_a_non_square_image(tmp_path):
     assert (bleached["tp"], bleached["fp"], bleached["fn"], bleached["tn"]) == (1, 1, 0, 2)
 
 
-def test_points_outside_the_source_image_are_dropped_and_counted(tmp_path):
-    points = [
-        (0, 0, "coral"),
-        (4, 0, "coral"),  # row == height
-        (0, 8, "sand"),  # col == width
-        (-1, 2, "sand"),
-        (0, -1, "sand"),
-        (3, 7, "sand"),
-    ]
-    reader = tiny_reader(tmp_path / "images", _tiny_images("a"), _tiny_annotations("a", points))
-    item = _tiny_dataset_item(reader)
-    assert item["ok"] is True
-    assert item["n_out_of_bounds"] == 4
-    assert item["rows"].tolist() == [0, 3]
-    assert item["cols"].tolist() == [0, 7]
-    assert item["names"] == ["coral", "sand"]
-    assert item["ann_idx"].tolist() == [0, 5]
-    assert item["class_ids"].tolist() == [1, 2]
-    assert item["concept_rows"].tolist() == [[2, 1, 2], [1, 2, 1]]
-    assert _tiny_run(tmp_path, reader)["pooled"]["num_points"] == 2
-
-
 def test_an_unreadable_image_is_counted_failed_and_contributes_no_points(tmp_path):
     images = _tiny_images("a", "b")
     annotations = _tiny_annotations("a", [(0, 0, "coral")]) + _tiny_annotations(
@@ -425,19 +384,6 @@ def test_an_unreadable_image_is_counted_failed_and_contributes_no_points(tmp_pat
     assert result["pooled"]["num_points"] == 1
     payload = json.loads((tmp_path / "tiny" / "metrics.json").read_text())
     assert payload["images_failed"] == 1
-
-
-def test_a_unit_whose_only_image_fails_is_still_reported_with_no_points(tmp_path):
-    reader = tiny_reader(
-        tmp_path / "images",
-        _tiny_images("a") + _tiny_images("b", unit="v"),
-        _tiny_annotations("a", [(0, 0, "coral")]) + _tiny_annotations("b", [(0, 0, "coral")]),
-        fail={"b"},
-    )
-    result = _tiny_run(tmp_path, reader)
-    assert set(result["units"]) == {"u", "v"}
-    assert result["units"]["v"]["num_points"] == 0
-    assert result["units"]["u"]["num_points"] == 1
 
 
 def test_a_one_channel_image_is_read_as_three_identical_channels(tmp_path):

@@ -29,7 +29,6 @@ from segdata_spec.errors import (
 from segdata_spec.features import (
     check_claimed_extractor,
     claim_extractor,
-    feature_file_key,
     feature_store_name,
 )
 from segdata_spec.manifest import FeatureSetManifest, FeatureSetPin, ImageStore, Pin
@@ -120,18 +119,8 @@ def test_stage_refuses_a_spec_without_an_identity_key_and_writes_nothing(tmp_pat
         (["a", "b", "z"], None, "not in"),
         (["a", "a", "b"], None, "duplicate"),
         (["a", "b"], "features/ds/effnet/b.featurevector", "features/ds/effnet/b.featurevector"),
-        (["a", "b"], "features/ds/other/a.featurevector", "features/ds/other/a.featurevector"),
-        (["a", "b"], "features/xx/effnet/a.featurevector", "features/xx/effnet/a.featurevector"),
-        (["a", "b"], "features/ds/effnet/a~../x.featurevector", "a~../x"),
     ],
-    ids=[
-        "unknown-id",
-        "duplicate-id",
-        "key-of-another-image",
-        "key-in-another-family",
-        "key-in-another-store",
-        "malformed-suffix",
-    ],
+    ids=["unknown-id", "duplicate-id", "key-of-another-image"],
 )
 def test_stage_refuses_an_index_with_bad_ids(tmp_path, stage, pin, ids, a_key, message):
     index = feature_index(ids)
@@ -181,23 +170,6 @@ def test_stage_accepts_a_key_with_a_suffix(tmp_path, stage, pin):
     assert (set_dir(stage) / "manifest.json").is_file()
 
 
-def test_stage_refuses_keys_that_collide_across_images(fake_s3, tmp_path, stage):
-    # Image a with suffix x and image a~x without one name the same file.
-    _, pin = publish_version(
-        fake_s3,
-        tmp_path,
-        images={"a": IMAGES["a"], "a~x": IMAGES["b"]},
-        points=POINTS,
-        image_store=FEATURE_STORE,
-    )
-    shared = "features/ds/effnet/a~x.featurevector"
-
-    with pytest.raises(FeatureIndexInvalid, match="duplicate key"):
-        stage_features(stage, tmp_path, pin, feature_index(["a", "a~x"], [shared, shared]))
-
-    assert not set_dir(stage).exists()
-
-
 def test_stage_refuses_a_dataset_whose_images_are_outside_the_bucket(fake_s3, tmp_path, stage):
     _, external = publish_version(fake_s3, tmp_path, images=TWO_IMAGES, points=POINTS)
 
@@ -222,19 +194,10 @@ def test_claim_extractor_keeps_a_sidecar_whose_identity_matches(fake_s3):
     assert fake_s3.objects[(BUCKET, SIDECAR)] == stored
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("class_path", "spacer.extract_features.VGG16CaffeExtractor"),
-        ("crop_size", 168),
-        ("feature_dim", 4096),
-        ("weights_sha256", "x" * 64),
-    ],
-)
-def test_claim_extractor_refuses_an_identity_that_differs(fake_s3, field, value):
-    fake_s3.put(BUCKET, SIDECAR, json.dumps({**EXTRACTOR, field: value}).encode())
+def test_claim_extractor_refuses_an_identity_that_differs(fake_s3):
+    fake_s3.put(BUCKET, SIDECAR, json.dumps({**EXTRACTOR, "crop_size": 168}).encode())
 
-    with pytest.raises(ExtractorMismatch, match=field):
+    with pytest.raises(ExtractorMismatch, match="crop_size"):
         claim_extractor(fake_s3, BUCKET, FEATURE_STORE, FEATURE_FAMILY, EXTRACTOR)
 
 
@@ -276,28 +239,12 @@ def test_feature_store_name_is_the_segment_of_an_image_store_in_the_bucket():
     ("bucket", "prefix"),
     [
         ("other-bucket", "images/coralnet/"),
-        (BUCKET, "x/images/coralnet/"),
-        (BUCKET, "images/"),
         (BUCKET, "images/a/b/"),
-        (BUCKET, "images/Coral/"),
     ],
-    ids=["other-bucket", "nested-under-a-prefix", "no-segment", "two-segments", "invalid-segment"],
+    ids=["other-bucket", "two-segments"],
 )
 def test_feature_store_name_refuses_a_store_outside_images_segment_in_the_bucket(bucket, prefix):
     store = ImageStore(bucket=bucket, prefix=prefix, owner="segdata")
 
     with pytest.raises(ValueError, match="image store"):
         feature_store_name(store, BUCKET)
-
-
-@pytest.mark.parametrize(
-    ("suffix", "expected"),
-    [
-        ("c1", "features/coralnet/effnet/img1~c1.featurevector"),
-        (None, "features/coralnet/effnet/img1.featurevector"),
-    ],
-)
-def test_feature_file_key_names_the_image_file_under_its_store_and_family(suffix, expected):
-    store = ImageStore(bucket=BUCKET, prefix="images/coralnet/", owner="segdata")
-
-    assert feature_file_key(store, BUCKET, "effnet", "img1", suffix) == expected

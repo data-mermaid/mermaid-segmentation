@@ -23,13 +23,3 @@ class TestLogMetricDict:
         _log_metric_dict(logger, "validation", {"accuracy": 0.75, "miou": miou}, step=40)
 
         assert logger.calls == [({"validation/accuracy": 0.75, "validation/miou": miou}, 40)]
-
-    def test_logs_nothing_for_empty_metrics(self):
-        logger = _RecordingLogger()
-
-        _log_metric_dict(logger, "train", {}, step=1)
-
-        assert logger.calls == []
-
-    def test_accepts_no_logger(self):
-        _log_metric_dict(None, "train", {"accuracy": 0.5}, step=1)

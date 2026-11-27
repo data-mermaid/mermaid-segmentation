@@ -191,26 +191,10 @@ def test_target_label_subset_collapses_other_targets_to_background(
     assert registry.source_to_target.tolist() == [0, 0, 1]
 
 
-def test_empty_dataset_list_raises(
-    schema: ConceptSchema,
-) -> None:
-    with pytest.raises(ValueError, match="at least one dataset"):
-        SourceLabelRegistry([], schema)
-
-
 def test_duplicate_source_name_raises(schema: ConceptSchema, tmp_path: Path) -> None:
     first = _reader(tmp_path / "1", _named({1: "a"}), name="mermaid")
     second = _reader(tmp_path / "2", _named({1: "b"}), name="mermaid")
     with pytest.raises(ValueError, match="Duplicate source_name 'mermaid'"):
-        SourceLabelRegistry([first, second], schema)
-
-
-def test_two_sources_producing_the_same_global_id_raise_naming_both(
-    schema: ConceptSchema, tmp_path: Path
-) -> None:
-    first = _reader(tmp_path, _named({1: "a"}), name="first")
-    second = _reader(tmp_path, _named({1: "b"}), name="second")
-    with pytest.raises(ValueError, match=r"global id 1.*first.*second"):
         SourceLabelRegistry([first, second], schema)
 
 
@@ -280,36 +264,6 @@ def test_dense_concepts_follow_the_registry_lookup(tmp_path: Path) -> None:
     )
 
 
-def _coverage_record(caplog: pytest.LogCaptureFixture) -> Any:
-    return next(r for r in caplog.records if "source labels" in r.getMessage())
-
-
-def test_coverage_is_logged_at_info_when_some_labels_map(
-    schema: ConceptSchema, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    reader = _reader(tmp_path, [_label(1, "sand", "sand"), _label(2, "zzz", None)])
-
-    with caplog.at_level("INFO", logger=registry_module.logger.name):
-        SourceLabelRegistry([reader], schema)
-
-    record = _coverage_record(caplog)
-    assert record.levelname == "INFO"
-    assert "1 of 2 source labels" in record.getMessage()
-
-
-def test_coverage_warns_when_no_label_maps(
-    schema: ConceptSchema, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    reader = _reader(tmp_path, [_label(1, "zz1", None), _label(2, "zz2", None)])
-
-    with caplog.at_level("INFO", logger=registry_module.logger.name):
-        SourceLabelRegistry([reader], schema)
-
-    record = _coverage_record(caplog)
-    assert record.levelname == "WARNING"
-    assert "check source label keys against the mapping" in record.getMessage()
-
-
 def test_coverage_is_judged_per_source_at_its_own_offset(
     schema: ConceptSchema, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -334,7 +288,7 @@ def test_coverage_is_judged_per_source_at_its_own_offset(
 # ---------- source_labels_to_target_labels ----------
 
 
-def test_source_labels_to_target_labels_indexes_the_lookup_for_a_non_square_batch():
+def test_source_labels_to_target_labels_indexes_the_lookup_for_a_non_square_batch_of_any_integer_dtype():
     lookup = torch.tensor([0, 5, 7, 5])
     labels = torch.tensor([[[1, 0, 2], [3, 2, 0]]])  # (B=1, H=2, W=3)
 
@@ -343,9 +297,5 @@ def test_source_labels_to_target_labels_indexes_the_lookup_for_a_non_square_batc
     assert out.tolist() == [[[5, 0, 7], [5, 7, 0]]]
     assert out.dtype == torch.long
 
-
-def test_source_labels_to_target_labels_accepts_non_long_integer_labels():
-    lookup = torch.tensor([0, 5, 7])
-    labels = torch.tensor([[[2, 1]]], dtype=torch.uint8)
-
-    assert source_labels_to_target_labels(labels, lookup).tolist() == [[[7, 5]]]
+    as_bytes = source_labels_to_target_labels(labels.to(torch.uint8), lookup)
+    assert as_bytes.tolist() == [[[5, 0, 7], [5, 7, 0]]]

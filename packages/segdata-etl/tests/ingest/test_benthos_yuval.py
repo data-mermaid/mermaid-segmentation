@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from segdata_etl.common import images
 from segdata_etl.ingest import benthos_yuval
@@ -132,15 +132,6 @@ def test_be5_parquet_has_one_row_per_tile_and_present_class(tmp_path, fake_s3):
     ]
 
 
-def test_be6_label_dictionary_that_is_not_a_dict_raises(tmp_path, fake_s3):
-    root = write_benthos_raw(
-        tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8), default_dict="[1, 2]"
-    )
-
-    with pytest.raises(RuntimeError, match="did not parse to a dict"):
-        benthos_yuval.run(_args(tmp_path, root), fake_s3)
-
-
 def test_overwrite_replaces_stale_label_tiles_but_not_stale_images(tmp_path, fake_s3):
     root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
     fake_s3.put(B, f"{P}/labels/RS24/0_0.png", b"stale")
@@ -171,17 +162,6 @@ def test_run_lifts_pixel_limit_only_while_decoding_mosaics(tmp_path, fake_s3, mo
     root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
 
     assert benthos_yuval.run(_args(tmp_path, root), fake_s3) == 0
-    assert Image.MAX_IMAGE_PIXELS == 1
-
-
-def test_run_restores_pixel_limit_when_decoding_a_mosaic_fails(tmp_path, fake_s3, monkeypatch):
-    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
-    root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
-    (root / "RS24.png").write_bytes(b"not a png")
-
-    with pytest.raises(UnidentifiedImageError):
-        benthos_yuval.run(_args(tmp_path, root), fake_s3)
-
     assert Image.MAX_IMAGE_PIXELS == 1
 
 

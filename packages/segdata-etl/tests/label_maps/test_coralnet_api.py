@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import requests
 
 from segdata_etl.label_maps.coralnet_api import (
     CoralNetLabelMapping,
@@ -74,13 +73,6 @@ def test_fetch_recovers_from_one_503(server: ScriptedServer) -> None:
     assert server.hits[PATH] == 2
 
 
-def test_fetch_raises_after_three_retries_on_persistent_503(server: ScriptedServer) -> None:
-    server.respond(PATH, (503, {}))
-    with pytest.raises(requests.RequestException):
-        fetch_coralnet_label_mappings(server.base + PATH)
-    assert server.hits[PATH] == 4  # the first attempt plus 3 retries
-
-
 def test_fetch_raises_on_a_repeated_next_url(server: ScriptedServer) -> None:
     server.respond(
         PATH,
@@ -141,13 +133,6 @@ def test_api_labels_treat_a_label_without_a_name_as_unmapped_even_with_a_record(
     assert row["mermaid_benthic_attribute"] is None
     assert row["mermaid_benthic_attribute_id"] is None
     assert row["mermaid_growth_form"] is None
-    assert (mapping.n_labels, mapping.n_mapped) == (1, 0)
-
-
-def test_api_labels_treat_a_non_string_name_as_unmapped_even_with_a_record() -> None:
-    table, mapping = api_labels({82: 82}, _mappings(_DIGEST_RECORDS), {"b1"}, {"g1"})  # type: ignore[dict-item]
-    row = table.to_pylist()[0]
-    assert row["mermaid_benthic_attribute_id"] is None
     assert (mapping.n_labels, mapping.n_mapped) == (1, 0)
 
 

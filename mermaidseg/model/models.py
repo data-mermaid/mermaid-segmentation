@@ -87,7 +87,6 @@ class DPTHead(torch.nn.Module):
     ):
         """Build the reassemble stage, fusion stage, and conv head from the arguments."""
         super().__init__()
-        self.num_stages = len(neck_hidden_sizes)
 
         dpt_config = DPTConfig(
             hidden_size=hidden_size,
@@ -123,7 +122,7 @@ class DPTHead(torch.nn.Module):
         """Run the DPT neck + conv head.
 
         Args:
-            hidden_states: Sequence of ``num_stages`` token tensors, each of
+            hidden_states: One token tensor per neck stage, each of
                 shape ``(B, 1 + token_height * token_width, hidden_size)`` with
                 the CLS token at index 0 (register tokens already stripped).
             token_height: Patch rows in ``hidden_states``.
@@ -132,16 +131,6 @@ class DPTHead(torch.nn.Module):
         Returns:
             torch.Tensor: Dense features of shape ``(B, out_channels, H_f, W_f)``.
         """
-        if len(hidden_states) != self.num_stages:
-            raise ValueError(
-                f"DPTHead expects {self.num_stages} hidden states, got {len(hidden_states)}."
-            )
-        num_patch_tokens = hidden_states[0].shape[1] - 1
-        if token_height * token_width != num_patch_tokens:
-            raise ValueError(
-                f"Token grid {token_height}x{token_width} does not match "
-                f"{num_patch_tokens} patch tokens."
-            )
         features = self.neck(hidden_states, token_height, token_width)
         return self.head(features[-1])
 

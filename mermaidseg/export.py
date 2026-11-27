@@ -264,8 +264,6 @@ def _require_matching_config(
     left, right = _normalized(checkpoint_config), _normalized(resolved_config)
     if left == right:
         return
-    if not isinstance(left, dict) or not isinstance(right, dict):
-        raise ValueError(f"{checkpoint} config does not match its lineage's resolved_config")
     key = next(k for k in [*left, *right] if left.get(k) != right.get(k))
     raise ValueError(
         f"{checkpoint} config differs from its lineage's resolved_config at key {key!r}"

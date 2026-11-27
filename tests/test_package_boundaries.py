@@ -1,6 +1,7 @@
 """mermaidseg, the CoralNet scraper and segdata-etl must not import each other, except segdata_etl.datasets.coralnet -> coralnet_scraper.
 
-segdata_spec imports none of them, and mermaidseg/inference does not import segdata_spec.
+segdata_spec imports none of them, and mermaidseg/inference does not import segdata_spec. The
+model package reaches no dataset-reconciliation concept-source-mask code.
 """
 
 from __future__ import annotations
@@ -67,6 +68,50 @@ def _violations(source_dirs: list[Path], forbidden: str, exclude: Path | None = 
 )
 def test_no_forbidden_imports(source_dirs, forbidden):
     assert _violations(source_dirs, forbidden) == []
+
+
+def _mermaidseg_imports(path: Path) -> set[str]:
+    """Return the ``mermaidseg`` modules a file imports, including ``from pkg import module``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names if a.name.split(".")[0] == "mermaidseg")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            module = node.module or ""
+            if module.split(".")[0] == "mermaidseg":
+                names.add(module)
+                names.update(f"{module}.{a.name}" for a in node.names)
+    return names
+
+
+def _reachable_modules(start: list[str]) -> set[str]:
+    """Return the ``mermaidseg`` modules reachable from ``start`` through imports and parents."""
+    seen: set[str] = set()
+    todo = list(start)
+    while todo:
+        name = todo.pop()
+        base = _ROOT.joinpath(*name.split("."))
+        path = (
+            base.with_suffix(".py") if base.with_suffix(".py").is_file() else base / "__init__.py"
+        )
+        if name in seen or not path.is_file():
+            continue
+        seen.add(name)
+        todo.extend(_mermaidseg_imports(path))
+        parent = name.rpartition(".")[0]
+        if parent:
+            todo.append(parent)
+    return seen
+
+
+def test_the_model_package_reaches_no_concept_source_mask_code():
+    reached = _reachable_modules(
+        ["mermaidseg.model.models", "mermaidseg.model.meta", "mermaidseg.model.data_parallel"]
+    )
+
+    assert "mermaidseg.dataset_reconciliation.registry" in reached
+    assert "mermaidseg.dataset_reconciliation.concept_source_mask" not in reached
 
 
 @pytest.mark.parametrize(

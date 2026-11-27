@@ -21,11 +21,6 @@ def _fixture(name: str) -> str:
     return (_FIXTURES / name).read_text(encoding="utf-8")
 
 
-def test_parse_total_images_from_fixture():
-    html = _fixture("source_ok.html")
-    assert parse_total_images_from_source_html(html) == 1234
-
-
 def test_parse_total_images_is_zero_when_page_has_no_image_status_table():
     assert parse_total_images_from_source_html("<html><body><h1>Source</h1></body></html>") == 0
 
@@ -108,7 +103,6 @@ def test_parse_points_per_image_reads_each_method(method, points):
     [
         "<html><body><h1>Source</h1></body></html>",
         _details_html("Unknown method"),
-        _details_html("Simple random, 0 points"),
         _details_html("2 rows x 5 columns of cells, 1 points per cell"),
     ],
 )

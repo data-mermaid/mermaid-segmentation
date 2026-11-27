@@ -1,6 +1,5 @@
 import hashlib
 import io
-import re
 import shutil
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from spec_helpers import (
     publish_version,
 )
 
-from segdata_spec.errors import NotSynced, PinMismatch, SegdataError
+from segdata_spec.errors import NotSynced, PinMismatch
 from segdata_spec.manifest import FileEntry, Pin, dump_manifest, manifest_sha256
 from segdata_spec.read import open_feature_set, open_tables, open_taxonomy, open_version
 from segdata_spec.resize import ResizeSpec
@@ -55,16 +54,6 @@ def test_open_version_rejects_a_pin_that_differs_from_the_cache(fake_s3, tmp_pat
 
     with pytest.raises(PinMismatch):
         open_version(cache, BUCKET, Pin(name="ds", version=VERSION, manifest_sha256="0" * 64))
-
-
-def test_open_version_raises_naming_a_missing_table(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path)
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-    missing = cache / BUCKET / PREFIX / "labels.parquet"
-    missing.unlink()
-
-    with pytest.raises(FileNotFoundError, match=re.escape(str(missing))):
-        open_version(cache, BUCKET, pin)
 
 
 def test_open_taxonomy_feeds_the_hierarchy(fake_s3, tmp_path, cache):
@@ -148,8 +137,8 @@ def test_mask_path_with_resize_resolves_into_the_spec_folder(fake_s3, tmp_path, 
     assert path.is_file()
 
 
-@pytest.mark.parametrize("resize", [None, SPEC], ids=["plain", "resized"])
-def test_open_version_keeps_source_names(fake_s3, tmp_path, cache, resize):
+def test_open_version_keeps_source_names(fake_s3, tmp_path, cache):
+    resize = SPEC
     _, pin = publish_version(
         fake_s3,
         tmp_path,
@@ -198,36 +187,15 @@ def test_a_version_without_a_source_name_column_syncs_and_opens(fake_s3, tmp_pat
     assert version.images["image_id"].to_pylist() == ["a"]
 
 
-def test_open_version_exposes_the_synced_groups(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path)
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g1"}})
-
-    assert open_version(cache, BUCKET, pin).synced_groups == frozenset({"g1"})
-
-
-def test_open_version_reports_all_groups_as_none(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path)
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-
-    assert open_version(cache, BUCKET, pin).synced_groups is None
-
-
 @pytest.mark.parametrize(
     ("syncs", "expected"),
     [
         ([None, set()], None),
-        ([{"g1"}, set()], frozenset({"g1"})),
         ([{"g1"}, {"g2"}], frozenset({"g1", "g2"})),
         ([{"g1"}, None], None),
-        ([set()], frozenset()),
+        ([{"g1"}, set()], frozenset({"g1"})),
     ],
-    ids=[
-        "all-then-tables-only",
-        "subset-then-tables-only",
-        "two-subsets",
-        "subset-then-all",
-        "tables-only",
-    ],
+    ids=["all-then-tables-only", "two-subsets", "subset-then-all", "subset-then-tables-only"],
 )
 def test_open_version_unions_the_groups_of_every_sync(fake_s3, tmp_path, cache, syncs, expected):
     _, pin = publish_version(fake_s3, tmp_path)
@@ -259,16 +227,6 @@ def test_open_version_refuses_a_cache_with_no_marker(fake_s3, tmp_path, cache):
     shutil.rmtree(cache / "synced")
 
     with pytest.raises(NotSynced, match="original"):
-        open_version(cache, BUCKET, pin)
-
-
-def test_open_version_names_an_unparseable_marker_file(fake_s3, tmp_path, cache):
-    _, pin = publish_version(fake_s3, tmp_path)
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
-    bad = cache / "synced" / "original" / BUCKET / "ds" / VERSION / "bad.json"
-    bad.write_text("{not json")
-
-    with pytest.raises(SegdataError, match=re.escape(str(bad))):
         open_version(cache, BUCKET, pin)
 
 

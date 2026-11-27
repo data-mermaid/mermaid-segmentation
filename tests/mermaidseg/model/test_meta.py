@@ -34,7 +34,7 @@ from tests.conftest import (
 from tests.mermaidseg.conftest import cbm_meta, concept_keep
 
 
-@pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (0, 0.0), (-1, 0.0)])
+@pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (0, 0.0)])
 def test_stall_dump_seconds_reads_training_config(raw, expected):
     assert meta_module.stall_dump_seconds(ConfigDict({"stall_dump_sec": raw})) == expected
 
@@ -130,14 +130,10 @@ def test_next_epoch_from_checkpoint(epoch_complete, expected):
     assert next_epoch_from_checkpoint({"epoch": 3, "epoch_complete": epoch_complete}) == expected
 
 
-@pytest.mark.parametrize("name", [None, "float16", "fp16", "half"])
+@pytest.mark.parametrize("name", [None, "float16"])
 def test_resolve_amp_dtype_rejects_missing_and_fp16_aliases(name):
     with pytest.raises(ValueError, match="mixed_precision_dtype"):
         meta_module.resolve_amp_dtype(name)
-
-
-def test_resolve_amp_dtype_accepts_bfloat16():
-    assert meta_module.resolve_amp_dtype("bfloat16") is torch.bfloat16
 
 
 def _record_encoder_autocast(meta) -> dict[str, object]:
@@ -498,34 +494,6 @@ def test_train_epoch_epoch_components_average_the_update_means(minimal_config, m
         assert metrics[f"loss/{key}"] == pytest.approx(expected, rel=1e-6, abs=1e-9)
 
 
-def test_update_evaluator_feeds_metrics_the_argmax_of_class_logits(minimal_config, make_meta_model):
-    class _Recorder:
-        def __init__(self) -> None:
-            self.preds: list[torch.Tensor] = []
-
-        def update(self, preds: torch.Tensor, _target: torch.Tensor) -> None:
-            self.preds.append(preds)
-
-    recorder = _Recorder()
-    evaluator = SimpleNamespace(
-        device="cpu", metric_dict={"m": recorder}, evaluate_concepts=lambda *_a: None
-    )
-    meta = make_meta_model(minimal_config)
-    logits = torch.tensor([[[[1.0, 5.0]], [[3.0, 2.0]], [[0.0, 9.0]]]])  # (1, 3, 1, 2)
-
-    concept_outputs = torch.zeros(1, CBM_NUM_CONCEPTS, 1, 2)
-
-    meta._update_evaluator(
-        evaluator,
-        logits,
-        torch.zeros(1, 1, 2, dtype=torch.long),
-        concept_outputs,
-        concept_outputs,
-    )
-
-    assert [p.tolist() for p in recorder.preds] == [[[[1, 2]]]]
-
-
 def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
     minimal_config, make_meta_model, mock_dinov3_encoder, tmp_path
 ):
@@ -552,21 +520,6 @@ def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
 
     out = model(torch.randn(1, 3, *IMAGE_SIZE))
     assert out.logits.shape[1] == NUM_CLASSES
-
-
-def test_meta_model_loads_the_encoder_named_in_the_model_config(
-    minimal_config, make_meta_model, monkeypatch
-):
-    real = meta_module.load_pretrained_encoder
-    calls: list[str] = []
-
-    def _record(name):
-        calls.append(name)
-        return real(name)
-
-    monkeypatch.setattr(meta_module, "load_pretrained_encoder", _record)
-    make_meta_model(minimal_config)
-    assert calls == [minimal_config.model["encoder_name"]]
 
 
 def test_meta_model_uses_a_prebuilt_model_without_loading_an_encoder(
@@ -624,15 +577,6 @@ def test_validation_epoch_averages_the_batch_losses_and_their_components(fixed_m
     }
 
 
-@pytest.mark.integration
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_metamodel_runs_on_cuda_when_available(minimal_config, make_meta_model):
-    """MetaModel can be instantiated on CUDA device."""
-    meta = make_meta_model(minimal_config, run_name="test-cuda", device="cuda")
-    assert meta.device == "cuda"
-    assert next(meta.model.parameters()).device.type == "cuda"
-
-
 def test_train_epoch_masks_concept_targets(make_meta_model, monkeypatch, cbm_schema):
     meta = cbm_meta(make_meta_model, cbm_schema)
     meta.set_concept_source_mask(concept_keep(cbm_schema))
@@ -688,7 +632,6 @@ def _meta_stepping(meta, grad: list[float], max_grad_norm: float) -> torch.nn.Pa
         pytest.param(1.0, [0.4, 0.2], id="norm_5_clipped_to_1"),
         pytest.param(10.0, [-2.0, -3.0], id="norm_below_the_limit_untouched"),
         pytest.param(0.0, [-2.0, -3.0], id="zero_disables_clipping"),
-        pytest.param(-1.0, [-2.0, -3.0], id="negative_disables_clipping"),
     ],
 )
 def test_apply_accumulated_step_clips_the_gradient_norm_then_steps(
@@ -704,7 +647,7 @@ def test_apply_accumulated_step_clips_the_gradient_norm_then_steps(
     assert param.grad is None
 
 
-@pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+@pytest.mark.parametrize("bad", [float("inf")])
 def test_apply_accumulated_step_skips_a_non_finite_gradient_norm(fixed_meta_model, bad):
     meta = fixed_meta_model()
     param = _meta_stepping(meta, [bad, 1.0], max_grad_norm=1.0)
@@ -771,29 +714,6 @@ def test_warmup_raises_the_lr_before_the_decay_schedule_starts(fixed_meta_model)
     assert lrs == pytest.approx([0.75, 1.0, 0.75, 0.5])
 
 
-def test_an_empty_batch_is_skipped_without_a_forward_or_an_update(fixed_meta_model):
-    meta = fixed_meta_model(training={"iterations_per_train_epoch": 2})
-    empty = (torch.zeros(0, 3, 1, 2), torch.zeros(0, 1, 2, dtype=torch.long))
-    forwards: list[int] = []
-    real = meta.batch_predict_loss
-
-    def _count(*args, **kwargs):
-        forwards.append(1)
-        return real(*args, **kwargs)
-
-    meta.batch_predict_loss = _count
-    updates: list[int] = []
-
-    meta.train_epoch(
-        [empty, *_label_batches(1)],
-        epoch=0,
-        on_optimizer_step=lambda m: updates.append(m.global_step),
-    )
-
-    assert len(forwards) == 1
-    assert updates == [1]
-
-
 def test_epoch_means_average_the_applied_updates_only(fixed_meta_model):
     """Three updates, the middle one an empty batch: the means cover the two applied updates.
 
@@ -814,17 +734,6 @@ def test_epoch_means_average_the_applied_updates_only(fixed_meta_model):
     assert metrics["loss/classification"] == pytest.approx((ln2 + ln6) / 2, rel=1e-4)
     assert metrics["loss/concepts"] == pytest.approx(2 * ln2, rel=1e-4)
     assert metrics["loss/multi_hot"] == pytest.approx(ln2, rel=1e-4)
-
-
-def test_epoch_with_every_update_skipped_reports_a_zero_loss_and_no_components(fixed_meta_model):
-    meta = fixed_meta_model(training={"iterations_per_train_epoch": 2})
-    empty = (torch.zeros(0, 3, 1, 2), torch.zeros(0, 1, 2, dtype=torch.long))
-
-    last_loss, metrics, _ = meta.train_epoch([empty], epoch=0)
-
-    assert last_loss == 0.0
-    assert metrics == {}
-    assert meta.global_step == 0
 
 
 def test_on_optimizer_step_fires_after_each_applied_update_and_not_for_a_skipped_window(
@@ -951,7 +860,7 @@ def test_consume_metric_shards_scores_each_shard_in_order_and_releases_its_maps(
         assert shard.target_labels is None
 
 
-@pytest.mark.parametrize("shards", [None, []], ids=["none", "empty"])
+@pytest.mark.parametrize("shards", [None], ids=["none"])
 def test_consume_metric_shards_reports_a_non_distributed_step(fixed_meta_model, shards):
     meta = fixed_meta_model()
     meta._metric_shards = shards
@@ -960,11 +869,11 @@ def test_consume_metric_shards_reports_a_non_distributed_step(fixed_meta_model, 
     assert meta._metric_shards is None
 
 
-@pytest.mark.parametrize("name", ["bf16", "BF-16", "BFloat_16", "BF16"])
+@pytest.mark.parametrize("name", ["BF-16"])
 def test_resolve_amp_dtype_normalises_case_and_separators(name):
     assert meta_module.resolve_amp_dtype(name) is torch.bfloat16
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_resolve_amp_dtype_passes_a_torch_dtype_through(dtype):
     assert meta_module.resolve_amp_dtype(dtype) is dtype

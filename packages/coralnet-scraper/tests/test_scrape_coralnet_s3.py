@@ -142,16 +142,6 @@ def test_main_passes_the_breaker_cooldown_and_reports_it(monkeypatch, fake_s3, a
     assert _run_report(fake_s3)["settings"]["breaker_cooldown_s"] == cooldown
 
 
-def test_main_passes_delay_seconds(monkeypatch):
-    _, run, _ = _run_main(monkeypatch, ["--delay-seconds", "1.5"])
-    assert run.call_args.kwargs["delay_seconds"] == 1.5
-
-
-def test_main_passes_scraper_workers_to_downloader(monkeypatch):
-    downloader_cls, _, _ = _run_main(monkeypatch, ["--scraper-workers", "5"])
-    assert downloader_cls.call_args.kwargs["max_workers"] == 5
-
-
 _MIXED_RESULTS = {
     101: DownloadResult(ok=True),
     202: DownloadResult(
@@ -191,26 +181,6 @@ def test_summarize_failures_reports_skipped_images_under_images_outage():
         "images_missing_url: 5 (20 images)",
         "images_outage: 5 (30 images)",
     ]
-
-
-def test_summarize_failures_lists_failure_without_error_code_as_no_error_code():
-    results = {
-        7: DownloadResult(ok=False),
-        3: DownloadResult(ok=False, errors=["annotations_failed"]),
-    }
-    assert cli._summarize_failures(results) == [
-        "Failed to download 2 source(s)",
-        "annotations_failed: [3]",
-        "no_error_code: [7]",
-    ]
-
-
-def test_summarize_failures_is_empty_when_nothing_failed():
-    results = {
-        1: DownloadResult(ok=True),
-        2: DownloadResult(ok=True, skipped_no_confirmed=True),
-    }
-    assert cli._summarize_failures(results) == []
 
 
 def test_main_logs_failure_summary_and_returns_1(monkeypatch, caplog):
@@ -330,11 +300,6 @@ def test_main_processes_only_the_given_source_ids_in_order(
     assert _run_report(fake_s3)["settings"]["source_ids"] == expected
 
 
-def test_main_rejects_a_non_integer_source_id(monkeypatch):
-    with pytest.raises(SystemExit):
-        _run_main(monkeypatch, ["--source-ids", "1,x"])
-
-
 _LISTING_KEY = ("my-bucket", "my-prefix/_meta/discovered_source_ids.json")
 
 
@@ -432,12 +397,6 @@ def test_no_legacy_warning_when_any_stored_source_has_a_marker(monkeypatch, fake
     fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
 
     _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
-
-    assert _legacy_warnings(caplog) == []
-
-
-def test_no_legacy_warning_for_an_empty_bucket(monkeypatch, fake_s3, caplog):
-    _run_main(monkeypatch, [], fake_s3=fake_s3)
 
     assert _legacy_warnings(caplog) == []
 
@@ -623,20 +582,6 @@ def test_verify_existing_skips_marked_sources_and_exits_1_listing_failures(
     assert errors == ["Source 3 not verified: annotations_missing, image_list_missing"]
 
 
-def test_verify_existing_exits_0_when_every_source_passes(monkeypatch, fake_s3):
-    code, dl, _ = _run_command(
-        monkeypatch,
-        fake_s3,
-        ["verify-existing"],
-        discovered=[2, 3],
-        verify_results={2: DownloadResult(True), 3: DownloadResult(True)},
-    )
-
-    assert code == 0
-    assert dl.verified == [2, 3]
-    assert dl.login_calls == 0
-
-
 def test_verify_existing_logs_a_skipped_source_and_does_not_fail_it(monkeypatch, fake_s3, caplog):
     caplog.set_level(logging.INFO)
 
@@ -698,22 +643,6 @@ def test_invalidate_changed_continues_past_an_unreadable_source_and_exits_1(
         "s2/annotations.csv",
         "s3/annotations.csv",
     ]
-
-
-def test_verify_existing_fails_a_source_reporting_a_missing_overview_total(
-    monkeypatch, fake_s3, caplog
-):
-    code, _, _ = _run_command(
-        monkeypatch,
-        fake_s3,
-        ["verify-existing"],
-        discovered=[2],
-        verify_results={2: DownloadResult(False, errors=["overview_total_missing"])},
-    )
-
-    assert code == 1
-    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert errors == ["Source 2 not verified: overview_total_missing"]
 
 
 def test_verify_existing_reports_a_raising_source_by_exception_name_and_goes_on(

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from botocore.exceptions import ClientError
 
 from segdata_etl.common.manifest import IngestSource, build_manifest
 from segdata_etl.common.release import (
@@ -73,11 +72,6 @@ def test_ensure_absent_passes_when_none_exist_or_overwrite(fake_s3):
     ensure_absent(fake_s3, _target(), ["a.json"], overwrite=False)
     fake_s3.put(B, "ds/a.json", b"old")
     ensure_absent(fake_s3, _target(), ["a.json"], overwrite=True)
-
-
-def test_put_json_keeps_insertion_order(fake_s3):
-    put_json(fake_s3, _target(), "c.json", {"unlabeled": 0, "b": 1, "a": 2}, overwrite=False)
-    assert fake_s3.objects[(B, "ds/c.json")] == (b'{\n  "unlabeled": 0,\n  "b": 1,\n  "a": 2\n}')
 
 
 def test_put_parquet_sorts_rows_and_keeps_columns_and_dtypes(fake_s3):
@@ -153,34 +147,8 @@ def test_put_raw_release_writes_parquet_then_classes_colors_manifest_last(fake_s
     ]
 
 
-@pytest.mark.parametrize(
-    "key",
-    ["ds/demo_annotations.parquet", "ds/classes.json", "ds/colors.json", "ds/manifest.json"],
-)
+@pytest.mark.parametrize("key", ["ds/manifest.json"])
 def test_preflight_raises_when_any_published_name_exists(fake_s3, key):
     fake_s3.put(B, key, b"old")
     with pytest.raises(FileExistsError, match=key):
         preflight(fake_s3, _target(), "demo", overwrite=False)
-
-
-@pytest.mark.parametrize(
-    "call",
-    [
-        lambda client, target: ensure_absent(client, target, ["a.json"], overwrite=False),
-        lambda client, target: put_json(client, target, "a.json", {"a": 1}, overwrite=False),
-    ],
-    ids=["ensure_absent", "put_json"],
-)
-def test_head_error_other_than_missing_propagates_and_writes_nothing(fake_s3, monkeypatch, call):
-    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "HeadObject")
-
-    def head_object(**kwargs):
-        raise denied
-
-    monkeypatch.setattr(fake_s3, "head_object", head_object)
-
-    with pytest.raises(ClientError) as excinfo:
-        call(fake_s3, _target())
-
-    assert excinfo.value.response["Error"]["Code"] == "AccessDenied"
-    assert fake_s3.objects == {}

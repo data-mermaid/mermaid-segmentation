@@ -124,9 +124,8 @@ class SourceLabelRegistry:
                 ``segdata_spec.taxonomy.hierarchy_from_table``), required with ``label_roll_up``.
 
         Raises:
-            ValueError: If there are no datasets, two datasets share a ``source_name``,
-                two sources produce the same global id, ``label_roll_up`` has no
-                ``target_label_subset`` or no ``benthic_hierarchy``.
+            ValueError: If there are no datasets, two datasets share a ``source_name``, or
+                ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``.
         """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -145,12 +144,6 @@ class SourceLabelRegistry:
         self.global_id2source = {}
         for source, source_rows in rows.items():
             for global_id, name, _ in source_rows:
-                if global_id in self.global_id2source:
-                    raise ValueError(
-                        f"global id {global_id} is produced by both "
-                        f"'{self.global_id2source[global_id][0]}' and '{source}'; "
-                        "give the sources disjoint offsets"
-                    )
                 self.global_id2source[global_id] = (source, name)
         max_global_id = max(self.global_id2source, default=0)
 

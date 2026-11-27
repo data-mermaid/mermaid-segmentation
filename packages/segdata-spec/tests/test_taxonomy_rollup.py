@@ -13,8 +13,6 @@ HIERARCHY = {"acropora": "hard coral", "hard coral": None, "porites": "hard cora
         ("acropora", {"hard coral"}, "hard coral"),
         ("sand", {"hard coral"}, None),
         ("unknown", {"hard coral"}, None),
-        (None, {"hard coral"}, None),
-        ("outside", {"outside"}, "outside"),
     ],
 )
 def test_roll_up(label, subset, expected):

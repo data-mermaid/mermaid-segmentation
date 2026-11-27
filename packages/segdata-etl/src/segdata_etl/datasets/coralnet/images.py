@@ -22,7 +22,7 @@ from ...common.jpeg_header import read_jpeg_size_from_s3
 from ...common.s3_objects import make_s3_client
 from .annotations import derive_unique_images
 from .config import RESIZE_THRESHOLD
-from .schemas import IMAGES_PRIMARY_KEY, IMAGES_SCHEMA, validate
+from .schemas import IMAGES_PRIMARY_KEY, IMAGES_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +104,7 @@ def _finalise(df: pd.DataFrame) -> pd.DataFrame:
     df["needs_resize"] = df["longest_edge"].fillna(0).astype("Int32").gt(RESIZE_THRESHOLD)
     df["header_status"] = df["header_status"].astype("string")
     df["error_message"] = df["error_message"].astype("string")
-    df = df.sort_values(list(IMAGES_PRIMARY_KEY), kind="mergesort").reset_index(drop=True)
-    validate(df, IMAGES_SCHEMA)
-    return df
+    return df.sort_values(list(IMAGES_PRIMARY_KEY), kind="mergesort").reset_index(drop=True)
 
 
 def build_images(

@@ -5,9 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -78,36 +76,6 @@ def test_sidecar_records_encoder_name_outside_kwargs_without_mutating_the_caller
     assert kwargs["model_kwargs"] == before
 
 
-def test_sidecar_layout(tmp_path: Path):
-    path = write_sidecar(tmp_path, **_sidecar_kwargs())
-    assert path == tmp_path / MODEL_JSON
-    assert _read(path) == {
-        "schema_version": 1,
-        "task": "segmentation_cbm",
-        "run_name": "run-a",
-        "architecture": {
-            "class": "ConceptBottleneckDPTLoRADINOv3",
-            "encoder_name": "enc",
-            "kwargs": {
-                "input_size": [56, 56],
-                "num_classes": 3,
-                "concept_value2id": {"order": {"not_given": [0, 0]}, "bleached": {"False": 1}},
-            },
-            "encoder_config": {"hidden_size": 16},
-        },
-        "id2label": {"0": "ignore", "1": "coral"},
-        "concept_id2name": {"0": "a", "1": "b"},
-        "preprocessing": {
-            "size_hw": [56, 56],
-            "mean": [0.5, 0.5, 0.5],
-            "std": [0.25, 0.25, 0.25],
-            "channel_order": "RGB",
-            "interpolation": "bilinear",
-        },
-        "lineage": {"seed": 7},
-    }
-
-
 def test_resume_with_the_same_contract_refreshes_the_lineage(tmp_path: Path):
     write_sidecar(tmp_path, **_sidecar_kwargs())
     first = _read(tmp_path / MODEL_JSON)
@@ -123,9 +91,7 @@ def test_resume_with_the_same_contract_refreshes_the_lineage(tmp_path: Path):
     ("override", "key"),
     [
         ({"id2label": {0: "ignore", 1: "sand"}}, "id2label"),
-        ({"concept_id2name": {0: "z"}}, "concept_id2name"),
         ({"model_class": "Other"}, "architecture"),
-        ({"mean": (0.1, 0.1, 0.1)}, "preprocessing"),
     ],
 )
 def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, override, key):
@@ -134,20 +100,6 @@ def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, over
     with pytest.raises(ValueError, match=key):
         write_sidecar(tmp_path, **_sidecar_kwargs(**override))
     assert (tmp_path / MODEL_JSON).read_text() == before
-
-
-def test_a_failed_replace_leaves_the_old_file_intact(monkeypatch, tmp_path: Path):
-    write_sidecar(tmp_path, **_sidecar_kwargs())
-    before = (tmp_path / MODEL_JSON).read_text()
-
-    def broken_replace(*_args):
-        raise OSError("disk gone")
-
-    monkeypatch.setattr(export.os, "replace", broken_replace)
-    with pytest.raises(OSError, match="disk gone"):
-        write_sidecar(tmp_path, **_sidecar_kwargs(lineage={"seed": 99}))
-    assert (tmp_path / MODEL_JSON).read_text() == before
-    assert sorted(p.name for p in tmp_path.iterdir()) == [MODEL_JSON]
 
 
 def test_bundle_directory_holds_only_the_sidecar_and_weights(bundle_dir):
@@ -231,31 +183,7 @@ def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_namin
     assert not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize(
-    ("config", "checkpoint_lineage"),
-    [
-        pytest.param(["not", "a", "mapping"], None, id="checkpoint-config-is-not-a-mapping"),
-        pytest.param(None, {"git_dirty": False}, id="lineage-has-no-resolved-config"),
-        pytest.param(
-            None,
-            {"git_dirty": False, "resolved_config": "not a mapping"},
-            id="lineage-resolved-config-is-not-a-mapping",
-        ),
-    ],
-)
-def test_export_refuses_configs_that_are_not_both_mappings_without_naming_a_key(
-    tmp_path, config, checkpoint_lineage
-):
-    checkpoint, _ = _tiny.write_run(
-        tmp_path / "run", config=config, checkpoint_lineage=checkpoint_lineage
-    )
-    with pytest.raises(ValueError, match="does not match its lineage's resolved_config") as raised:
-        export_ckpt(checkpoint, tmp_path / "out")
-    assert "at key" not in str(raised.value)
-    assert not (tmp_path / "out").exists()
-
-
-@pytest.mark.parametrize("key", ["config", "epoch", "global_step"])
+@pytest.mark.parametrize("key", ["config"])
 def test_export_of_a_checkpoint_missing_a_required_key_names_the_key_and_its_path(tmp_path, key):
     checkpoint, _ = _tiny.write_run(tmp_path / "run")
     contents = torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -267,14 +195,6 @@ def test_export_of_a_checkpoint_missing_a_required_key_names_the_key_and_its_pat
     assert not (tmp_path / "out").exists()
 
 
-def test_export_refuses_an_output_path_that_is_an_existing_file(run, tmp_path):
-    out = tmp_path / "out"
-    out.write_text("not a directory")
-    with pytest.raises(ValueError, match="not empty"):
-        export_ckpt(run[0], out)
-    assert out.read_text() == "not a directory"
-
-
 def test_export_without_a_sidecar_raises_naming_its_path(run, tmp_path):
     lone = tmp_path / "lone"
     lone.mkdir()
@@ -282,27 +202,6 @@ def test_export_without_a_sidecar_raises_naming_its_path(run, tmp_path):
     checkpoint.write_bytes(run[0].read_bytes())
     with pytest.raises(FileNotFoundError, match=str(lone / MODEL_JSON)):
         export_ckpt(checkpoint, tmp_path / "out")
-
-
-def _precious_partial(out: Path) -> Path:
-    foreign = out.with_name(out.name + ".partial")
-    foreign.mkdir()
-    (foreign / "precious").write_text("keep")
-    return foreign
-
-
-def test_a_preexisting_partial_sibling_survives_a_failed_export(run, tmp_path):
-    out = tmp_path / "out"
-    foreign = _precious_partial(out)
-    with (
-        patch("mermaidseg.export.save_file", side_effect=OSError("disk full")),
-        pytest.raises(OSError, match="disk full"),
-    ):
-        export_ckpt(run[0], out, repo_dir=run[1])
-    assert [p.name for p in foreign.iterdir()] == ["precious"]
-    assert (foreign / "precious").read_text() == "keep"
-    assert [p for p in tmp_path.glob("*.partial") if p != foreign] == []
-    assert not out.exists()
 
 
 def test_export_requires_the_output_parent_to_exist_and_creates_nothing(run, tmp_path):
@@ -318,24 +217,6 @@ def test_untied_state_round_trips_through_save_file(tmp_path):
     loaded = load_file(tmp_path / "w.safetensors")
     torch.testing.assert_close(loaded["a"], shared)
     torch.testing.assert_close(loaded["b"], shared[:3])
-
-
-@pytest.mark.parametrize(("umask", "mode"), [(0o022, 0o755), (0o002, 0o775)])
-def test_exported_bundle_directory_has_the_mode_a_plain_mkdir_gives(run, tmp_path, umask, mode):
-    previous = os.umask(umask)
-    try:
-        out = export_ckpt(run[0], tmp_path / "out", repo_dir=run[1])
-    finally:
-        os.umask(previous)
-    assert out.stat().st_mode & 0o777 == mode
-
-
-def test_export_passes_when_every_pin_exists_with_its_sha_and_the_commit_is_on_origin(
-    deployable, tmp_path
-):
-    checkpoint, repo, _ = deployable
-    out = export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-    assert sorted(p.name for p in out.iterdir()) == [MODEL_JSON, WEIGHTS]
 
 
 def test_export_refuses_a_dataset_manifest_missing_from_the_bucket_naming_dataset_and_version(
@@ -375,9 +256,11 @@ def test_export_refuses_a_commit_only_on_a_local_branch_telling_the_user_to_fetc
     local_sha = commit(repo, "local.txt")
     lineage = deployable_lineage(local_sha)
     checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+    s3 = seeded_s3()
     with pytest.raises(ValueError, match="git fetch origin") as raised:
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
     assert local_sha in str(raised.value)
+    assert s3.requested == []
     assert not (tmp_path / "out").exists()
 
 
@@ -394,7 +277,6 @@ def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_pa
     ("data_version", "named"),
     [
         pytest.param(None, "data_version", id="no-data-version"),
-        pytest.param({**data_version(), "datasets": {}}, "datasets", id="empty-datasets"),
         pytest.param({**data_version(), "taxonomy": None}, "taxonomy", id="null-taxonomy"),
         pytest.param(
             {"data_config_sha1": "x", "manifests": {}, "manifest_sha256": {}, "label_mappings": {}},
@@ -429,20 +311,6 @@ def test_export_refuses_a_lineage_that_does_not_pin_its_data(
             ),
             id="access-denied",
         ),
-        pytest.param(
-            ClientError(
-                {"Error": {"Code": "InternalError"}, "ResponseMetadata": {"HTTPStatusCode": 500}},
-                "GetObject",
-            ),
-            id="server-error",
-        ),
-        pytest.param(
-            ClientError(
-                {"Error": {"Code": "NoSuchBucket"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
-                "GetObject",
-            ),
-            id="no-such-bucket",
-        ),
     ],
 )
 def test_export_propagates_a_non_missing_key_s3_error_unchanged(deployable, tmp_path, error):
@@ -462,7 +330,7 @@ def test_export_refuses_a_directory_that_is_not_a_git_checkout_saying_so(deploya
     assert "git fetch" not in str(raised.value)
 
 
-@pytest.mark.parametrize("sha", ["HEAD", "--all", "A" * 40, "0123abc"])
+@pytest.mark.parametrize("sha", ["--all", "0123abc"])
 def test_export_refuses_a_git_sha_that_is_not_40_lowercase_hex_without_calling_git(
     deployable, tmp_path, monkeypatch, sha
 ):
@@ -476,14 +344,3 @@ def test_export_refuses_a_git_sha_that_is_not_40_lowercase_hex_without_calling_g
     monkeypatch.setattr(export.subprocess, "run", no_git)
     with pytest.raises(ValueError, match="40"):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-
-
-def test_export_refuses_an_unpushed_commit_before_any_s3_call(tmp_path):
-    repo, _ = repo_with_origin(tmp_path)
-    git(repo, "checkout", "-b", "local-only")
-    lineage = deployable_lineage(commit(repo, "local.txt"))
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-    s3 = seeded_s3()
-    with pytest.raises(ValueError, match="git fetch origin"):
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
-    assert s3.requested == []

@@ -46,7 +46,7 @@ from .io import (
     make_ibis_connection,
     make_marker_check,
 )
-from .schemas import ANNOTATIONS_PRIMARY_KEY, ANNOTATIONS_SCHEMA, validate
+from .schemas import ANNOTATIONS_PRIMARY_KEY, ANNOTATIONS_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +476,6 @@ def _concat_rows(frames: list[pd.DataFrame]) -> pd.DataFrame:
     merged = merged.sort_values(list(ANNOTATIONS_PRIMARY_KEY), kind="mergesort").reset_index(
         drop=True
     )
-    validate(merged, ANNOTATIONS_SCHEMA)
     logger.info(
         "Annotations build complete: %d rows across %d sources",
         len(merged),

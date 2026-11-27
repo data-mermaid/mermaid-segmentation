@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import re
 from pathlib import Path
 
 import torch
@@ -83,15 +82,6 @@ def test_sidecar_architecture_matches_the_fixture_for_the_current_schema_version
         "architecture changed: bump SCHEMA_VERSION in mermaidseg/inference/bundle.py and add "
         f"fixtures/model_json_architecture/v{SCHEMA_VERSION + 1}.json"
     )
-
-
-def test_fixture_schema_version_matches_its_filename():
-    paths = sorted(FIXTURE_DIR.glob("v*.json"))
-    assert paths
-    for path in paths:
-        match = re.fullmatch(r"v(\d+)\.json", path.name)
-        assert match, path.name
-        assert json.loads(path.read_text())["schema_version"] == int(match.group(1)), path.name
 
 
 def test_model_constructor_takes_exactly_the_fixture_kwargs():

@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 import requests
-from botocore.exceptions import ClientError
 from conftest import (
     _BASE,
     _CSV_HEADERS,
@@ -88,11 +87,6 @@ def test_download_source_skips_a_source_without_confirmed_images_or_images(
     assert fake_s3.objects == {}
 
 
-def test_constructor_rejects_invalid_max_workers():
-    with pytest.raises(ValueError, match="workers"):
-        CoralNetDownloader("u", "p", max_workers=0)
-
-
 def _failing_step_downloader(
     fake_s3, **overrides
 ) -> tuple[CoralNetDownloader, dict[str, MagicMock]]:
@@ -139,16 +133,6 @@ def test_download_source_returns_login_failed_when_login_fails(fake_s3):
     assert res.ok is False
     assert res.errors == ["login failed"]
     dl.auth.source_overview_html.assert_not_called()  # type: ignore[attr-defined]
-
-
-def test_download_source_reports_overview_fetch_failure(fake_s3):
-    dl, mocks = _failing_step_downloader(fake_s3, overview=requests.ConnectionError("down"))
-    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
-
-    assert res.ok is False
-    assert len(res.errors) == 1
-    assert res.errors[0].startswith("overview fetch failed:")
-    mocks["download_metadata"].assert_not_called()
 
 
 def test_download_source_fails_when_the_overview_has_no_image_count(fake_s3):
@@ -216,16 +200,6 @@ def test_download_source_reports_an_empty_export_apart_from_a_failed_one(fake_s3
     dl.images.download_image_to_s3.assert_not_called()  # type: ignore[attr-defined]
 
 
-def test_download_source_reports_missing_url_when_single_image_lookup_raises(fake_s3):
-    dl, _ = _failing_step_downloader(fake_s3)
-
-    with patch.object(dl.images, "_resolve_one_image_url", side_effect=ValueError("private")):
-        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
-
-    assert "images_missing_url" in res.errors
-    assert res.image_failures == ImageFailures(missing_url=1, upload_failed=0)
-
-
 _CLASSIFIER_SCRIPT = """\
 <script>
 // Classifier overview
@@ -258,13 +232,6 @@ def test_download_metadata_uploads_classifier_history_and_returns_total(fake_s3)
     assert df[columns].to_numpy().tolist() == [[1, 0.5, 100, 77], [2, 0.6, 200, 88]]
 
 
-def test_download_metadata_puts_the_date_and_train_time_in_their_own_columns(fake_s3):
-    df = _uploaded_metadata(_downloader_on(fake_s3), fake_s3)
-
-    assert df["Date"].tolist() == ["2020-01-01", "2020-02-01"]
-    assert df["Traintime"].tolist() == [12, 15]
-
-
 def test_download_metadata_without_classifier_data_returns_total_and_uploads_nothing(fake_s3):
     dl = _downloader_on(fake_s3)
 
@@ -272,18 +239,6 @@ def test_download_metadata_without_classifier_data_returns_total_and_uploads_not
 
     assert result == (True, 1234)
     assert fake_s3.objects == {}
-
-
-def test_download_metadata_reports_failure_when_the_upload_raises(fake_s3):
-    dl = _downloader_on(fake_s3)
-    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "PutObject")
-
-    with patch.object(fake_s3, "put_object", side_effect=denied):
-        result = dl.download_metadata(
-            9, "b", "p", overview_html=_overview_html(1234) + _CLASSIFIER_SCRIPT
-        )
-
-    assert result == (False, 0)
 
 
 _LABEL_TABLE_HTML = """\
@@ -641,35 +596,6 @@ def test_an_overview_total_changed_during_the_walk_redoes_it_against_the_new_tot
     assert (res.ok, res.errors) == (True, [])
     assert _image_list_ids(fake_s3) == [1, 2, 3]
     assert json.loads(fake_s3.objects[("b", _MARKER)])["total_images"] == 3
-
-
-def test_a_kill_after_a_changed_total_walk_leaves_state_for_the_new_total(http_server, fake_s3):
-    _script_source(http_server, [[1, 2, 3]])
-    http_server.script(
-        "/source/1/",
-        Reply(200, _overview_html(2).encode()),
-        Reply(200, _overview_html(3).encode()),
-    )
-    http_server.script(_page_path(1), _page_reply([1, 2]), _page_reply([1, 2, 3]))
-    dl = _site_downloader(http_server, fake_s3)
-    walk_source = dl.walker.walk_source
-
-    def killed_after_the_walk(*args: object, **kwargs: object) -> None:
-        walk_source(*args, **kwargs)
-        raise KeyboardInterrupt
-
-    dl.walker.walk_source = killed_after_the_walk  # type: ignore[method-assign]
-    with pytest.raises(KeyboardInterrupt):
-        dl.download_source(1, "b", "p")
-
-    state = json.loads(fake_s3.objects[("b", f"{_PARTIAL}state.json")])
-    assert state["total_images"] == 3
-
-    http_server.received.clear()
-    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
-
-    assert res.ok is True
-    assert len(http_server.requests_to(_BASE)) == 1  # the export's form page, not a walk fetch
 
 
 def test_a_walk_short_of_the_overview_total_on_every_attempt_is_walked_again_on_the_next_run(

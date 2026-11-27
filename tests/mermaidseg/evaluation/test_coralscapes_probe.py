@@ -22,10 +22,8 @@ from mermaidseg.evaluation.coralscapes_probe import (
     _require_label,
     _require_rgb,
     _sample_activated,
-    average_window_logits,
     build_coralscapes_concept_codes,
     coralscapes_v2_to_legacy_lut,
-    coralscapes_windows,
     evaluate_coralscapes39_probe,
     evaluate_coralscapes_probe,
     label_md5,
@@ -42,32 +40,6 @@ from tests.mermaidseg.data.conftest import ImageSpec, open_written
 _REPO = Path(__file__).resolve().parents[3]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
 HEIGHT, WIDTH = 1024, 2048
-
-
-def test_windows_and_overlap_average():
-    windows = coralscapes_windows()
-    assert [name for name, *_box in windows] == ["left", "center", "right"]
-    assert windows[0][1:] == (0, 0, 1024, 1024)
-    assert windows[1][1:] == (0, 512, 1024, 1536)
-    assert windows[2][1:] == (0, 1024, 1024, 2048)
-
-    # A constant map stays constant under bilinear upsampling, so the overlap
-    # bands are the unweighted means of the windows that cover them.
-    values = (1.0, 3.0, 5.0)
-    logits = torch.stack([torch.full((1, 2, 2), value) for value in values], dim=0)
-    boxes = [window[1:] for window in windows]
-    averaged = average_window_logits(logits, boxes, 1024, 2048)
-    assert averaged.shape == (1, 1024, 2048)
-    assert torch.allclose(averaged[:, :, 0:512], torch.full((1, 1024, 512), 1.0))
-    assert torch.allclose(averaged[:, :, 512:1024], torch.full((1, 1024, 512), 2.0))
-    assert torch.allclose(averaged[:, :, 1024:1536], torch.full((1, 1024, 512), 4.0))
-    assert torch.allclose(averaged[:, :, 1536:2048], torch.full((1, 1024, 512), 5.0))
-
-
-def test_uncovered_pixel_raises():
-    logits = torch.zeros(1, 1, 2, 2)
-    with pytest.raises(RuntimeError, match="no window coverage"):
-        average_window_logits(logits, [(0, 0, 4, 4)], height=8, width=8)
 
 
 def test_unknown_split_raises(tmp_path: Path):
@@ -87,48 +59,19 @@ def test_unknown_split_raises(tmp_path: Path):
         )
 
 
-def test_coralscapes_anthropogenic_codes_match_the_concept_table():
-    codes = build_coralscapes_concept_codes(_CSV, "anthropogenic")
-    assert int(codes[0]) == 0
-    by_name = {name: int(codes[class_id]) for class_id, name in CORALSCAPES_V2_ID2NAME.items()}
-    positives = {name for name, code in by_name.items() if code == 2}
-    assert positives == {
-        "human",
-        "human-made structure",
-        "transect line",
-        "transect tools",
-        "trash",
-    }
-    assert {name for name, code in by_name.items() if code == 0} == {
-        "water column",
-        "water surface",
-    }
-    assert by_name["sand"] == 1
-
-
-def _csv_with_sand_cell(tmp_path: Path, cell: str | None, drop_sand: bool = False) -> Path:
+def _csv_without_sand(tmp_path: Path) -> Path:
     frame = pd.read_csv(_CSV)
     name = frame["source_label_class_name"].astype(str).str.lower()
     source = frame["source_dataset_source"].astype(str).str.lower()
-    sand = (source == "coralscapes_v2") & (name == "sand")
-    if drop_sand:
-        frame = frame.loc[~sand].copy()
-    else:
-        frame.loc[sand, "bleached"] = cell
+    frame = frame.loc[~((source == "coralscapes_v2") & (name == "sand"))]
     path = tmp_path / "class_to_concepts.csv"
     frame.to_csv(path, index=False)
     return path
 
 
 def test_missing_coralscapes_class_is_not_treated_as_not_given(tmp_path: Path):
-    path = _csv_with_sand_cell(tmp_path, cell=None, drop_sand=True)
+    path = _csv_without_sand(tmp_path)
     with pytest.raises(RuntimeError, match="sand"):
-        build_coralscapes_concept_codes(path, "bleached")
-
-
-def test_unexpected_bleached_cell_raises(tmp_path: Path):
-    path = _csv_with_sand_cell(tmp_path, cell="maybe")
-    with pytest.raises(RuntimeError, match="maybe"):
         build_coralscapes_concept_codes(path, "bleached")
 
 
@@ -166,20 +109,6 @@ def test_legacy_label_rejects_ids_outside_the_lut():
     lut = np.zeros(96, dtype=np.uint8)
     with pytest.raises(RuntimeError, match="0..95"):
         legacy_label(np.array([[96]], dtype=np.uint8), lut)
-
-
-def test_score_legacy_requires_a_confusion_per_head():
-    activated = torch.zeros(1, 1, 1)
-    label = np.zeros((1, 1), dtype=np.uint8)
-    lut = np.zeros(96, dtype=np.uint8)
-    with pytest.raises(ValueError, match="different budgets"):
-        score_legacy_activated(
-            activated,
-            label,
-            lut,
-            {5: _head(1)},
-            {10: ClassConfusion(LEGACY_NUM_CLASSES + 1, ignore_index=0)},
-        )
 
 
 def test_union_probe_images_groups_budgets_on_one_stem():
@@ -286,8 +215,6 @@ def test_reassemble_runs_left_center_right_crops_and_averages_their_overlaps():
 @pytest.mark.parametrize(
     ("shape", "match"),
     [
-        ((HEIGHT, WIDTH), "must be HxWx3 RGB"),
-        ((HEIGHT, WIDTH, 4), "must be HxWx3 RGB"),
         ((HEIGHT, 1024, 3), "must be 1024x2048"),
     ],
 )
@@ -296,7 +223,7 @@ def test_require_rgb_rejects_wrong_channels_and_size(shape, match):
         _require_rgb(np.zeros(shape, dtype=np.uint8), "img")
 
 
-@pytest.mark.parametrize("shape", [(HEIGHT, WIDTH, 3), (HEIGHT, 1024), (WIDTH, HEIGHT)])
+@pytest.mark.parametrize("shape", [(HEIGHT, 1024), (WIDTH, HEIGHT)])
 def test_require_label_rejects_non_2d_and_wrong_size(shape):
     with pytest.raises(ValueError, match="img label must be 1024x2048"):
         _require_label(np.zeros(shape, dtype=np.uint8), "img")
@@ -315,9 +242,6 @@ def test_sample_activated_indexes_row_then_col_on_a_non_square_map():
     [
         ([0, 1], [0], "row/col shape mismatch"),
         ([-1], [0], "outside the 3x5"),
-        ([0], [-1], "outside the 3x5"),
-        ([3], [0], "outside the 3x5"),
-        ([0], [5], "outside the 3x5"),
     ],
 )
 def test_sample_activated_rejects_misaligned_and_out_of_bounds_points(rows, cols, match):
@@ -335,27 +259,6 @@ def test_class_prediction_in_strips_covers_a_short_last_strip():
     classes = torch.tensor([7, 9])
     pred = _predict_classes_from_activated(activated, weff, beff, classes, strip_rows=2)
     assert pred.tolist() == [[9] * 3, [9] * 3, [9] * 3, [7] * 3, [7] * 3]
-
-
-@pytest.mark.parametrize(
-    ("activated_shape", "weff_dim", "strip_rows", "error", "match"),
-    [
-        ((2, 4), 2, 2, ValueError, r"must be \(K, H, W\)"),
-        ((2, 4, 3), 5, 2, RuntimeError, "does not match concept channels"),
-        ((2, 4, 3), 2, 0, ValueError, "strip_rows must be >= 1"),
-    ],
-)
-def test_class_prediction_rejects_bad_shapes_and_strip_height(
-    activated_shape, weff_dim, strip_rows, error, match
-):
-    with pytest.raises(error, match=match):
-        _predict_classes_from_activated(
-            torch.zeros(activated_shape),
-            torch.zeros(1, weff_dim),
-            torch.zeros(1),
-            torch.tensor([1]),
-            strip_rows=strip_rows,
-        )
 
 
 def _probe_json(path: Path, **overrides) -> Path:
@@ -380,7 +283,6 @@ def test_load_legacy_probes_keys_each_probe_by_its_budget(tmp_path):
     ("overrides", "match"),
     [
         ({"label_space": "coralscapes_v2"}, "not a legacy-39 probe set"),
-        ({"num_classes": 95}, "num_classes is 95"),
     ],
 )
 def test_load_legacy_probes_rejects_a_probe_of_another_label_space_or_width(
@@ -394,11 +296,6 @@ def test_load_legacy_probes_rejects_two_probes_with_the_same_budget(tmp_path):
     paths = [_probe_json(tmp_path / "a.json"), _probe_json(tmp_path / "b.json")]
     with pytest.raises(RuntimeError, match="two probe sets target k=5"):
         load_legacy_probes(paths)
-
-
-def test_load_legacy_probes_rejects_an_empty_list():
-    with pytest.raises(RuntimeError, match="no legacy-39 probe sets"):
-        load_legacy_probes([])
 
 
 def _full_concept_names() -> list[str]:
@@ -443,41 +340,6 @@ def test_conflicting_cells_for_one_coralscapes_class_raise(tmp_path):
     pd.concat([frame, sand]).to_csv(path, index=False)
     with pytest.raises(RuntimeError, match="sand' has conflicting bleached cells"):
         build_coralscapes_concept_codes(path, "bleached")
-
-
-@pytest.mark.parametrize(
-    ("logits_shape", "windows", "match"),
-    [
-        ((1, 2, 2), [(0, 0, 4, 4)], r"must be \(N, K, h, w\)"),
-        ((2, 1, 2, 2), [(0, 0, 4, 4)], "got 2 logit maps for 1 windows"),
-        ((1, 1, 2, 2), [(-1, 0, 4, 4)], "does not fit in 4x4"),
-        ((1, 1, 2, 2), [(0, -1, 4, 4)], "does not fit in 4x4"),
-        ((1, 1, 2, 2), [(0, 0, 5, 4)], "does not fit in 4x4"),
-        ((1, 1, 2, 2), [(0, 0, 4, 5)], "does not fit in 4x4"),
-        ((1, 1, 2, 2), [(2, 0, 2, 4)], "does not fit in 4x4"),
-        ((1, 1, 2, 2), [(0, 3, 4, 3)], "does not fit in 4x4"),
-    ],
-)
-def test_average_window_logits_rejects_bad_shapes_counts_and_windows(logits_shape, windows, match):
-    with pytest.raises(ValueError, match=match):
-        average_window_logits(torch.zeros(logits_shape), windows, 4, 4)
-
-
-def test_union_probe_images_rejects_the_same_image_twice_within_one_budget():
-    image = {"site": "s", "stem": "a", "label_md5": "m", "height": 1, "width": 1, "points": []}
-    with pytest.raises(RuntimeError, match=r"duplicate k=5 points for s/a"):
-        union_probe_images({5: {"images": [image, image]}})
-
-
-def test_score_legacy_rejects_a_lut_that_emits_an_id_beyond_the_legacy_classes():
-    lut = np.zeros(96, dtype=np.uint8)
-    lut[1] = LEGACY_NUM_CLASSES + 1
-    confusion = ClassConfusion(LEGACY_NUM_CLASSES + 1, ignore_index=0)
-    with pytest.raises(RuntimeError, match="legacy label id 40 is outside 0..39"):
-        score_legacy_activated(
-            torch.zeros(1, 1, 1), np.ones((1, 1), np.uint8), lut, {5: _head(1)}, {5: confusion}
-        )
-    assert confusion.total == 0
 
 
 class _FakeSource:

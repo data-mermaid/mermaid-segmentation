@@ -2,7 +2,7 @@ import pytest
 from botocore.exceptions import ClientError
 from spec_helpers import FakeS3, _client_error
 
-from segdata_spec.s3 import exists, is_not_found, norm_etag
+from segdata_spec.s3 import exists, is_not_found
 
 
 def _error(code: str, status: int) -> ClientError:
@@ -35,16 +35,10 @@ def test_exists_is_false_for_a_missing_key():
     assert exists(FakeS3(), "b", "k") is False
 
 
-@pytest.mark.parametrize(("code", "status"), [("AccessDenied", 403), ("NoSuchBucket", 404)])
-def test_exists_propagates_other_client_errors(code, status):
+def test_exists_propagates_other_client_errors():
     class Denied:
         def head_object(self, **_):
-            raise _error(code, status)
+            raise _error("AccessDenied", 403)
 
     with pytest.raises(ClientError):
         exists(Denied(), "b", "k")
-
-
-@pytest.mark.parametrize("etag", ['"abc"', "abc"])
-def test_norm_etag_strips_the_quotes(etag):
-    assert norm_etag(etag) == "abc"

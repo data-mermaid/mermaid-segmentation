@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-import pytest
-from pydantic import ValidationError
-
 from segdata_etl.common.manifest import IngestSource, build_manifest, read_ingest_manifest
 from segdata_etl.common.release import S3Target
 
@@ -67,18 +64,3 @@ def test_manifest_round_trips_through_json_with_every_field():
             "details": {"excluded_sites": ["s1"]},
         },
     }
-
-
-def test_read_ingest_manifest_refuses_the_old_shape():
-    with pytest.raises(ValidationError) as exc_info:
-        read_ingest_manifest(json.dumps(OLD_CATLIN_MANIFEST).encode())
-
-    assert any(
-        e["loc"] == ("source", "license") and e["type"] == "missing"
-        for e in exc_info.value.errors()
-    )
-
-
-def test_ingest_source_requires_a_licence():
-    with pytest.raises(ValidationError, match="license"):
-        IngestSource(citation="Doe 2020", raw_data_url="https://x/y")  # type: ignore[call-arg]

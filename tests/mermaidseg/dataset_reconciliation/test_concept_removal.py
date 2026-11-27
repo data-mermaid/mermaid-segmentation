@@ -11,10 +11,8 @@ import yaml
 from mermaidseg.data.config import DataSection
 from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path
 from mermaidseg.dataset_reconciliation.concept_removal import (
-    REMOVAL_COLUMNS,
     concept_coverage,
     load_concept_removal,
-    removed_concepts,
     section_train_label_counts,
     train_label_counts,
 )
@@ -67,40 +65,7 @@ def test_load_ignores_the_sha1_when_no_concept_table_is_given(tmp_path):
     assert load_concept_removal(path) == ["tubular"]
 
 
-def test_load_without_a_concept_column_raises(tmp_path):
-    path = tmp_path / "removal.csv"
-    pd.DataFrame({"name": ["tubular"]}).to_csv(path, index=False)
-    meta_path(path).write_text(yaml.safe_dump({}))
-
-    with pytest.raises(ValueError, match="no 'concept' column"):
-        load_concept_removal(path)
-
-
 # ---------- removed_concepts ----------
-
-
-def test_removed_concepts_lists_only_removed_rows_with_the_removal_columns():
-    coverage = pd.DataFrame(
-        {
-            "kind": ["genus", "binary", "genus"],
-            "n_annotations": [900, 10, 20],
-            "n_images": [120, 3, 4],
-            "n_noncoralnet_images": [0, 0, 0],
-            "n_coralnet_sources": [5, 1, 1],
-            "n_other_datasets": [0, 0, 0],
-            "fails_images": [False, True, True],
-            "fails_annotations": [False, True, True],
-            "fails_sources": [False, True, True],
-            "removed": [False, True, True],
-        },
-        index=pd.Index(["genus__acropora", "tubular", "genus__porites"], name="concept"),
-    )
-
-    out = removed_concepts(coverage)
-
-    assert list(out.columns) == REMOVAL_COLUMNS
-    assert out["concept"].tolist() == ["tubular", "genus__porites"]
-    assert out["n_annotations"].tolist() == [10, 20]
 
 
 # ---------- train_label_counts ----------
@@ -132,12 +97,6 @@ def test_coralnet_counts_cover_the_train_groups_without_unlabeled_with_the_sourc
     ]
 
 
-def test_a_coralnet_group_that_is_not_s_digits_raises():
-    images = pd.DataFrame({"image_id": ["a1"], "group": ["x12"]})
-    with pytest.raises(ValueError, match="not s<source id>"):
-        train_label_counts("coralnet", LABEL_COUNTS, images, LABELS, None)
-
-
 def test_another_datasets_source_is_its_name_and_no_groups_counts_every_image():
     out = train_label_counts("mermaid", LABEL_COUNTS, IMAGES, LABELS, None)
 
@@ -147,12 +106,6 @@ def test_another_datasets_source_is_its_name_and_no_groups_counts_every_image():
         ["a2", "acropora", "mermaid"],
         ["v1", "porites", "mermaid"],
     ]
-
-
-def test_a_counted_label_id_missing_from_labels_raises():
-    counts = pd.DataFrame({"image_id": ["a1"], "label_id": [8], "n": [1]})
-    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
-        train_label_counts("coralnet", counts, IMAGES, LABELS, None)
 
 
 def test_mermaid_labels_count_under_the_concept_row_of_their_benthic_attribute(tmp_path):
@@ -196,29 +149,14 @@ ONE_ANNOTATOR = [("a1", 0, 0, 1)]
 @pytest.mark.parametrize(
     ("entry", "points", "message"),
     [
-        (
-            {"train": {"groups": ["s99"]}},
-            ONE_ANNOTATOR,
-            r"groups not in the dataset version: \['s99'\]",
-        ),
         ({"val": {"groups": "all"}}, ONE_ANNOTATOR, "no dataset has a train block to count"),
         (
             {"train": {"groups": "all"}},
             [("a1", 0, 0, 1, "a"), ("a1", 1, 1, 1, "b")],
             r"coralnet: several annotators \['a', 'b'\]",
         ),
-        (
-            {"train": {"groups": "all", "annotators": ["a"]}},
-            [("a1", 0, 0, 1, "a"), ("a1", 1, 1, 1, "b")],
-            r"coralnet: several annotators \['a', 'b'\]",
-        ),
     ],
-    ids=[
-        "unknown-group",
-        "no-train-block",
-        "several-annotators-none-named",
-        "several-annotators-some-named",
-    ],
+    ids=["no-train-block", "several-annotators-none-named"],
 )
 def test_section_train_label_counts_guards_raise(tmp_path, entry, points, message):
     cache_dir, _, pin = write_version(

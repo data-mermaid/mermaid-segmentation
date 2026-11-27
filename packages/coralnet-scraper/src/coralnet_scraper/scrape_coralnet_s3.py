@@ -42,7 +42,6 @@ from coralnet_scraper.models import DownloadResult
 logger = logging.getLogger(__name__)
 
 
-_NO_ERROR_CODE = "no_error_code"
 _MIN_LISTING_RATIO = 0.95  # a listing below this share of the previous one stops the run
 DEFAULT_BREAKER_COOLDOWN_S = 600.0  # pause after a circuit-breaker trip before probing
 _SOURCE_PREFIX = re.compile(r"/s(\d+)/$")
@@ -58,8 +57,7 @@ def _summarize_failures(results: dict[int, DownloadResult]) -> list[str]:
     """Return the failure summary lines, or an empty list when no source failed.
 
     The first line is the number of failed sources. One line follows per error kind, kinds
-    sorted, listing the failed source ids sorted. A failed source with no error codes is
-    listed under ``no_error_code``. Image kinds read
+    sorted, listing the failed source ids sorted. Image kinds read
     ``kind: 202 (14 images), 303 (2 images)``; other kinds read ``kind: [101, 404]``.
     """
     failed = {sid: res for sid, res in results.items() if not res.ok}
@@ -67,7 +65,7 @@ def _summarize_failures(results: dict[int, DownloadResult]) -> list[str]:
         return []
     by_kind: dict[str, list[int]] = {}
     for sid in sorted(failed):
-        for kind in failed[sid].errors or [_NO_ERROR_CODE]:
+        for kind in failed[sid].errors:
             by_kind.setdefault(kind, []).append(sid)
     lines = [f"Failed to download {len(failed)} source(s)"]
     for kind in sorted(by_kind):
@@ -409,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         (unless ``--allow-source-drop``), any source download fails, or the circuit breaker
         stops the run. A failed or stopped run logs ``Run stopped early: <reason>`` first
         when it stopped, then one error line with the failed-source count and one per error
-        kind (``no_error_code`` for a failed source that reports none). Every run that
+        kind. Every run that
         reaches the batch loop writes a JSON run report to ``<prefix>/_runs/``. The
         ``verify-existing`` and ``invalidate`` subcommands read no credentials, do not log
         in, and return their own codes.

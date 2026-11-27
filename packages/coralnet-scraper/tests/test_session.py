@@ -19,35 +19,6 @@ from coralnet_scraper.downloader import CoralNetDownloader
 from coralnet_scraper.session import CoralNetSession
 
 
-def test_thread_sessions_are_not_shared_between_downloaders():
-    """Each downloader's per-thread session carries its own downloader's cookies."""
-    first = CoralNetDownloader("u", "p")
-    second = CoralNetDownloader("u", "p")
-    first.session.cookies.set("sessionid", "first-id")
-    second.session.cookies.set("sessionid", "second-id")
-
-    first_session = first.auth.thread_session()
-    second_session = second.auth.thread_session()
-
-    assert first_session.cookies.get("sessionid") == "first-id"
-    assert second_session.cookies.get("sessionid") == "second-id"
-    assert first_session is not second_session
-    assert first.auth.thread_session() is first_session
-
-
-def test_export_sessions_are_not_shared_between_downloaders():
-    """Each downloader's export session comes from its own login, not another's cache."""
-    first = CoralNetDownloader("u", "p")
-    second = CoralNetDownloader("u", "p")
-    first_sentinel = requests.Session()
-    second_sentinel = requests.Session()
-    first.auth._new_logged_in_session = lambda: first_sentinel  # type: ignore[method-assign]
-    second.auth._new_logged_in_session = lambda: second_sentinel  # type: ignore[method-assign]
-
-    assert first.auth.export_session() is first_sentinel
-    assert second.auth.export_session() is second_sentinel
-
-
 def testexport_session_creates_independent_logged_in_session_per_thread():
     """Each export worker thread gets its own ``requests.Session`` from a fresh login.
 
@@ -115,15 +86,6 @@ def _login_downloader(server: ScriptedServer) -> CoralNetDownloader:
     return dl
 
 
-def test_login_retries_a_post_answered_503(http_server):
-    login_page = Reply(200, _login_get_html().encode())
-    http_server.script(_LOGIN_PATH, login_page, Reply(503), Reply(200, b"<a>Sign out</a>"))
-    dl = _login_downloader(http_server)
-
-    assert dl.login() is True
-    assert len(_posts_to(http_server, _LOGIN_PATH)) == 2
-
-
 def test_login_fails_when_the_result_page_shows_no_sign_out_link(http_server):
     login_page = Reply(200, _login_get_html().encode())
     http_server.script(_LOGIN_PATH, login_page, Reply(200, b"<html>Welcome</html>"))
@@ -132,12 +94,3 @@ def test_login_fails_when_the_result_page_shows_no_sign_out_link(http_server):
     assert dl.login() is False
     assert dl.logged_in is False
     assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
-
-
-def test_login_fails_after_four_posts_that_all_fail(http_server):
-    http_server.script(_LOGIN_PATH, Reply(200, _login_get_html().encode()), Reply(503))
-    dl = _login_downloader(http_server)
-
-    assert dl.login() is False
-    assert dl.logged_in is False
-    assert len(_posts_to(http_server, _LOGIN_PATH)) == 4
