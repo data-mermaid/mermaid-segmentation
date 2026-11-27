@@ -16,6 +16,7 @@ from coralnet_scraper import scrape_coralnet_s3 as cli
 from coralnet_scraper.batch_download import BatchOutcome
 from coralnet_scraper.models import DownloadResult, ImageFailures
 from coralnet_scraper.pin import RawPin
+from segdata_spec.errors import PinMismatch
 
 _MOD = "coralnet_scraper.scrape_coralnet_s3"
 
@@ -702,3 +703,28 @@ def test_verify_existing_with_pin_flags_loads_the_pin_with_the_default_cache_dir
         fake_s3, "20261124-abc", "deadbeef", Path("outputs") / "segdata-cache"
     )
     assert dl.pin is _RAW_PIN
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PinMismatch("manifest differs from the pin"),
+        ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "GetObject"),
+        ValueError("unparseable group 'x1'"),
+    ],
+    ids=["pin-mismatch", "client-error", "value-error"],
+)
+def test_an_unloadable_pin_returns_1_before_login_and_writes_no_run_report(
+    monkeypatch, fake_s3, caplog, error
+):
+    load_pin = MagicMock(side_effect=error)
+
+    downloader_cls, run, discover = _run_main(
+        monkeypatch, _PIN_FLAGS, expected_code=1, fake_s3=fake_s3, load_pin=load_pin
+    )
+
+    downloader_cls.assert_not_called()
+    run.assert_not_called()
+    assert fake_s3.objects == {}
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert messages == [f"cannot load coralnet-raw pin 20261124-abc: {error}"]

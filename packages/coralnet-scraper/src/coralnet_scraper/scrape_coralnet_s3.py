@@ -42,6 +42,7 @@ from coralnet_scraper.config import (
 from coralnet_scraper.downloader import CoralNetDownloader
 from coralnet_scraper.models import DownloadResult
 from coralnet_scraper.pin import RawPin, load_raw_pin
+from segdata_spec.errors import SegdataError
 
 logger = logging.getLogger(__name__)
 
@@ -417,7 +418,9 @@ def main(argv: list[str] | None = None) -> int:
         Process exit code: 0 when every source downloads (or none are attempted), 1 when
         the CoralNet login fails, the source listing is empty or shrank below 95% of the previous run's
         (unless ``--allow-source-drop``), any source download fails, or the circuit breaker
-        stops the run. A failed or stopped run logs ``Run stopped early: <reason>`` first
+        stops the run, or the ``coralnet-raw`` pin named by ``--parent-version`` cannot be
+        loaded (that logs ``cannot load coralnet-raw pin <version>: <reason>`` and writes no
+        run report). A failed or stopped run logs ``Run stopped early: <reason>`` first
         when it stopped, then one error line with the failed-source count and one per error
         kind. Every run that
         reaches the batch loop writes a JSON run report to ``<prefix>/_runs/``. The
@@ -437,7 +440,11 @@ def main(argv: list[str] | None = None) -> int:
     # The subcommands read only public overview and listing pages, so they never log in.
     user, pw = load_coralnet_credentials() if args.command is None else ("", "")
     s3 = boto3.client("s3")
-    pin = _load_pin(args, s3)
+    try:
+        pin = _load_pin(args, s3)
+    except (SegdataError, botocore.exceptions.ClientError, ValueError) as e:
+        logger.error("cannot load coralnet-raw pin %s: %s", args.parent_version, e)
+        return 1
     downloader = CoralNetDownloader(
         user,
         pw,
