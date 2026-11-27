@@ -1,4 +1,4 @@
-"""Coralscapes probe: 39-class scoring on shared features, strided windows, concept code tables, SVM folding."""
+"""Coralscapes probe: label spaces, probe loading, strided windows, concept code tables, SVM folding."""
 
 from __future__ import annotations
 
@@ -14,27 +14,30 @@ import yaml
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.evaluation import coralscapes_probe
 from mermaidseg.evaluation.coralscapes_probe import (
+    CORALSCAPES39,
+    CORALSCAPES_V2,
     CORALSCAPES_V2_ID2NAME,
-    LEGACY_NUM_CLASSES,
+    LabelSpace,
+    ProbeConcepts,
     _class_taxonomy_targets,
+    _dense_images,
+    _load_probe_entry,
     _predict_classes_from_activated,
     _require_label,
     _require_rgb,
     _sample_activated,
+    _score_classes,
+    _split_rows,
+    _union_probe_images,
     average_window_logits,
     build_coralscapes_concept_codes,
     coralscapes_v2_to_legacy_lut,
     coralscapes_windows,
-    dense_images,
-    evaluate_coralscapes39_probe,
     evaluate_coralscapes_probe,
     label_md5,
-    load_legacy_probes,
-    load_probe_entry,
+    label_space_from_name,
+    load_probes,
     reassemble_concept_logits,
-    score_legacy_activated,
-    split_rows,
-    union_probe_images,
 )
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 from mermaidseg.evaluation.metrics import ClassConfusion
@@ -72,18 +75,15 @@ def test_uncovered_pixel_raises():
 
 
 def test_unknown_split_raises(tmp_path: Path):
-    probe = tmp_path / "probe.json"
-    probe.write_text(
-        '{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}'
-    )
+    probe = _probe_json(tmp_path / "probe.json", label_space="coralscapes_v2", num_classes=95)
     with pytest.raises(ValueError, match="unknown Coralscapes splits"):
         evaluate_coralscapes_probe(
+            CORALSCAPES_V2,
+            [probe],
+            None,  # type: ignore[arg-type]
             predictor=None,  # type: ignore[arg-type]
-            probe_json=probe,
-            version=None,  # type: ignore[arg-type]
             output_dir=tmp_path / "out",
-            concept_names=["bleached", "anthropogenic"],
-            taxonomy_csv=_CSV,
+            concepts=ProbeConcepts(["bleached", "anthropogenic"], _CSV),
             splits=["train"],
         )
 
@@ -141,6 +141,10 @@ def _head(class_id: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return weff, beff, classes
 
 
+def _space_with_lut(lut: np.ndarray) -> LabelSpace:
+    return LabelSpace("test", "test", 39, {}, lut)
+
+
 def test_one_activated_map_updates_every_budget():
     activated = torch.zeros(1, 2, 2)
     label = np.array([[1, 0], [2, 1]], dtype=np.uint8)
@@ -148,9 +152,9 @@ def test_one_activated_map_updates_every_budget():
     lut[1] = 2
     lut[2] = 3
     heads = {5: _head(2), 10: _head(3), 20: _head(2), 50: _head(3)}
-    confusions = {k: ClassConfusion(LEGACY_NUM_CLASSES + 1, ignore_index=0) for k in heads}
+    confusions = {k: ClassConfusion(40, ignore_index=0) for k in heads}
 
-    score_legacy_activated(activated, label, lut, heads, confusions)
+    _score_classes(activated, label, _space_with_lut(lut), heads, confusions)
 
     assert confusions[5].total == 3
     assert int(confusions[5].cm[2, 2]) == 2
@@ -159,21 +163,21 @@ def test_one_activated_map_updates_every_budget():
     assert int(confusions[10].cm[2, 3]) == 2
     assert np.array_equal(confusions[20].cm, confusions[5].cm)
     assert np.array_equal(confusions[50].cm, confusions[10].cm)
-    # The ignored pixel (legacy id 0) is not a counted ground-truth class.
+    # The ignored pixel (39-class id 0) is not a counted ground-truth class.
     assert int(confusions[5].cm[0].sum()) == 0
 
 
-def test_score_legacy_requires_a_confusion_per_head():
+def test_score_classes_requires_a_confusion_per_head():
     activated = torch.zeros(1, 1, 1)
     label = np.zeros((1, 1), dtype=np.uint8)
     lut = np.zeros(96, dtype=np.uint8)
     with pytest.raises(ValueError, match="different budgets"):
-        score_legacy_activated(
+        _score_classes(
             activated,
             label,
-            lut,
+            _space_with_lut(lut),
             {5: _head(1)},
-            {10: ClassConfusion(LEGACY_NUM_CLASSES + 1, ignore_index=0)},
+            {10: ClassConfusion(40, ignore_index=0)},
         )
 
 
@@ -201,13 +205,13 @@ def test_union_probe_images_groups_budgets_on_one_stem():
             ]
         },
     }
-    images = union_probe_images(probes)
+    images = _union_probe_images(probes)
     assert [image["stem"] for image in images] == ["a", "b"]
     assert set(images[0]["points_by_k"]) == {5, 10}
 
     probes[20] = {"images": [{**image_a, "label_md5": "other", "points": [{"class_id": 1}]}]}
     with pytest.raises(RuntimeError, match="label md5"):
-        union_probe_images(probes)
+        _union_probe_images(probes)
 
 
 def test_svm_folding_matches_sklearn():
@@ -233,13 +237,17 @@ def test_svm_folding_matches_sklearn():
 
 
 class _WindowPredictor:
-    """Window logits are the crop mean times ``scale`` in channel 0, ``second`` of it in channel 1."""
+    """Window logits are the crop mean times ``scale`` in channel 0, ``second`` of it in channel 1.
+
+    Channels past the first two, up to ``n_channels``, are zero.
+    """
 
     device = torch.device("cpu")
 
-    def __init__(self, scale: float = 1.0, second=lambda w: w):
+    def __init__(self, scale: float = 1.0, second=lambda w: w, n_channels: int = 2):
         self.scale = scale
         self.second = second
+        self.n_channels = n_channels
         self.crops: list[np.ndarray] = []
         self.forward_calls = 0
 
@@ -250,7 +258,8 @@ class _WindowPredictor:
     def forward_concept_logits(self, images):
         self.forward_calls += 1
         window = images[:, 0]
-        return torch.stack([window, self.second(window)], dim=1)
+        zeros = [torch.zeros_like(window)] * (self.n_channels - 2)
+        return torch.stack([window, self.second(window), *zeros], dim=1)
 
     def activate_concept_logits(self, logits):
         return logits
@@ -354,46 +363,87 @@ def test_class_prediction_rejects_bad_shapes_and_strip_height(
 
 
 def _probe_json(path: Path, **overrides) -> Path:
+    """A probe file; an override of None leaves that field out."""
     probe = {
-        "label_space": "coralscapes_legacy39",
+        "label_space": "coralscapes39",
         "points_per_class_target": 5,
-        "num_classes": LEGACY_NUM_CLASSES,
+        "num_classes": 39,
         "images": [],
         **overrides,
     }
-    path.write_text(json.dumps(probe))
+    path.write_text(json.dumps({k: v for k, v in probe.items() if v is not None}))
     return path
 
 
-def test_load_legacy_probes_keys_each_probe_by_its_budget(tmp_path):
-    first = _probe_json(tmp_path / "a.json", points_per_class_target=5)
-    second = _probe_json(tmp_path / "b.json", points_per_class_target=10)
-    assert sorted(load_legacy_probes([first, second])) == [5, 10]
+def _image(stem: str, class_id: int) -> dict:
+    return {
+        "site": "s",
+        "stem": stem,
+        "label_md5": "m",
+        "height": 1,
+        "width": 1,
+        "points": [{"row": 0, "col": 0, "class_id": class_id}],
+    }
 
 
 @pytest.mark.parametrize(
-    ("overrides", "match"),
-    [
-        ({"label_space": "coralscapes_v2"}, "not a legacy-39 probe set"),
-        ({"num_classes": 95}, "num_classes is 95"),
-    ],
+    ("label_space", "num_classes", "expected"),
+    [("coralscapes_v2", 95, CORALSCAPES_V2), ("coralscapes39", 39, CORALSCAPES39)],
+    ids=["coralscapes_v2", "coralscapes39"],
 )
-def test_load_legacy_probes_rejects_a_probe_of_another_label_space_or_width(
-    tmp_path, overrides, match
-):
-    with pytest.raises(RuntimeError, match=match):
-        load_legacy_probes([_probe_json(tmp_path / "a.json", **overrides)])
+def test_load_probes_resolves_the_files_label_space(tmp_path, label_space, num_classes, expected):
+    path = _probe_json(tmp_path / "a.json", label_space=label_space, num_classes=num_classes)
+    assert load_probes([path]).label_space is expected
 
 
-def test_load_legacy_probes_rejects_two_probes_with_the_same_budget(tmp_path):
+def test_load_probes_keys_each_file_by_its_budget_and_unions_images_by_stem(tmp_path):
+    first = _probe_json(tmp_path / "a.json", points_per_class_target=5, images=[_image("x", 1)])
+    second = _probe_json(
+        tmp_path / "b.json",
+        points_per_class_target=10,
+        images=[_image("x", 2), _image("y", 3)],
+    )
+    loaded = load_probes([first, second])
+    assert sorted(loaded.by_k) == [5, 10]
+    assert [image["stem"] for image in loaded.images] == ["x", "y"]
+    assert loaded.images[0]["points_by_k"] == {
+        5: [{"row": 0, "col": 0, "class_id": 1}],
+        10: [{"row": 0, "col": 0, "class_id": 2}],
+    }
+    assert loaded.images[1]["points_by_k"] == {10: [{"row": 0, "col": 0, "class_id": 3}]}
+
+
+def test_load_probes_rejects_files_of_different_label_spaces(tmp_path):
+    v2 = _probe_json(tmp_path / "a.json", label_space="coralscapes_v2", num_classes=95)
+    other = _probe_json(tmp_path / "b.json", points_per_class_target=10)
+    with pytest.raises(RuntimeError, match="coralscapes_v2.*coralscapes39"):
+        load_probes([v2, other])
+
+
+def test_load_probes_rejects_a_file_with_no_label_space(tmp_path):
+    with pytest.raises(ValueError, match=r"a\.json has no label_space"):
+        load_probes([_probe_json(tmp_path / "a.json", label_space=None)])
+
+
+def test_label_space_from_name_rejects_an_unknown_name():
+    with pytest.raises(ValueError, match="'v3'"):
+        label_space_from_name("v3")
+
+
+def test_load_probes_rejects_a_probe_whose_width_differs_from_its_label_space(tmp_path):
+    with pytest.raises(RuntimeError, match="num_classes is 95, expected 39"):
+        load_probes([_probe_json(tmp_path / "a.json", num_classes=95)])
+
+
+def test_load_probes_rejects_two_probes_with_the_same_budget(tmp_path):
     paths = [_probe_json(tmp_path / "a.json"), _probe_json(tmp_path / "b.json")]
     with pytest.raises(RuntimeError, match="two probe sets target k=5"):
-        load_legacy_probes(paths)
+        load_probes(paths)
 
 
-def test_load_legacy_probes_rejects_an_empty_list():
-    with pytest.raises(RuntimeError, match="no legacy-39 probe sets"):
-        load_legacy_probes([])
+def test_load_probes_rejects_an_empty_list():
+    with pytest.raises(RuntimeError, match="no probe sets"):
+        load_probes([])
 
 
 def _full_concept_names() -> list[str]:
@@ -415,16 +465,15 @@ def test_class_taxonomy_targets_has_a_not_given_column_zero_then_one_column_per_
 
 
 def test_a_missing_reported_binary_concept_raises_before_loading_images(tmp_path):
-    probe = tmp_path / "probe.json"
-    probe.write_text('{"images": []}')
+    probe = _probe_json(tmp_path / "probe.json", label_space="coralscapes_v2", num_classes=95)
     with pytest.raises(RuntimeError, match=r"\['anthropogenic'\]"):
         evaluate_coralscapes_probe(
+            CORALSCAPES_V2,
+            [probe],
+            None,  # type: ignore[arg-type]
             predictor=None,  # type: ignore[arg-type]
-            probe_json=probe,
-            version=None,  # type: ignore[arg-type]
             output_dir=tmp_path / "out",
-            concept_names=["bleached", "sand"],
-            taxonomy_csv=_CSV,
+            concepts=ProbeConcepts(["bleached", "sand"], _CSV),
         )
 
 
@@ -461,67 +510,84 @@ def test_average_window_logits_rejects_bad_shapes_counts_and_windows(logits_shap
 def test_union_probe_images_rejects_the_same_image_twice_within_one_budget():
     image = {"site": "s", "stem": "a", "label_md5": "m", "height": 1, "width": 1, "points": []}
     with pytest.raises(RuntimeError, match=r"duplicate k=5 points for s/a"):
-        union_probe_images({5: {"images": [image, image]}})
+        _union_probe_images({5: {"images": [image, image]}})
 
 
-def test_score_legacy_rejects_a_lut_that_emits_an_id_beyond_the_legacy_classes():
+def test_score_classes_rejects_a_lut_that_emits_an_id_beyond_the_label_space():
     lut = np.zeros(96, dtype=np.uint8)
-    lut[1] = LEGACY_NUM_CLASSES + 1
-    confusion = ClassConfusion(LEGACY_NUM_CLASSES + 1, ignore_index=0)
-    with pytest.raises(RuntimeError, match="legacy label id 40 is outside 0..39"):
-        score_legacy_activated(
-            torch.zeros(1, 1, 1), np.ones((1, 1), np.uint8), lut, {5: _head(1)}, {5: confusion}
+    lut[1] = 40
+    confusion = ClassConfusion(40, ignore_index=0)
+    with pytest.raises(RuntimeError, match="test label id 40 is outside 0..39"):
+        _score_classes(
+            torch.zeros(1, 1, 1),
+            np.ones((1, 1), np.uint8),
+            _space_with_lut(lut),
+            {5: _head(1)},
+            {5: confusion},
         )
     assert confusion.total == 0
 
 
-def test_legacy_probe_run_fits_one_svm_per_budget_and_scores_each_in_one_forward(
-    tmp_path, monkeypatch
-):
-    lut = coralscapes_v2_to_legacy_lut()
-    v2_for = {legacy: int(np.flatnonzero(lut == legacy)[0]) for legacy in (1, 2, 3)}
-    # Native label: legacy 1 on columns 0:512 and 1024:1536, legacy 2 on 512:1024, legacy 3 after.
-    label = np.full((HEIGHT, WIDTH), v2_for[1], dtype=np.uint8)
-    label[:, 512:1024] = v2_for[2]
-    label[:, 1536:] = v2_for[3]
-    monkeypatch.setattr(coralscapes_probe, "dense_images", lambda _version: None)
-    monkeypatch.setattr(coralscapes_probe, "split_rows", lambda _frame, _split: [{}])
-    monkeypatch.setattr(coralscapes_probe, "load_row", lambda _v, _row: (_banded_image(), label))
+def _stub_version_reads(monkeypatch, label: np.ndarray) -> None:
+    """Every probe and split image is the banded image over ``label``."""
+    monkeypatch.setattr(coralscapes_probe, "_dense_images", lambda _version: None)
+    monkeypatch.setattr(coralscapes_probe, "_split_rows", lambda _frame, _split: [{}])
+    monkeypatch.setattr(coralscapes_probe, "_load_row", lambda _v, _row: (_banded_image(), label))
     monkeypatch.setattr(
-        coralscapes_probe, "load_probe_entry", lambda _v, _f, _e: (_banded_image(), label)
+        coralscapes_probe, "_load_probe_entry", lambda _v, _f, _e: (_banded_image(), label)
     )
 
+
+def _three_class_entry() -> dict:
     def points(class_id, cols):
         return [
             {"row": 100 * (i + 1), "col": col, "class_id": class_id} for i, col in enumerate(cols)
         ]
 
-    image = {"site": "s", "stem": "a", "label_md5": "m", "height": HEIGHT, "width": WIDTH}
-    entry = {
-        **image,
+    return {
+        "site": "s",
+        "stem": "a",
+        "label_md5": "m",
+        "height": HEIGHT,
+        "width": WIDTH,
         "points": points(1, [10, 100, 300, 450])
         + points(2, [600, 700, 800, 900])
         + points(3, [1600, 1800, 1900, 2000]),
     }
+
+
+def test_coralscapes39_run_fits_one_svm_per_budget_and_scores_each_in_one_forward(
+    tmp_path, monkeypatch
+):
+    lut = coralscapes_v2_to_legacy_lut()
+    v2_for = {target: int(np.flatnonzero(lut == target)[0]) for target in (1, 2, 3)}
+    # Native label: 39-class id 1 on columns 0:512 and 1024:1536, 2 on 512:1024, 3 after.
+    label = np.full((HEIGHT, WIDTH), v2_for[1], dtype=np.uint8)
+    label[:, 512:1024] = v2_for[2]
+    label[:, 1536:] = v2_for[3]
+    _stub_version_reads(monkeypatch, label)
     probe_paths = [
-        _probe_json(tmp_path / f"k{k}.json", points_per_class_target=k, images=[entry])
+        _probe_json(
+            tmp_path / f"k{k}.json", points_per_class_target=k, images=[_three_class_entry()]
+        )
         for k in (5, 10)
     ]
     # Bands 0..3 carry window logits (w, w^2) = (2, 4), (4, 16), (8, 64), (10, 100): points on a
     # convex curve, so each class is linearly separable from the others.
     predictor = _WindowPredictor(scale=4.0, second=lambda w: w**2)
 
-    out = evaluate_coralscapes39_probe(
+    out = evaluate_coralscapes_probe(
+        CORALSCAPES39,
+        probe_paths,
+        None,  # type: ignore[arg-type]
         predictor=predictor,  # type: ignore[arg-type]
-        probe_jsons=probe_paths,
-        version=None,  # type: ignore[arg-type]
         output_dir=tmp_path / "out",
         splits=["test"],
     )
 
     # One train image shared by both budgets plus one test image: two forwards.
     assert predictor.forward_calls == 2
-    result = out["test"]
+    result = out["coralscapes39_test"]
     assert sorted(result["by_k"]) == ["10", "5"]
     # The SVM predicts 1, 2, 3, 3 for the four bands; band 2 is labelled 1, the only error.
     # Class 1: tp 512 of 1024 gt and 512 predicted -> 1/2; class 2: 1; class 3: 512 of 1024 -> 1/2.
@@ -535,6 +601,63 @@ def test_legacy_probe_run_fits_one_svm_per_budget_and_scores_each_in_one_forward
         assert result["by_k"][k]["probe"]["num_points"] == 12
     on_disk = json.loads((tmp_path / "out" / "coralscapes39_test" / "metrics.json").read_text())
     assert on_disk["by_k"]["5"]["test"]["accuracy"] == pytest.approx(0.75)
+    assert not {"bleached", "anthropogenic", "hierarchical"} & set(on_disk)
+
+
+def _kingdom_and_binary_concept_names() -> list[str]:
+    kingdoms = [name for name in _full_concept_names() if name.startswith("kingdom__")]
+    return [*kingdoms, "bleached", "anthropogenic"]
+
+
+def test_coralscapes_v2_run_writes_the_by_k_shape_with_unannotated_concept_counts(
+    tmp_path, monkeypatch
+):
+    # Native ids 1, 2, 3 on the bands; the top row (2048 pixels) is unannotated.
+    label = np.full((HEIGHT, WIDTH), 1, dtype=np.uint8)
+    label[:, 512:1024] = 2
+    label[:, 1536:] = 3
+    label[0, :] = 0
+    _stub_version_reads(monkeypatch, label)
+    probe = _probe_json(
+        tmp_path / "probe.json",
+        label_space="coralscapes_v2",
+        num_classes=95,
+        points_per_class_target=10,
+        images=[_three_class_entry()],
+    )
+    names = _kingdom_and_binary_concept_names()
+    predictor = _WindowPredictor(scale=4.0, second=lambda w: w**2, n_channels=len(names))
+
+    out = evaluate_coralscapes_probe(
+        CORALSCAPES_V2,
+        [probe],
+        None,  # type: ignore[arg-type]
+        predictor=predictor,  # type: ignore[arg-type]
+        output_dir=tmp_path / "out",
+        concepts=ProbeConcepts(names, _CSV),
+        splits=["val"],
+    )
+
+    on_disk = json.loads((tmp_path / "out" / "coralscapes_val" / "metrics.json").read_text())
+    assert list(out) == ["coralscapes_val"]
+    assert set(on_disk) == {
+        "eval",
+        "split",
+        "label_space",
+        "num_classes",
+        "by_k",
+        "hierarchical",
+        "bleached",
+        "anthropogenic",
+    }
+    assert (on_disk["eval"], on_disk["split"]) == ("coralscapes", "val")
+    assert (on_disk["label_space"], on_disk["num_classes"]) == ("coralscapes_v2", 95)
+    assert list(on_disk["by_k"]) == ["10"]
+    assert on_disk["by_k"]["10"]["probe"]["points_per_class_target"] == 10
+    assert on_disk["by_k"]["10"]["val"]["status"] == "done"
+    assert "hierarchical" in on_disk
+    for concept in ("bleached", "anthropogenic"):
+        assert on_disk[concept]["n_unannotated"] == 2048
 
 
 def test_a_two_class_probe_predicts_the_second_class_where_it_scores_higher():
@@ -585,7 +708,7 @@ def version(tmp_path: Path):
 def test_a_probe_entry_reads_the_train_image_with_its_stem_as_image_id(version):
     entry = {"site": "site1", "stem": "site1_a", "label_md5": label_md5(_two_band_label(2, 5))}
 
-    image, label = load_probe_entry(version, dense_images(version), entry)
+    image, label = _load_probe_entry(version, _dense_images(version), entry)
 
     assert image.shape == (HEIGHT, WIDTH, 3)
     assert [int(label[r, c]) for r, c in [(0, 0), (511, 2047), (512, 0), (1023, 1000)]] == [
@@ -598,9 +721,9 @@ def test_a_probe_entry_reads_the_train_image_with_its_stem_as_image_id(version):
 
 def test_a_probe_stem_that_is_not_a_train_image_raises(version):
     with pytest.raises(KeyError, match="site1_b"):
-        load_probe_entry(
+        _load_probe_entry(
             version,
-            dense_images(version),
+            _dense_images(version),
             {"site": "site1", "stem": "site1_b", "label_md5": "m"},
         )
 
@@ -610,7 +733,7 @@ def test_a_probe_label_md5_that_differs_from_the_version_mask_raises(version):
     entry = {"site": "site1", "stem": "site1_a", "label_md5": "0" * 32}
 
     with pytest.raises(ValueError, match=f"site1_a.*{'0' * 32}.*{actual}"):
-        load_probe_entry(version, dense_images(version), entry)
+        _load_probe_entry(version, _dense_images(version), entry)
 
 
 @pytest.mark.parametrize(
@@ -619,8 +742,8 @@ def test_a_probe_label_md5_that_differs_from_the_version_mask_raises(version):
 def test_a_split_selects_its_group_rows_with_the_native_label_ids(
     version, split, image_id, top, bottom
 ):
-    rows = split_rows(dense_images(version), split)
+    rows = _split_rows(_dense_images(version), split)
 
     assert [row["image_id"] for row in rows] == [image_id]
-    _, label = coralscapes_probe.load_row(version, rows[0])
+    _, label = coralscapes_probe._load_row(version, rows[0])
     assert (int(label[0, 0]), int(label[HEIGHT - 1, WIDTH - 1])) == (top, bottom)

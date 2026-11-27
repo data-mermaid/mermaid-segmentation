@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from mermaidseg.evaluation.metrics import (
-    BinaryConceptScore,
     BinaryConceptStats,
     ClassConfusion,
     ConceptLayout,
@@ -157,30 +156,33 @@ def test_concept_block_is_copied_per_concept_and_missing_raises():
         concept_block_from_binary(binary, "sand")
 
 
-def test_binary_concept_score_separates_true_false_not_given_and_unannotated():
-    score = BinaryConceptScore(threshold=0.5)
-    # code 2 / 0.9 -> TP; code 2 / 0.5 -> FN (exactly 0.5 is negative)
-    # code 1 / 0.9 -> FP; code 1 / 0.1 -> TN
-    # code 0, annotated -> not_given; code 0, unannotated -> not a negative
-    codes = np.array([2, 2, 1, 1, 0, 0])
-    probs = np.array([0.9, 0.5, 0.9, 0.1, 0.99, 0.01])
-    unannotated = np.array([False, False, False, False, False, True])
-    score.update(codes, probs, unannotated)
-    got = score.to_dict()
-    assert (got["tp"], got["fn"], got["fp"], got["tn"]) == (1, 1, 1, 1)
-    assert got["n_true"] == 2
-    assert got["n_false"] == 2
+def test_binary_stats_excludes_unannotated_rows_from_every_count():
+    stats = BinaryConceptStats(["a"], [0])
+    # Annotated: code 2 / 0.9 -> TP, code 1 / 0.1 -> TN, code 0 -> not_given.
+    # Unannotated: two code-0 rows with confident probabilities count nowhere else.
+    codes = np.array([[2], [1], [0], [0], [0]])
+    probs = np.array([[0.9], [0.1], [0.99], [0.99], [0.01]])
+    unannotated = np.array([False, False, False, True, True])
+    stats.update(codes, probs, unannotated=unannotated)
+    got = stats.per_concept()["a"]
+    assert (got["tp"], got["fp"], got["fn"], got["tn"]) == (1, 0, 0, 1)
     assert got["n_not_given"] == 1
-    assert got["n_unannotated"] == 1
-    assert got["precision"] == 0.5
-    assert got["recall"] == 0.5
-    assert abs(got["accuracy"] - 0.5) < 1e-9
+    assert got["n_unannotated"] == 2
 
 
-def test_binary_concept_score_rejects_unannotated_marked_true():
-    score = BinaryConceptScore()
+def test_binary_stats_rejects_an_unannotated_row_with_a_given_code():
+    stats = BinaryConceptStats(["a", "b"], [0, 1])
     with pytest.raises(ValueError, match="unannotated"):
-        score.update(np.array([2]), np.array([0.9]), np.array([True]))
+        stats.update(np.array([[0, 2]]), np.array([[0.9, 0.9]]), unannotated=np.array([True]))
+
+
+def test_binary_stats_merge_sums_unannotated_counts():
+    a = BinaryConceptStats(["c"], [0])
+    b = BinaryConceptStats(["c"], [0])
+    a.update(np.array([[0]]), np.array([[0.9]]), unannotated=np.array([True]))
+    b.update(np.array([[0], [0]]), np.array([[0.9], [0.9]]), unannotated=np.array([True, True]))
+    a.merge(b)
+    assert a.per_concept()["c"]["n_unannotated"] == 3
 
 
 def test_bundle_merge_pools_class_taxonomic_and_binary_counts():
@@ -526,23 +528,6 @@ def test_binary_stats_rejects_misaligned_names_and_channels():
 def test_taxonomic_rejects_matrices_and_values_that_do_not_match_the_channels(kwargs, match):
     with pytest.raises(ValueError, match=match):
         TaxonomicRankAccuracy("kingdom", [0, 1], **kwargs)
-
-
-@pytest.mark.parametrize(
-    ("codes", "probs", "unannotated", "match"),
-    [
-        ([2, 1], [0.9], None, "shape mismatch"),
-        ([2, 3], [0.9, 0.9], None, r"found \[3\]"),
-        ([2, 0], [0.9, 0.9], [False], "does not match codes"),
-    ],
-    ids=["probabilities_shape", "invalid_code", "unannotated_shape"],
-)
-def test_binary_concept_score_rejects_malformed_input(codes, probs, unannotated, match):
-    score = BinaryConceptScore()
-    mask = None if unannotated is None else np.array(unannotated)
-    with pytest.raises(ValueError, match=match):
-        score.update(np.array(codes), np.array(probs), mask)
-    assert (score.tp, score.fp, score.fn, score.tn) == (0, 0, 0, 0)
 
 
 def test_concept_block_from_binary_rejects_an_entry_missing_a_required_field():

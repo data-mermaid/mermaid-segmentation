@@ -14,7 +14,7 @@ import torch
 import yaml
 
 import scripts.evaluate as evaluate_script
-from mermaidseg.evaluation.coralscapes_probe import load_legacy_probes
+from mermaidseg.evaluation.coralscapes_probe import CORALSCAPES39, load_probes
 from mermaidseg.inference.bundle import load_bundle
 from mermaidseg.io import REPO_ROOT
 from tests.mermaidseg.conftest import deployable_lineage, export_ckpt, repo_with_origin
@@ -54,11 +54,11 @@ def _run_main_capturing_predictor(
 
     seen: dict[str, Any] = {}
 
-    def _probe(*, predictor, **_):
+    def _probe(*_args, predictor, **_):
         seen["predictor"] = predictor
         return {}
 
-    monkeypatch.setattr(coralscapes_probe, "evaluate_coralscapes39_probe", _probe)
+    monkeypatch.setattr(coralscapes_probe, "evaluate_coralscapes_probe", _probe)
     evaluate_script.main(
         [
             "--bundle",
@@ -122,8 +122,8 @@ def test_main_passes_the_bundles_concept_mapping_path_resolved_against_the_repo_
     bundle = export_ckpt(checkpoint, tmp_path / "bundle", repo_dir=repo)
     seen: dict[str, Any] = {}
 
-    def _probe(*, taxonomy_csv, **_):
-        seen["taxonomy_csv"] = taxonomy_csv
+    def _probe(*_args, concepts, **_):
+        seen["taxonomy_csv"] = concepts.taxonomy_csv
         return {}
 
     monkeypatch.setattr(coralscapes_probe, "evaluate_coralscapes_probe", _probe)
@@ -264,6 +264,7 @@ _BLEACHED = {
     "n_true": 5,
     "n_false": 6,
     "n_not_given": 7,
+    "n_unannotated": 0,
 }
 _HIERARCHICAL = {
     "consistency/overall": 0.91,
@@ -277,17 +278,8 @@ def test_concept_lines_report_each_reported_binary_concept_then_the_hierarchy():
 
     assert evaluate_script._concept_lines(section) == [
         "- bleached acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-        "(n_true=5 n_false=6 n_not_given=7)",
+        "(n_true=5 n_false=6 n_not_given=7 n_unannotated=0)",
         "- hierarchical: consistency 0.9100, severity (mean normalized) 0.1200, ECE (mean) 0.0300",
-    ]
-
-
-def test_concept_lines_append_the_unannotated_count_when_present():
-    section = {"anthropogenic": {**_BLEACHED, "n_unannotated": 11}}
-
-    assert evaluate_script._concept_lines(section) == [
-        "- anthropogenic acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-        "(n_true=5 n_false=6 n_not_given=7 n_unannotated=11)"
     ]
 
 
@@ -308,7 +300,7 @@ def test_point_lines_format_the_pooled_metrics_under_the_title():
         "- live coral taxonomic acc/macro F1: genus=0.3000/0.2000 (n=9)",
         "- binary macro acc/F1: 0.9000/0.8500",
         "- bleached acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-        "(n_true=5 n_false=6 n_not_given=7)",
+        "(n_true=5 n_false=6 n_not_given=7 n_unannotated=0)",
         "",
     ]
 
@@ -401,19 +393,19 @@ def test_write_summary_writes_the_summary_as_json(tmp_path):
         (
             "coralscapes_val",
             {
-                "feature_kinds": {
-                    "concepts": {
+                "by_k": {
+                    "10": {
                         "val": {"accuracy": 0.6, "miou": 0.3},
-                        "probe": {"train_accuracy": 0.9},
+                        "probe": {"train_accuracy": 0.9, "num_points": 945},
                     }
                 },
                 "bleached": _BLEACHED,
             },
             [
                 "## CoralscapesV2 95-class linear probe (val)",
-                "- concepts: val accuracy 0.6000, mIoU 0.3000 (probe train acc 0.9000)",
+                "- k=10: val accuracy 0.6000, mIoU 0.3000 (probe train acc 0.9000, 945 pixels)",
                 "- bleached acc/precision/recall/F1: 0.1000/0.2000/0.3000/0.4000 "
-                "(n_true=5 n_false=6 n_not_given=7)",
+                "(n_true=5 n_false=6 n_not_given=7 n_unannotated=0)",
             ],
         ),
     ],
@@ -491,16 +483,14 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> _Calls:
 
     monkeypatch.setattr(coralnet_eval, "evaluate_coralnet", _stub("coralnet", _POOLED_RESULT))
     monkeypatch.setattr(pacific_eval, "evaluate_pacific", _stub("pacific", _POOLED_RESULT))
-    monkeypatch.setattr(
-        coralscapes_probe,
-        "evaluate_coralscapes_probe",
-        _stub("coralscapes", {"val": {"feature_kinds": {}}, "train": {"feature_kinds": {}}}),
-    )
-    monkeypatch.setattr(
-        coralscapes_probe,
-        "evaluate_coralscapes39_probe",
-        _stub("coralscapes39", {"val": {"by_k": {}}}),
-    )
+
+    def _probe(label_space: Any, probe_jsons: Any, version: Any, **kwargs: Any) -> Any:
+        recorded.record(
+            label_space.eval_name, {"probe_jsons": probe_jsons, "version": version, **kwargs}
+        )
+        return {}
+
+    monkeypatch.setattr(coralscapes_probe, "evaluate_coralscapes_probe", _probe)
     monkeypatch.setattr(
         val_loss, "evaluate_val_loss", _stub("val_loss", {"overall": {"loss": 1.0}})
     )
@@ -880,9 +870,10 @@ def test_default_probe_points_file_loads():
 def test_default_coralscapes39_probe_file_loads():
     path = _parse_defaults().coralscapes39_probe
 
-    probes = load_legacy_probes([path])
+    probes = load_probes([path])
 
-    assert 50 in probes
+    assert probes.label_space is CORALSCAPES39
+    assert 50 in probes.by_k
 
 
 def _write_config(tmp_path: Path, data: dict[str, Any]) -> Path:

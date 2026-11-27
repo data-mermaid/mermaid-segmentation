@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 import mermaidseg.evaluation.coralscapes_probe_points as builder
-from mermaidseg.evaluation.coralscapes_probe import label_md5, legacy_label
+from mermaidseg.evaluation.coralscapes_probe import LabelSpace, label_md5, legacy_label
 from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
 
@@ -165,7 +165,7 @@ def test_legacy_label_merges_adjacent_fine_classes_into_one_legacy_component():
     assert found[1] == [(1, 16)]
 
 
-def test_legacy_build_stores_legacy_ids_and_the_original_label_md5(tmp_path: Path):
+def test_remapped_build_stores_label_space_ids_and_the_original_label_md5(tmp_path: Path):
     label = np.zeros((builder.EXPECTED_HEIGHT, builder.EXPECTED_WIDTH), dtype=np.uint8)
     label[100:120, 100:120] = 4
     label[400:420, 400:420] = 8
@@ -192,9 +192,7 @@ def test_legacy_build_stores_legacy_ids_and_the_original_label_md5(tmp_path: Pat
         per_class=1,
         min_component_size=4,
         exclusion_radius=16,
-        label_lut=lut,
-        id2name={2: "two", 5: "five"},
-        class_ids=[2, 5],
+        label_space=LabelSpace("test", "test", 5, {2: "two", 5: "five"}, lut),
     )
     payload = json.loads(output.read_text())
     assert [(i["site"], i["stem"]) for i in payload["images"]] == [("siteA", "siteA_000001_000001")]

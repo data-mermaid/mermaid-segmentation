@@ -262,12 +262,11 @@ def _concept_lines(section: dict) -> list[str]:
         b = section.get(concept)
         if not isinstance(b, dict):
             continue
-        unannotated = f" n_unannotated={b['n_unannotated']}" if "n_unannotated" in b else ""
         lines.append(
             f"- {concept} acc/precision/recall/F1: "
             f"{fmt(b.get('accuracy'))}/{fmt(b.get('precision'))}/{fmt(b.get('recall'))}/{fmt(b.get('f1'))} "
             f"(n_true={b.get('n_true')} n_false={b.get('n_false')} "
-            f"n_not_given={b.get('n_not_given')}{unannotated})"
+            f"n_not_given={b.get('n_not_given')} n_unannotated={b.get('n_unannotated')})"
         )
     h = section.get("hierarchical")
     if isinstance(h, dict):
@@ -322,6 +321,20 @@ def _val_loss_lines(section: dict, title: str = "Validation loss") -> list[str]:
     return lines
 
 
+def _probe_lines(title: str, section: dict, split: str) -> list[str]:
+    lines = [f"## {title}"]
+    for k, block in section.get("by_k", {}).items():
+        scores = block.get(split) or {}
+        probe = block.get("probe") or {}
+        lines.append(
+            f"- k={k}: {split} accuracy {fmt(scores.get('accuracy'))}, "
+            f"mIoU {fmt(scores.get('miou'))} "
+            f"(probe train acc {fmt(probe.get('train_accuracy'))}, "
+            f"{probe.get('num_points')} pixels)"
+        )
+    return lines
+
+
 def _write_summary(output_dir: Path, summary: dict) -> None:
     write_json(output_dir / "summary.json", summary)
     lines = ["# CBM evaluation summary", ""]
@@ -341,26 +354,13 @@ def _write_summary(output_dir: Path, summary: dict) -> None:
             lines += _val_loss_lines(section, "CoralNet train-source loss")
         elif key.startswith("coralscapes39_"):
             split = key.removeprefix("coralscapes39_")
-            lines.append(f"## CoralscapesV2 39-class linear probe ({split})")
-            for k, block in section.get("by_k", {}).items():
-                scores = block.get(split) or {}
-                probe = block.get("probe") or {}
-                lines.append(
-                    f"- k={k}: {split} accuracy {fmt(scores.get('accuracy'))}, "
-                    f"mIoU {fmt(scores.get('miou'))} "
-                    f"(probe train acc {fmt(probe.get('train_accuracy'))}, "
-                    f"{probe.get('num_points')} pixels)"
-                )
-            lines.append("")
+            lines += [
+                *_probe_lines(f"CoralscapesV2 39-class linear probe ({split})", section, split),
+                "",
+            ]
         elif key.startswith("coralscapes_"):
             split = key.removeprefix("coralscapes_")
-            lines.append(f"## CoralscapesV2 95-class linear probe ({split})")
-            for kind, kd in section["feature_kinds"].items():
-                s = kd.get(split) or {}
-                lines.append(
-                    f"- {kind}: {split} accuracy {fmt(s.get('accuracy'))}, mIoU {fmt(s.get('miou'))} "
-                    f"(probe train acc {fmt(kd['probe']['train_accuracy'])})"
-                )
+            lines += _probe_lines(f"CoralscapesV2 95-class linear probe ({split})", section, split)
             lines += [*_concept_lines(section), ""]
     (output_dir / "summary.md").write_text("\n".join(lines))
 
@@ -530,44 +530,45 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if "coralscapes" in evals:
-        from mermaidseg.evaluation.coralscapes_probe import evaluate_coralscapes_probe
+        from mermaidseg.evaluation.coralscapes_probe import (
+            CORALSCAPES_V2,
+            ProbeConcepts,
+            evaluate_coralscapes_probe,
+        )
 
         _run(
             [f"coralscapes_{split}"],
-            lambda: {
-                f"coralscapes_{s}": result
-                for s, result in evaluate_coralscapes_probe(
-                    predictor=predictor,
-                    probe_json=args.probe_points,
-                    version=open_dataset_version(section, CORALSCAPES, cache_dir),
-                    output_dir=output_dir,
-                    concept_names=concept_names,
-                    taxonomy_csv=concept_mapping_path,
-                    splits=[split],
-                    svm_c=args.svm_c,
-                    max_test_images=args.max_test_images,
-                    removed_concepts=removed_concepts,
-                ).items()
-            },
+            lambda: evaluate_coralscapes_probe(
+                CORALSCAPES_V2,
+                [args.probe_points],
+                open_dataset_version(section, CORALSCAPES, cache_dir),
+                predictor=predictor,
+                output_dir=output_dir,
+                concepts=ProbeConcepts(concept_names, concept_mapping_path, removed_concepts),
+                splits=[split],
+                svm_c=args.svm_c,
+                max_test_images=args.max_test_images,
+            ),
         )
 
     if "coralscapes39" in evals:
-        from mermaidseg.evaluation.coralscapes_probe import evaluate_coralscapes39_probe
+        from mermaidseg.evaluation.coralscapes_probe import (
+            CORALSCAPES39,
+            evaluate_coralscapes_probe,
+        )
 
         _run(
             [f"coralscapes39_{split}"],
-            lambda: {
-                f"coralscapes39_{s}": result
-                for s, result in evaluate_coralscapes39_probe(
-                    predictor=predictor,
-                    probe_jsons=[args.coralscapes39_probe],
-                    version=open_dataset_version(section, CORALSCAPES, cache_dir),
-                    output_dir=output_dir,
-                    splits=[split],
-                    svm_c=args.svm_c,
-                    max_test_images=args.max_test_images,
-                ).items()
-            },
+            lambda: evaluate_coralscapes_probe(
+                CORALSCAPES39,
+                [args.coralscapes39_probe],
+                open_dataset_version(section, CORALSCAPES, cache_dir),
+                predictor=predictor,
+                output_dir=output_dir,
+                splits=[split],
+                svm_c=args.svm_c,
+                max_test_images=args.max_test_images,
+            ),
         )
 
     if "val_loss" in evals:

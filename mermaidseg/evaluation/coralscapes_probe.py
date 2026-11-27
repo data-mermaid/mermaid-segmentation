@@ -4,9 +4,10 @@ Trains a linear SVM (sklearn ``LinearSVC``) on activated concept features sample
 at a fixed probe point set from the train split (see
 ``scripts/build_coralscapes_v2_probe_points.py``), then applies that one SVM over
 each requested CoralscapesV2 split (``val`` and/or ``test``) and reports accuracy
-and mIoU over the 95 classes. ``evaluate_coralscapes39_probe`` does the same
-probe after the published 95-to-39 collapse (the suite uses the 50-pixels-per-class
-probe set); several budgets share one forward pass.
+and mIoU in a label space: ``CORALSCAPES_V2`` (the 95 native classes) or
+``CORALSCAPES39`` (the published 95-to-39 collapse). Each probe file is one
+pixels-per-class budget k; several budgets share one forward pass and each gets its
+own SVM.
 
 Every 1024x2048 image is predicted with three windows, each resized to the model
 input size:
@@ -19,10 +20,9 @@ The three concept-logit maps are bilinearly upsampled back onto those rectangles
 and averaged, on the model device, where the windows overlap. The model's
 ``concept_outputs_activation`` (per-rank softmax, sigmoid on the binary tail) is
 applied to the averaged logits. Probe pixels and the dense SVM both read that
-activated map, so train and test use the same features. Only the ``concepts``
-feature kind is supported.
+activated map, so train and test use the same features.
 
-The binary concepts in ``REPORTED_BINARY_CONCEPTS`` (``bleached``,
+When concepts are given, the binary concepts in ``REPORTED_BINARY_CONCEPTS`` (``bleached``,
 ``anthropogenic``) are scored from the same activated map, not from the SVM
 class prediction. ``TRUE`` (code 2) is the positive class, ``FALSE`` (code 1) is
 the negative class, ``not_given`` (code 0) is excluded, and mask id 0
@@ -39,12 +39,14 @@ md5 is verified), and the ``val`` and ``test`` splits are the ``validation`` and
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -59,8 +61,9 @@ from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 from mermaidseg.evaluation.metrics import (
     REPORTED_BINARY_CONCEPTS,
-    BinaryConceptScore,
+    BinaryConceptStats,
     ClassConfusion,
+    concept_block_from_binary,
 )
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.predictor import CBMPredictor
@@ -69,7 +72,8 @@ from segdata_spec.read import DatasetVersion
 logger = logging.getLogger(__name__)
 
 NUM_CLASSES = 95
-LEGACY_NUM_CLASSES = 39
+NATIVE_IDS = NUM_CLASSES + 1  # native Coralscapes v2 mask ids 0..95; 0 is unannotated
+CORALSCAPES39_NUM_CLASSES = 39
 CORALSCAPES_HEIGHT = 1024
 CORALSCAPES_WIDTH = 2048
 SPLITS = ("val", "test")
@@ -350,6 +354,68 @@ def coralscapes_v2_to_legacy_lut() -> NDArray[np.uint8]:
     return lut
 
 
+@dataclass(frozen=True)
+class LabelSpace:
+    """A class space the probe is fitted and scored in, reached from native masks.
+
+    Attributes:
+        name: The ``label_space`` value of a probe JSON in this space.
+        eval_name: Prefix of the summary keys and output directories.
+        num_classes: Class ids run ``1..num_classes``; 0 is unannotated.
+        id2name: Class name of each id.
+        lut: Maps a native Coralscapes v2 id (the index) to this space's id.
+    """
+
+    name: str
+    eval_name: str
+    num_classes: int
+    id2name: dict[int, str]
+    lut: np.ndarray
+
+
+CORALSCAPES_V2 = LabelSpace(
+    name="coralscapes_v2",
+    eval_name="coralscapes",
+    num_classes=NUM_CLASSES,
+    id2name=CORALSCAPES_V2_ID2NAME,
+    lut=np.arange(NATIVE_IDS, dtype=np.uint8),
+)
+CORALSCAPES39 = LabelSpace(
+    name="coralscapes39",
+    eval_name="coralscapes39",
+    num_classes=CORALSCAPES39_NUM_CLASSES,
+    id2name=CORALSCAPES_ID2NAME,
+    lut=coralscapes_v2_to_legacy_lut(),
+)
+_LABEL_SPACES = {space.name: space for space in (CORALSCAPES_V2, CORALSCAPES39)}
+
+
+def label_space_from_name(name: str) -> LabelSpace:
+    """Return the label space a probe JSON's ``label_space`` names.
+
+    Raises:
+        ValueError: No label space has that name.
+    """
+    if name not in _LABEL_SPACES:
+        raise ValueError(f"unknown label space {name!r}; expected one of {sorted(_LABEL_SPACES)}")
+    return _LABEL_SPACES[name]
+
+
+@dataclass(frozen=True)
+class ProbeConcepts:
+    """The concept channels and taxonomy the probe scores concepts and hierarchy with.
+
+    Attributes:
+        concept_names: The model's concept channel names, in channel order.
+        taxonomy_csv: ``class_to_concepts.csv`` of the bundle's run.
+        removed_concepts: Concepts taken out of the taxonomy tree (``training.concept_removal``).
+    """
+
+    concept_names: list[str]
+    taxonomy_csv: str | Path
+    removed_concepts: Sequence[str] = ()
+
+
 def label_md5(arr: NDArray[np.integer]) -> str:
     """Return the md5 hex digest of a label mask as uint8 bytes."""
     return hashlib.md5(np.ascontiguousarray(arr, dtype=np.uint8).tobytes()).hexdigest()
@@ -503,10 +569,7 @@ def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArr
 # --------------------------------------------------------------------------- #
 # Image source.
 # --------------------------------------------------------------------------- #
-_NATIVE_IDS = NUM_CLASSES + 1  # native Coralscapes v2 ids 0..95
-
-
-def dense_images(version: DatasetVersion) -> pd.DataFrame:
+def _dense_images(version: DatasetVersion) -> pd.DataFrame:
     """Return the images of a dense ``coralscapes_v2`` version sorted by ``image_id``.
 
     Raises:
@@ -520,27 +583,27 @@ def dense_images(version: DatasetVersion) -> pd.DataFrame:
     return version.images.to_pandas().sort_values("image_id").reset_index(drop=True)
 
 
-def split_rows(images: pd.DataFrame, split: str) -> list[dict[str, Any]]:
+def _split_rows(images: pd.DataFrame, split: str) -> list[dict[str, Any]]:
     """Return the rows of a split's group, in ``image_id`` order."""
     return images[images["group"] == _SPLIT_GROUPS[split]].to_dict("records")
 
 
-def load_row(version: DatasetVersion, row: Mapping[str, Any]) -> tuple[NDArray, NDArray]:
+def _load_row(version: DatasetVersion, row: Mapping[str, Any]) -> tuple[NDArray, NDArray]:
     """Load the RGB image and native label mask of an image row."""
     return (
         read_rgb(version.image_path(row)),
-        read_label_mask(version.mask_path(row), _NATIVE_IDS),
+        read_label_mask(version.mask_path(row), NATIVE_IDS),
     )
 
 
-def load_probe_entry(
+def _load_probe_entry(
     version: DatasetVersion, frame: pd.DataFrame, entry: dict
 ) -> tuple[NDArray, NDArray]:
     """Load the train image and label of a probe-set entry.
 
     Args:
         version: The opened dense ``coralscapes_v2`` version.
-        frame: The version's images, from :func:`dense_images`.
+        frame: The version's images, from :func:`_dense_images`.
         entry: Probe image entry with ``site``, ``stem`` and ``label_md5``.
 
     Returns:
@@ -556,7 +619,7 @@ def load_probe_entry(
             f"Probe image {entry['site']}/{entry['stem']} is not a {PROBE_GROUP!r} image of "
             f"{version.manifest.dataset} {version.manifest.version}"
         )
-    img, lab = load_row(version, match.iloc[0].to_dict())
+    img, lab = _load_row(version, match.iloc[0].to_dict())
     actual = label_md5(lab)
     if actual != entry["label_md5"]:
         raise ValueError(
@@ -564,6 +627,91 @@ def load_probe_entry(
             f"{entry['label_md5']}, the version's mask has {actual}"
         )
     return img, lab
+
+
+# --------------------------------------------------------------------------- #
+# Probe sets.
+# --------------------------------------------------------------------------- #
+class ProbeSets(NamedTuple):
+    """Probe JSON files of one label space, keyed by ``points_per_class_target``.
+
+    Attributes:
+        label_space: The label space every file is in.
+        by_k: Each file's payload, keyed by its ``points_per_class_target``.
+        images: One record per train image, its points grouped by k under ``points_by_k``.
+    """
+
+    label_space: LabelSpace
+    by_k: dict[int, dict]
+    images: list[dict]
+
+
+def load_probes(paths: Sequence[Path]) -> ProbeSets:
+    """Load probe JSON files of one label space, keyed by ``points_per_class_target``.
+
+    Raises:
+        ValueError: A file has no ``label_space`` field or names an unknown one.
+        RuntimeError: No file is given, the files mix label spaces, two files share a
+            k, or a file's ``num_classes`` differs from its label space.
+    """
+    probes: dict[int, dict] = {}
+    space: LabelSpace | None = None
+    for path in paths:
+        probe_path = Path(path)
+        with probe_path.open() as handle:
+            probe = json.load(handle)
+        if "label_space" not in probe:
+            raise ValueError(f"{probe_path} has no label_space field")
+        file_space = label_space_from_name(probe["label_space"])
+        if space is not None and file_space is not space:
+            raise RuntimeError(
+                f"probe sets mix label spaces {space.name} and {file_space.name} ({probe_path})"
+            )
+        space = file_space
+        k = int(probe["points_per_class_target"])
+        if k in probes:
+            raise RuntimeError(f"two probe sets target k={k}")
+        if int(probe.get("num_classes", 0)) != space.num_classes:
+            raise RuntimeError(
+                f"{probe_path} num_classes is {probe.get('num_classes')}, "
+                f"expected {space.num_classes}"
+            )
+        probes[k] = probe
+    if space is None:
+        raise RuntimeError("no probe sets were given")
+    return ProbeSets(space, probes, _union_probe_images(probes))
+
+
+def _union_probe_images(probes: Mapping[int, dict]) -> list[dict]:
+    """One record per train image, with that image's points grouped by k.
+
+    The same ``(site, stem)`` across budgets is forwarded once. A disagreeing
+    ``label_md5`` raises.
+    """
+    merged: dict[tuple[str, str], dict] = {}
+    for k, probe in probes.items():
+        for image in probe["images"]:
+            key = (str(image["site"]), str(image["stem"]))
+            slot = merged.get(key)
+            if slot is None:
+                slot = {
+                    "site": image["site"],
+                    "stem": image["stem"],
+                    "label_md5": image["label_md5"],
+                    "height": image["height"],
+                    "width": image["width"],
+                    "points_by_k": {},
+                }
+                merged[key] = slot
+            elif slot["label_md5"] != image["label_md5"]:
+                raise RuntimeError(
+                    f"{key[0]}/{key[1]} has label md5 {slot['label_md5']} at one k and "
+                    f"{image['label_md5']} at k={k}"
+                )
+            if k in slot["points_by_k"]:
+                raise RuntimeError(f"duplicate k={k} points for {key[0]}/{key[1]}")
+            slot["points_by_k"][k] = list(image["points"])
+    return sorted(merged.values(), key=lambda item: (str(item["site"]), str(item["stem"])))
 
 
 # --------------------------------------------------------------------------- #
@@ -594,26 +742,30 @@ def _sample_activated(
 
 def _extract_probe_features(
     predictor: CBMPredictor, version: DatasetVersion, frame: pd.DataFrame, images: list[dict]
-) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
-    feats: list[NDArray[np.float32]] = []
-    labels: list[int] = []
-    for entry in tqdm(images, desc="probe features (concepts)"):
-        pts = entry["points"]
-        if not pts:
-            continue
-        image_np, label_np = load_probe_entry(version, frame, entry)
+) -> dict[int, tuple[NDArray[np.float32], NDArray[np.int64]]]:
+    """Sample every k's pixels from one activated map per train image."""
+    feats: dict[int, list[NDArray[np.float32]]] = defaultdict(list)
+    labels: dict[int, list[int]] = defaultdict(list)
+    for entry in tqdm(images, desc="probe features"):
+        image_np, label_np = _load_probe_entry(version, frame, entry)
         what = f"{entry.get('site')}/{entry.get('stem')}"
         _require_rgb(image_np, what)
         _require_label(label_np, what)
         activated = _activated_concepts(predictor, image_np)
-        rows = np.array([p["row"] for p in pts], dtype=np.int64)
-        cols = np.array([p["col"] for p in pts], dtype=np.int64)
-        sampled = _sample_activated(activated, rows, cols)  # (K, N)
-        feats.append(sampled.transpose(0, 1).cpu().numpy().astype(np.float32))
-        labels.extend(int(p["class_id"]) for p in pts)
+        for k, pts in entry["points_by_k"].items():
+            if not pts:
+                continue
+            rows = np.array([point["row"] for point in pts], dtype=np.int64)
+            cols = np.array([point["col"] for point in pts], dtype=np.int64)
+            sampled = _sample_activated(activated, rows, cols)
+            feats[k].append(sampled.transpose(0, 1).cpu().numpy().astype(np.float32))
+            labels[k].extend(int(point["class_id"]) for point in pts)
     if not feats:
         raise RuntimeError("No probe features extracted (empty probe set?)")
-    return np.concatenate(feats, axis=0), np.asarray(labels, dtype=np.int64)
+    return {
+        k: (np.concatenate(feats[k], axis=0), np.asarray(labels[k], dtype=np.int64))
+        for k in sorted(feats)
+    }
 
 
 def _fit_linear_svm(
@@ -642,6 +794,55 @@ def _folded_linear(
     beff = intercept - (mean / scale) @ coef.t()
     classes = torch.tensor(svm.classes_, dtype=torch.long, device=device)
     return weff, beff, classes
+
+
+def _probe_info(
+    k: int, probe: dict, X: NDArray[np.float32], y: NDArray[np.int64], train_acc: float
+) -> dict:
+    classes_present = sorted({int(class_id) for class_id in y})
+    return {
+        "k": k,
+        "num_points": int(X.shape[0]),
+        "feature_dim": int(X.shape[1]),
+        "num_classes_present": len(classes_present),
+        "classes_present": classes_present,
+        "train_accuracy": train_acc,
+        "points_per_class_target": int(probe["points_per_class_target"]),
+        "points_per_class": {
+            str(class_id): int(count)
+            for class_id, count in probe.get("points_per_class", {}).items()
+        },
+    }
+
+
+def _fit_heads(
+    label_space: LabelSpace,
+    probes: Mapping[int, dict],
+    features: Mapping[int, tuple[NDArray[np.float32], NDArray[np.int64]]],
+    svm_c: float,
+    device: torch.device,
+) -> tuple[dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]], dict[int, dict]]:
+    """Fit one folded linear SVM per k; return the heads and their probe info."""
+    heads: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+    probe_infos: dict[int, dict] = {}
+    for k in sorted(probes):
+        X, y = features[k]
+        if int(y.min()) < 1 or int(y.max()) > label_space.num_classes:
+            raise RuntimeError(
+                f"k={k} probe labels must be {label_space.name} ids "
+                f"1..{label_space.num_classes}, got {int(y.min())}..{int(y.max())}"
+            )
+        scaler, svm, train_acc = _fit_linear_svm(X, y, svm_c)
+        logger.info(
+            "[%s/k=%d] SVM train accuracy = %s (%d pixels)",
+            label_space.eval_name,
+            k,
+            fmt(train_acc),
+            X.shape[0],
+        )
+        heads[k] = _folded_linear(scaler, svm, device)
+        probe_infos[k] = _probe_info(k, probes[k], X, y, train_acc)
+    return heads, probe_infos
 
 
 @torch.no_grad()
@@ -674,6 +875,46 @@ def _predict_classes_from_activated(
     return pred
 
 
+def legacy_label(label_v2: NDArray[np.integer], lut: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Map a native CoralscapesV2 mask through ``lut``. Index 0 stays unannotated."""
+    label = np.asarray(label_v2)
+    if label.size == 0:
+        return np.asarray(label, dtype=np.uint8)
+    return np.asarray(lut, dtype=np.uint8)[label]
+
+
+@torch.no_grad()
+def _score_classes(
+    activated: torch.Tensor,
+    label_v2: NDArray[np.integer],
+    label_space: LabelSpace,
+    heads: Mapping[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    confusions: Mapping[int, ClassConfusion],
+) -> None:
+    """Apply every fitted head to one activated map and update its confusion matrix.
+
+    ``label_v2`` is the native mask; ``label_space.lut`` maps it onto the space's ids.
+    Ground-truth id 0 stays ignored. The activated tensor is shared by every k.
+    """
+    if set(heads) != set(confusions):
+        raise ValueError(
+            f"heads and confusions cover different budgets: {sorted(heads)} vs {sorted(confusions)}"
+        )
+    mapped = legacy_label(label_v2, label_space.lut)
+    if mapped.size and int(mapped.max()) > label_space.num_classes:
+        raise RuntimeError(
+            f"{label_space.name} label id {int(mapped.max())} is outside "
+            f"0..{label_space.num_classes}"
+        )
+    gt = np.asarray(mapped).reshape(-1)
+    for k, (weff, beff, classes) in heads.items():
+        pred = _predict_classes_from_activated(activated, weff, beff, classes)
+        confusions[k].update(gt, pred.detach().cpu().numpy().reshape(-1))
+
+
+# --------------------------------------------------------------------------- #
+# Concept and hierarchy scoring.
+# --------------------------------------------------------------------------- #
 def _class_taxonomy_targets(
     hier: HierarchicalScore,
     concept_names: list[str],
@@ -690,98 +931,55 @@ def _class_taxonomy_targets(
     return hier.dense_targets(torch.from_numpy(rows).to(device))
 
 
-def _evaluate_split(
-    *,
-    split: str,
-    predictor: CBMPredictor,
-    version: DatasetVersion,
-    frame: pd.DataFrame,
-    weff: torch.Tensor,
-    beff: torch.Tensor,
-    classes: torch.Tensor,
-    probe_info: dict,
-    concept_names: list[str],
-    concept_codes: dict[str, NDArray[np.int8]],
-    taxonomy_csv: str | Path,
-    out_dir: Path,
-    max_images: int | None,
-    removed_concepts: Sequence[str] = (),
-) -> dict:
-    """Score one split with the fitted SVM, the binary concepts, and the hierarchy."""
-    kind = "concepts"
-    eval_class_ids = list(range(1, NUM_CLASSES + 1))
-    conf = ClassConfusion(NUM_CLASSES + 1, ignore_index=0)  # 0..95, 0 = ignore
-    binary = {concept: BinaryConceptScore(threshold=0.5) for concept in concept_codes}
-    hier = HierarchicalScore(concept_names, taxonomy_csv, removed_concepts)
-    class_targets = _class_taxonomy_targets(hier, concept_names, taxonomy_csv, predictor.device)
-    results: dict = {
-        "eval": "coralscapes",
-        "split": split,
-        "feature_kinds": {kind: {"probe": probe_info}},
-    }
+class _ConceptScoring:
+    """Binary-concept and hierarchy scores of one split, read off the native label mask."""
 
-    def _dump(status: str, processed: int) -> dict:
-        d = conf.to_dict(id2name=CORALSCAPES_V2_ID2NAME, class_ids=eval_class_ids)
-        scores = {
-            "status": status,
-            "num_images": processed,
-            "accuracy": d["accuracy"],
-            "miou": d["miou"],
-        }
-        if status == "done":
-            scores["per_class"] = d["per_class"]
-            results["hierarchical"] = hier.to_dict()
-        results["feature_kinds"][kind][split] = scores
-        for concept, score in binary.items():
-            results[concept] = {**score.to_dict(), "status": status, "num_images": processed}
-        write_json(out_dir / "metrics.json", results)
-        return scores
+    def __init__(
+        self, concepts: ProbeConcepts, codes: NDArray[np.int8], device: torch.device
+    ) -> None:
+        self.concept_names = list(concepts.concept_names)
+        self.codes = codes
+        self.channels = [self.concept_names.index(c) for c in REPORTED_BINARY_CONCEPTS]
+        self.binary = BinaryConceptStats(
+            list(REPORTED_BINARY_CONCEPTS), list(range(len(REPORTED_BINARY_CONCEPTS)))
+        )
+        self.hier = HierarchicalScore(
+            self.concept_names, concepts.taxonomy_csv, concepts.removed_concepts
+        )
+        self.class_targets = _class_taxonomy_targets(
+            self.hier, self.concept_names, concepts.taxonomy_csv, device
+        )
 
-    n_images = len(split_rows(frame, split))
-    if max_images is not None:
-        n_images = min(n_images, max_images)
-    t0 = time.time()
-    processed = 0
-    for row in tqdm(split_rows(frame, split), total=n_images, desc=f"dense {split} (concepts)"):
-        image_np, label_np = load_row(version, row)
-        if max_images is not None and processed >= max_images:
-            break
-        what = f"{split} image {processed}"
-        _require_rgb(image_np, what)
-        _require_label(label_np, what)
-        activated = _activated_concepts(predictor, image_np)
-        if int(activated.shape[0]) != len(concept_names):
+    def update(self, activated: torch.Tensor, label_v2: NDArray[np.integer]) -> None:
+        """Score one image's activated map against its native label mask."""
+        if int(activated.shape[0]) != len(self.concept_names):
             raise RuntimeError(
                 f"activated concept map has {int(activated.shape[0])} channels, "
-                f"but concept_names has {len(concept_names)}"
+                f"but concept_names has {len(self.concept_names)}"
             )
-        pred = _predict_classes_from_activated(activated, weff, beff, classes)
-        conf.update(label_np.reshape(-1), pred.cpu().numpy().reshape(-1))
-        unannotated = label_np == 0
-        for concept, score in binary.items():
-            prob = activated[concept_names.index(concept)].cpu().numpy()
-            score.update(concept_codes[concept][label_np], prob, unannotated=unannotated)
-        labels = torch.from_numpy(label_np).to(activated.device).long().reshape(-1)
-        hier.update(activated.reshape(activated.shape[0], -1), class_targets[:, labels])
-        processed += 1
-        if processed % 25 == 0:
-            _dump("running", processed)
+        flat = np.asarray(label_v2).reshape(-1)
+        probs = activated[self.channels].reshape(len(self.channels), -1).t().cpu().numpy()
+        self.binary.update(self.codes[flat], probs, unannotated=flat == 0)
+        labels = torch.from_numpy(flat).to(activated.device).long()
+        self.hier.update(activated.reshape(activated.shape[0], -1), self.class_targets[:, labels])
 
-    scores = _dump("done", processed)
-    logger.info(
-        "[coralscapes_%s/%s] DONE in %.1fs: acc=%s miou=%s over %d images",
-        split,
-        kind,
-        time.time() - t0,
-        fmt(scores["accuracy"]),
-        fmt(scores["miou"]),
-        processed,
-    )
-    for concept in binary:
+    def write(self, results: dict, status: str, processed: int) -> None:
+        """Put the concept blocks, and the hierarchy once ``done``, into ``results``."""
+        binary = self.binary.to_dict()
+        for concept in REPORTED_BINARY_CONCEPTS:
+            block = concept_block_from_binary(binary, concept, self.binary.threshold)
+            results[concept] = {**block, "status": status, "num_images": processed}
+        if status == "done":
+            results["hierarchical"] = self.hier.to_dict()
+
+
+def _log_concepts(eval_name: str, split: str, results: dict) -> None:
+    for concept in REPORTED_BINARY_CONCEPTS:
         block = results[concept]
         logger.info(
-            "[coralscapes_%s/%s] acc=%s precision=%s recall=%s f1=%s "
+            "[%s_%s/%s] acc=%s precision=%s recall=%s f1=%s "
             "(n_true=%d n_false=%d n_not_given=%d n_unannotated=%d)",
+            eval_name,
             split,
             concept,
             fmt(block["accuracy"]),
@@ -795,274 +993,46 @@ def _evaluate_split(
         )
     h = results["hierarchical"]
     logger.info(
-        "[coralscapes_%s/hierarchical] consistency=%s severity(mean norm)=%s ECE(mean)=%s",
+        "[%s_%s/hierarchical] consistency=%s severity(mean norm)=%s ECE(mean)=%s",
+        eval_name,
         split,
         fmt(h.get("consistency/overall")),
         fmt(h.get("severity/mean_normalized")),
         fmt(h.get("ece/mean")),
     )
-    return results
-
-
-def evaluate_coralscapes_probe(
-    *,
-    predictor: CBMPredictor,
-    probe_json: str | Path,
-    version: DatasetVersion,
-    output_dir: str | Path,
-    concept_names: list[str],
-    taxonomy_csv: str | Path,
-    splits: Sequence[str] = ("test",),
-    svm_c: float = 1.0,
-    max_test_images: int | None = None,
-    removed_concepts: Sequence[str] = (),
-) -> dict[str, dict]:
-    """Fit the probe once on the train probe points, then score every split in ``splits``.
-
-    Returns ``{split: metrics}``; each split's metrics also go to
-    ``<output_dir>/coralscapes_<split>/metrics.json``. ``max_test_images`` caps every split.
-    ``removed_concepts`` (``training.concept_removal``) are taken out of the taxonomy tree.
-    """
-    import json
-
-    with Path(probe_json).open() as f:
-        probe = json.load(f)
-    images = probe["images"]
-    logger.info(
-        "Loaded probe set: %d images, %d points, target %s pts/class",
-        probe.get("num_images", len(images)),
-        probe.get("total_points", sum(len(im["points"]) for im in images)),
-        probe.get("points_per_class_target"),
-    )
-
-    unknown = [split for split in splits if split not in SPLITS]
-    if unknown:
-        raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
-    missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concept_names]
-    if missing:
-        raise RuntimeError(
-            f"Coralscapes eval requires concept channels named exactly {missing}, "
-            f"which concept_names ({len(concept_names)} entries) does not have."
-        )
-    concept_codes = {
-        concept: build_coralscapes_concept_codes(taxonomy_csv, concept)
-        for concept in REPORTED_BINARY_CONCEPTS
-    }
-
-    frame = dense_images(version)
-    kind = "concepts"
-    logger.info("=== CoralscapesV2 linear probe: feature kind = %s ===", kind)
-    X, y = _extract_probe_features(predictor, version, frame, images)
-    classes_present = sorted({int(c) for c in y})
-    logger.info(
-        "[coralscapes/%s] probe features: X=%s, %d classes present",
-        kind,
-        X.shape,
-        len(classes_present),
-    )
-    scaler, svm, train_acc = _fit_linear_svm(X, y, svm_c)
-    logger.info("[coralscapes/%s] SVM train accuracy = %s", kind, fmt(train_acc))
-    weff, beff, classes = _folded_linear(scaler, svm, predictor.device)
-    probe_info = {
-        "num_points": int(X.shape[0]),
-        "feature_dim": int(X.shape[1]),
-        "num_classes_present": len(classes_present),
-        "classes_present": classes_present,
-        "train_accuracy": train_acc,
-    }
-
-    return {
-        split: _evaluate_split(
-            split=split,
-            predictor=predictor,
-            version=version,
-            frame=frame,
-            weff=weff,
-            beff=beff,
-            classes=classes,
-            probe_info=probe_info,
-            concept_names=concept_names,
-            concept_codes=concept_codes,
-            taxonomy_csv=taxonomy_csv,
-            out_dir=Path(output_dir) / f"coralscapes_{split}",
-            max_images=max_test_images,
-            removed_concepts=removed_concepts,
-        )
-        for split in splits
-    }
 
 
 # --------------------------------------------------------------------------- #
-# 39-class probe. One forward per image, one SVM per pixels-per-class budget.
+# Split scoring.
 # --------------------------------------------------------------------------- #
-def legacy_label(label_v2: NDArray[np.integer], lut: NDArray[np.uint8]) -> NDArray[np.uint8]:
-    """Map a native CoralscapesV2 mask through ``lut``. Index 0 stays unannotated."""
-    label = np.asarray(label_v2)
-    if label.size == 0:
-        return np.asarray(label, dtype=np.uint8)
-    return np.asarray(lut, dtype=np.uint8)[label]
-
-
-def load_legacy_probes(paths: Sequence[str | Path]) -> dict[int, dict]:
-    """Load legacy-39 probe JSON files, keyed by ``points_per_class_target``."""
-    import json
-
-    probes: dict[int, dict] = {}
-    for path in paths:
-        probe_path = Path(path)
-        with probe_path.open() as handle:
-            probe = json.load(handle)
-        if probe.get("label_space") != "coralscapes_legacy39":
-            raise RuntimeError(
-                f"{probe_path} is not a legacy-39 probe set "
-                f"(label_space={probe.get('label_space')!r})"
-            )
-        k = int(probe["points_per_class_target"])
-        if k in probes:
-            raise RuntimeError(f"two probe sets target k={k}")
-        if int(probe.get("num_classes", 0)) != LEGACY_NUM_CLASSES:
-            raise RuntimeError(
-                f"{probe_path} num_classes is {probe.get('num_classes')}, expected {LEGACY_NUM_CLASSES}"
-            )
-        probes[k] = probe
-    if not probes:
-        raise RuntimeError("no legacy-39 probe sets were given")
-    return probes
-
-
-def union_probe_images(probes: Mapping[int, dict]) -> list[dict]:
-    """One record per train image, with that image's points grouped by k.
-
-    The same ``(site, stem)`` across budgets is forwarded once. A disagreeing
-    ``label_md5`` raises.
-    """
-    merged: dict[tuple[str, str], dict] = {}
-    for k, probe in probes.items():
-        for image in probe["images"]:
-            key = (str(image["site"]), str(image["stem"]))
-            slot = merged.get(key)
-            if slot is None:
-                slot = {
-                    "site": image["site"],
-                    "stem": image["stem"],
-                    "label_md5": image["label_md5"],
-                    "height": image["height"],
-                    "width": image["width"],
-                    "points_by_k": {},
-                }
-                merged[key] = slot
-            elif slot["label_md5"] != image["label_md5"]:
-                raise RuntimeError(
-                    f"{key[0]}/{key[1]} has label md5 {slot['label_md5']} at one k and "
-                    f"{image['label_md5']} at k={k}"
-                )
-            if k in slot["points_by_k"]:
-                raise RuntimeError(f"duplicate k={k} points for {key[0]}/{key[1]}")
-            slot["points_by_k"][k] = list(image["points"])
-    return sorted(merged.values(), key=lambda item: (str(item["site"]), str(item["stem"])))
-
-
-def _extract_legacy_probe_features(
-    predictor: CBMPredictor, version: DatasetVersion, frame: pd.DataFrame, images: list[dict]
-) -> dict[int, tuple[NDArray[np.float32], NDArray[np.int64]]]:
-    """Sample every k's pixels from one activated map per train image."""
-    feats: dict[int, list[NDArray[np.float32]]] = defaultdict(list)
-    labels: dict[int, list[int]] = defaultdict(list)
-    for entry in tqdm(images, desc="probe features (legacy 39)"):
-        image_np, label_np = load_probe_entry(version, frame, entry)
-        what = f"{entry.get('site')}/{entry.get('stem')}"
-        _require_rgb(image_np, what)
-        _require_label(label_np, what)
-        activated = _activated_concepts(predictor, image_np)
-        for k, pts in entry["points_by_k"].items():
-            if not pts:
-                continue
-            rows = np.array([point["row"] for point in pts], dtype=np.int64)
-            cols = np.array([point["col"] for point in pts], dtype=np.int64)
-            sampled = _sample_activated(activated, rows, cols)
-            feats[k].append(sampled.transpose(0, 1).cpu().numpy().astype(np.float32))
-            labels[k].extend(int(point["class_id"]) for point in pts)
-    if not feats:
-        raise RuntimeError("No legacy probe features extracted (empty probe set?)")
-    return {
-        k: (np.concatenate(feats[k], axis=0), np.asarray(labels[k], dtype=np.int64))
-        for k in sorted(feats)
-    }
-
-
-@torch.no_grad()
-def score_legacy_activated(
-    activated: torch.Tensor,
-    label_v2: NDArray[np.integer],
-    lut: NDArray[np.uint8],
-    heads: Mapping[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
-    confusions: Mapping[int, ClassConfusion],
-) -> None:
-    """Apply every fitted head to one activated map and update its confusion matrix.
-
-    ``label_v2`` is the native 95-class mask. ``lut`` maps it onto legacy ids.
-    Ground-truth id 0 stays ignored. The activated tensor is shared by every k.
-    """
-    if set(heads) != set(confusions):
-        raise ValueError(
-            f"heads and confusions cover different budgets: {sorted(heads)} vs {sorted(confusions)}"
-        )
-    legacy = legacy_label(label_v2, lut)
-    if legacy.size and int(legacy.max()) > LEGACY_NUM_CLASSES:
-        raise RuntimeError(
-            f"legacy label id {int(legacy.max())} is outside 0..{LEGACY_NUM_CLASSES}"
-        )
-    gt = np.asarray(legacy).reshape(-1)
-    for k, (weff, beff, classes) in heads.items():
-        pred = _predict_classes_from_activated(activated, weff, beff, classes)
-        confusions[k].update(gt, pred.detach().cpu().numpy().reshape(-1))
-
-
-def _legacy_probe_info(
-    k: int, probe: dict, X: NDArray[np.float32], y: NDArray[np.int64], train_acc: float
-) -> dict:
-    classes_present = sorted({int(class_id) for class_id in y})
-    return {
-        "k": k,
-        "num_points": int(X.shape[0]),
-        "feature_dim": int(X.shape[1]),
-        "num_classes_present": len(classes_present),
-        "classes_present": classes_present,
-        "train_accuracy": train_acc,
-        "points_per_class_target": int(probe["points_per_class_target"]),
-        "points_per_class": {
-            str(class_id): int(count)
-            for class_id, count in probe.get("points_per_class", {}).items()
-        },
-    }
-
-
-def _evaluate_legacy_split(
+def _evaluate_split(
     *,
     split: str,
     predictor: CBMPredictor,
     version: DatasetVersion,
     frame: pd.DataFrame,
-    lut: NDArray[np.uint8],
+    label_space: LabelSpace,
     heads: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     probe_infos: dict[int, dict],
+    scoring: _ConceptScoring | None,
     out_dir: Path,
     max_images: int | None,
 ) -> dict:
-    """Score one split with every fitted 39-class SVM. One forward per image."""
-    eval_class_ids = list(range(1, LEGACY_NUM_CLASSES + 1))
-    confusions = {k: ClassConfusion(LEGACY_NUM_CLASSES + 1, ignore_index=0) for k in heads}
+    """Score one split with every fitted SVM, and the concepts when given. One forward per image."""
+    n_classes = label_space.num_classes
+    eval_class_ids = list(range(1, n_classes + 1))
+    confusions = {k: ClassConfusion(n_classes + 1, ignore_index=0) for k in heads}
     results: dict = {
-        "eval": "coralscapes39",
+        "eval": label_space.eval_name,
         "split": split,
-        "label_space": "coralscapes_legacy39",
-        "num_classes": LEGACY_NUM_CLASSES,
+        "label_space": label_space.name,
+        "num_classes": n_classes,
         "by_k": {str(k): {"probe": probe_infos[k]} for k in sorted(heads)},
     }
 
     def _dump(status: str, processed: int) -> None:
         for k, confusion in confusions.items():
-            detail = confusion.to_dict(id2name=CORALSCAPES_ID2NAME, class_ids=eval_class_ids)
+            detail = confusion.to_dict(id2name=label_space.id2name, class_ids=eval_class_ids)
             scores: dict = {
                 "status": status,
                 "num_images": processed,
@@ -1072,34 +1042,42 @@ def _evaluate_legacy_split(
             if status == "done":
                 scores["per_class"] = detail["per_class"]
             results["by_k"][str(k)][split] = scores
+        if scoring is not None:
+            scoring.write(results, status, processed)
         write_json(out_dir / "metrics.json", results)
 
-    n_images = len(split_rows(frame, split))
-    if max_images is not None:
-        n_images = min(n_images, max_images)
+    rows = _split_rows(frame, split)
+    n_images = len(rows) if max_images is None else min(len(rows), max_images)
     t0 = time.time()
     processed = 0
-    for row in tqdm(split_rows(frame, split), total=n_images, desc=f"dense {split} (legacy 39)"):
-        image_np, label_np = load_row(version, row)
+    for row in tqdm(rows, total=n_images, desc=f"dense {split} ({label_space.eval_name})"):
+        image_np, label_np = _load_row(version, row)
         if max_images is not None and processed >= max_images:
             break
         what = f"{split} image {processed}"
         _require_rgb(image_np, what)
         _require_label(label_np, what)
         activated = _activated_concepts(predictor, image_np)
-        score_legacy_activated(activated, label_np, lut, heads, confusions)
+        _score_classes(activated, label_np, label_space, heads, confusions)
+        if scoring is not None:
+            scoring.update(activated, label_np)
         processed += 1
         if processed % 25 == 0:
             _dump("running", processed)
 
     _dump("done", processed)
     logger.info(
-        "[coralscapes39_%s] DONE in %.1fs over %d images", split, time.time() - t0, processed
+        "[%s_%s] DONE in %.1fs over %d images",
+        label_space.eval_name,
+        split,
+        time.time() - t0,
+        processed,
     )
     for k in sorted(heads):
         scores = results["by_k"][str(k)][split]
         logger.info(
-            "[coralscapes39_%s/k=%d] acc=%s miou=%s (probe train acc %s, %d pixels)",
+            "[%s_%s/k=%d] acc=%s miou=%s (probe train acc %s, %d pixels)",
+            label_space.eval_name,
             split,
             k,
             fmt(scores["accuracy"]),
@@ -1107,74 +1085,99 @@ def _evaluate_legacy_split(
             fmt(probe_infos[k]["train_accuracy"]),
             probe_infos[k]["num_points"],
         )
+    if scoring is not None:
+        _log_concepts(label_space.eval_name, split, results)
     return results
 
 
-def evaluate_coralscapes39_probe(
+def evaluate_coralscapes_probe(
+    label_space: LabelSpace,
+    probe_jsons: Sequence[Path],
+    version: DatasetVersion,
     *,
     predictor: CBMPredictor,
-    probe_jsons: Sequence[str | Path],
-    version: DatasetVersion,
     output_dir: str | Path,
+    concepts: ProbeConcepts | None = None,
     splits: Sequence[str] = ("test",),
     svm_c: float = 1.0,
     max_test_images: int | None = None,
 ) -> dict[str, dict]:
-    """Fit one 39-class SVM per probe set, then score every split.
+    """Fit one SVM per probe set, then score every split in ``splits``.
 
-    Train images are the union of the probe sets and each image is forwarded
-    once. Each test image is forwarded once and scored by every SVM. Returns
-    ``{split: metrics}``. Metrics also go to
-    ``<output_dir>/coralscapes39_<split>/metrics.json``.
+    Train images are the union of the probe sets and each image is forwarded once.
+    Each split image is forwarded once and scored by every SVM, and by the binary
+    concepts and the hierarchy when ``concepts`` is given.
+
+    Args:
+        label_space: The space the probe sets are in and the splits are scored in.
+        probe_jsons: Probe JSON files, one per ``points_per_class_target``.
+        version: The opened dense ``coralscapes_v2`` version.
+        predictor: The model under evaluation.
+        output_dir: Each split's metrics go to ``<output_dir>/<eval_name>_<split>/metrics.json``.
+        concepts: Concept channels and taxonomy to score; None scores classes only.
+        splits: Subset of ``("val", "test")``.
+        svm_c: ``LinearSVC`` regularisation.
+        max_test_images: Caps the images of every split.
+
+    Returns:
+        ``{f"{label_space.eval_name}_{split}": metrics}``.
+
+    Raises:
+        ValueError: A split is unknown.
+        RuntimeError: ``concepts`` lacks a reported binary concept, the probe files are
+            in another label space, or a probe set yields no pixels.
     """
-    probes = load_legacy_probes(probe_jsons)
-    logger.info(
-        "Loaded %d legacy-39 probe sets: k=%s",
-        len(probes),
-        ", ".join(str(k) for k in sorted(probes)),
-    )
     unknown = [split for split in splits if split not in SPLITS]
     if unknown:
         raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
-
-    frame = dense_images(version)
-    images = union_probe_images(probes)
-    features = _extract_legacy_probe_features(predictor, version, frame, images)
-    missing = sorted(set(probes) - set(features))
-    if missing:
-        raise RuntimeError(f"probe budgets with no extracted pixels: {missing}")
-
-    lut = coralscapes_v2_to_legacy_lut()
-    heads: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-    probe_infos: dict[int, dict] = {}
-    for k in sorted(probes):
-        X, y = features[k]
-        if int(y.min()) < 1 or int(y.max()) > LEGACY_NUM_CLASSES:
+    codes = None
+    if concepts is not None:
+        missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concepts.concept_names]
+        if missing:
             raise RuntimeError(
-                f"k={k} probe labels must be legacy ids 1..{LEGACY_NUM_CLASSES}, "
-                f"got {int(y.min())}..{int(y.max())}"
+                f"Coralscapes eval requires concept channels named exactly {missing}, "
+                f"which concept_names ({len(concepts.concept_names)} entries) does not have."
             )
-        scaler, svm, train_acc = _fit_linear_svm(X, y, svm_c)
-        logger.info(
-            "[coralscapes39/k=%d] SVM train accuracy = %s (%d pixels)",
-            k,
-            fmt(train_acc),
-            X.shape[0],
+        codes = np.stack(
+            [
+                build_coralscapes_concept_codes(concepts.taxonomy_csv, concept)
+                for concept in REPORTED_BINARY_CONCEPTS
+            ],
+            axis=1,
         )
-        heads[k] = _folded_linear(scaler, svm, predictor.device)
-        probe_infos[k] = _legacy_probe_info(k, probes[k], X, y, train_acc)
 
-    return {
-        split: _evaluate_legacy_split(
+    probes = load_probes(probe_jsons)
+    if probes.label_space is not label_space:
+        raise RuntimeError(f"the probe sets are {probes.label_space.name}, not {label_space.name}")
+    logger.info(
+        "Loaded %d %s probe sets: k=%s",
+        len(probes.by_k),
+        label_space.name,
+        ", ".join(str(k) for k in sorted(probes.by_k)),
+    )
+
+    frame = _dense_images(version)
+    features = _extract_probe_features(predictor, version, frame, probes.images)
+    missing_k = sorted(set(probes.by_k) - set(features))
+    if missing_k:
+        raise RuntimeError(f"probe budgets with no extracted pixels: {missing_k}")
+    heads, probe_infos = _fit_heads(label_space, probes.by_k, features, svm_c, predictor.device)
+
+    results: dict[str, dict] = {}
+    for split in splits:
+        scoring = None
+        if concepts is not None and codes is not None:
+            scoring = _ConceptScoring(concepts, codes, predictor.device)
+        results[f"{label_space.eval_name}_{split}"] = _evaluate_split(
             split=split,
             predictor=predictor,
             version=version,
             frame=frame,
-            lut=lut,
+            label_space=label_space,
             heads=heads,
             probe_infos=probe_infos,
-            out_dir=Path(output_dir) / f"coralscapes39_{split}",
+            scoring=scoring,
+            out_dir=Path(output_dir) / f"{label_space.eval_name}_{split}",
             max_images=max_test_images,
         )
-        for split in splits
-    }
+    return results
