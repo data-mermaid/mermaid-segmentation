@@ -338,10 +338,6 @@ def _resized(cache: Path, spec: ResizeSpec, key: str = "a.jpg") -> Path:
     return cache / "resized" / spec.id / IMG_BUCKET / IMG_PREFIX / key
 
 
-def _sidecar(cache: Path, spec: ResizeSpec, key: str = "a.jpg") -> Path:
-    return cache / "resized" / spec.id / ".index" / IMG_BUCKET / IMG_PREFIX / f"{key}.json"
-
-
 def _decoded(path: Path) -> Image.Image:
     img = Image.open(io.BytesIO(path.read_bytes()))
     img.load()
@@ -359,25 +355,19 @@ def _sync_resized(fake_s3, pin, cache, spec=SPEC):
     return sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, resize={"ds": spec})
 
 
-def test_resized_sync_writes_output_and_sidecar_but_not_the_original(fake_s3, resize_pin, cache):
+def test_resized_sync_writes_only_the_output(fake_s3, resize_pin, cache):
     _sync_resized(fake_s3, resize_pin, cache)
 
     output = _resized(cache, SPEC)
     assert (_decoded(output).format, _decoded(output).size) == ("JPEG", (32, 24))
-    data = output.read_bytes()
-    assert json.loads(_sidecar(cache, SPEC).read_text()) == {
-        "source_etag": hashlib.md5(JPEG_A).hexdigest(),  # noqa: S324
-        "size": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "width": 32,
-        "height": 24,
-    }
+    assert not (cache / "resized" / SPEC.id / ".index").exists()
     assert not (cache / IMG_BUCKET).exists()
 
 
-def _rewrite_sidecar(cache: Path, **changes: Any) -> None:
-    path = _sidecar(cache, SPEC)
-    path.write_text(json.dumps({**json.loads(path.read_text()), **changes}))
+def _overwrite_with_jpeg(cache: Path, size: tuple[int, int]) -> None:
+    buf = io.BytesIO()
+    Image.new("RGB", size).save(buf, format="JPEG")
+    _resized(cache, SPEC).write_bytes(buf.getvalue())
 
 
 @pytest.mark.parametrize(
@@ -386,10 +376,9 @@ def _rewrite_sidecar(cache: Path, **changes: Any) -> None:
         lambda cache: _resized(cache, SPEC).write_bytes(
             b"x" * _resized(cache, SPEC).stat().st_size
         ),
-        lambda cache: _rewrite_sidecar(cache, source_etag="0" * 32),
-        lambda cache: _sidecar(cache, SPEC).unlink(),
+        lambda cache: _overwrite_with_jpeg(cache, (16, 12)),
     ],
-    ids=["output-bytes-same-length", "stale-source-etag", "missing-sidecar"],
+    ids=["output-bytes-same-length", "output-wrong-pixel-size"],
 )
 def test_unverifiable_resized_output_fails_without_download(fake_s3, resize_pin, cache, tamper):
     _sync_resized(fake_s3, resize_pin, cache)
@@ -451,7 +440,6 @@ def test_dense_mask_is_resized_to_the_image_scaled_size(fake_s3, tmp_path, cache
     assert (mask.format, mask.size) == ("PNG", (32, 24))
     assert (mask.getpixel((0, 0)), mask.getpixel((31, 23))) == (3, 7)
     assert set(mask.tobytes()) == {3, 7}
-    assert _sidecar(cache, SPEC, "a.png").exists()
 
 
 def test_resize_none_for_a_dataset_caches_originals(fake_s3, resize_pin, cache):

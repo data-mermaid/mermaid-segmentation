@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import uuid
 from collections import deque
@@ -44,7 +43,6 @@ from segdata_spec.layout import (
     feature_set_prefix,
     resize_id,
     resized_cache_path,
-    resized_index_path,
     synced_feature_marker_dir,
     synced_marker_dir,
     taxonomy_prefix,
@@ -225,57 +223,27 @@ def _sync_object(
     _write_atomic(path, data)
 
 
-def _output_size(output: bytes) -> tuple[int, int]:
-    """Read a resized output's pixel ``(width, height)`` from its header."""
-    return Image.open(io.BytesIO(output), formats=("JPEG", "PNG")).size
+def _output_size(output: bytes | Path) -> tuple[int, int]:
+    """Read a resized output's pixel ``(width, height)`` from its header.
 
-
-def _index_entry(output: bytes, source_etag: str) -> bytes:
-    width, height = _output_size(output)
-    entry = {
-        "source_etag": source_etag,
-        "size": len(output),
-        "sha256": _sha256(output),
-        "width": width,
-        "height": height,
-    }
-    return json.dumps(entry, sort_keys=True).encode()
-
-
-def _resized_problem(
-    output: bytes, entry: Any, source_etag: str, expected_size: tuple[int, int]
-) -> str | None:
-    """Describe how a resized output disagrees with its index entry, source ETag or size, or None.
-
-    ``expected_size`` is the pixel ``(width, height)`` the entry must record.
+    A ``Path`` is opened lazily, so only the header is read.
     """
-    if not isinstance(entry, dict):
-        return "its index entry is not a JSON object"
-    if entry.get("source_etag") != source_etag:
-        return f"index entry source ETag {entry.get('source_etag')!r} is not {source_etag!r}"
-    if entry.get("size") != len(output):
-        return f"size {len(output)} differs from the indexed {entry.get('size')!r}"
-    if entry.get("sha256") != _sha256(output):
-        return "sha256 differs from the indexed sha256"
-    indexed = (entry.get("width"), entry.get("height"))
-    if indexed != expected_size:
-        return f"indexed size {indexed!r} is not the expected {expected_size!r}"
-    return None
+    source = io.BytesIO(output) if isinstance(output, bytes) else output
+    with Image.open(source, formats=("JPEG", "PNG")) as img:
+        return img.size
 
 
-def _verify_resized(
-    output: Path, index: Path, source_etag: str, expected_size: tuple[int, int]
-) -> None:
-    """Raise ``ChecksumMismatch`` unless ``output`` matches its sidecar index entry."""
-    if not index.is_file():
-        raise ChecksumMismatch(f"cached file {output} has no index entry at {index}")
+def _verify_cached_size(output: Path, expected_size: tuple[int, int]) -> None:
+    """Raise ``ChecksumMismatch`` unless the cached ``output``'s header size is ``expected_size``."""
     try:
-        entry = json.loads(index.read_bytes())
-    except ValueError as exc:
-        raise ChecksumMismatch(f"cached file {output}: index entry {index} is not JSON") from exc
-    problem = _resized_problem(output.read_bytes(), entry, source_etag, expected_size)
-    if problem:
-        raise ChecksumMismatch(f"cached file {output}: {problem}")
+        actual = _output_size(output)
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ChecksumMismatch(f"cached file {output}: unreadable image header: {exc}") from exc
+    if actual != expected_size:
+        raise ChecksumMismatch(
+            f"cached file {output}: pixel size {actual[0]}x{actual[1]}, "
+            f"expected {expected_size[0]}x{expected_size[1]}"
+        )
 
 
 def _transform_decoded(
@@ -297,17 +265,15 @@ def _sync_resized_object(
     transform: Callable[[bytes], bytes],
     expected_size: tuple[int, int],
 ) -> None:
-    """Verify a cached resized object, or download, verify, transform and cache it.
+    """Check a cached resized object's pixel size, or download, verify, transform and cache it.
 
     ``expected_size`` is the pixel size the output must have, on a cache hit and after the
-    transform. The sidecar is written before the output, so an output on disk always has its
-    index entry.
+    transform. A cache hit reads only the output's header and never downloads.
     """
     key, etag, size, crc64nvme = obj
     output = resized_cache_path(cache_dir, spec, bucket, key)
-    index = resized_index_path(cache_dir, spec, bucket, key)
     if output.exists():
-        _verify_resized(output, index, etag, expected_size)
+        _verify_cached_size(output, expected_size)
         return
     data = _download_object(client, bucket, key, etag)
     problem = _object_problem(data, etag, size, crc64nvme)
@@ -320,7 +286,6 @@ def _sync_resized_object(
             f"downloaded s3://{bucket}/{key}: resized to {actual[0]}x{actual[1]}, "
             f"expected {expected_size[0]}x{expected_size[1]}"
         )
-    _write_atomic(index, _index_entry(resized, etag))
     _write_atomic(output, resized)
 
 
@@ -636,17 +601,15 @@ def sync(
 
     A dataset with a spec in ``resize`` caches each image resized per the spec, and each mask
     resized to its image's scaled size, at ``<cache_dir>/resized/<spec.id>/<bucket>/<key>``; the
-    original is not cached. A sidecar at
-    ``<cache_dir>/resized/<spec.id>/.index/<bucket>/<key>.json`` records the source ETag and the
-    output's size, sha256 and pixel width and height, and is written before the output.
+    original is not cached.
 
     After a dataset's images and tables verify, a new marker file in
     ``<cache_dir>/synced/<spec.id or original>/<bucket>/<dataset>/<version>/`` records the
     spec, the synced groups (``"all"`` for no selection) and the skipped image ids. Each sync adds
     its own file and never reads or changes the others; ``open_version`` unions them and requires
     at least one.
-    A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
-    ``resize``, or mapped to None, caches the original bytes.
+    A cached resized output is checked by its header pixel size and never re-downloaded. A dataset
+    absent from ``resize``, or mapped to None, caches the original bytes.
 
     An original (or its mask) that matches its record but that Pillow cannot decode, such as a
     truncated JPEG, is skipped rather than failing the sync: the image gets no resized output,
@@ -659,8 +622,8 @@ def sync(
     Raises:
         PinMismatch: A manifest, downloaded or cached, differs from its pin.
         ChecksumMismatch: A table, image or mask, downloaded or cached, differs from its record,
-            or a cached resized output has no sidecar or differs from it, or a resized output's
-            pixel size differs from the size scaled from its row's ``width`` and ``height``.
+            or a resized output, cached or new, has a header that cannot be read or a pixel size
+            that differs from the size scaled from its row's ``width`` and ``height``.
         ImageChanged: An image or mask no longer matches its recorded ETag.
         ImageMissing: An image or mask is absent.
         ValueError: ``max_workers`` is below 1; ``selection`` names
