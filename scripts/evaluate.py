@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-config",
         type=Path,
         default=_CONFIGS / "data_config.yaml",
-        help="Dataset pins of every eval, and the val blocks of val_loss",
+        help="Dataset pins of every eval, and the blocks val_loss scores for --split",
     )
     p.add_argument(
         "--schema-config",

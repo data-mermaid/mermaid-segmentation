@@ -44,23 +44,34 @@ Without `--strict`, a failed evaluation is only logged, and the script exits 0. 
 | `pacific` | The Pacific Labeled Corals validation regions, per region and pooled |
 | `coralscapes` | A CoralscapesV2 few-shot linear probe, 95 classes, 10 pixels per class |
 | `coralscapes39` | The same probe on the published 39-class map, 50 pixels per class |
-| `val_loss` | The concept-bottleneck loss components on the val splits of `--data-config`, per dataset and overall |
+| `val_loss` | The concept-bottleneck loss components on the `--split` blocks of `--data-config`, per dataset and overall |
 
 Other options:
 
-- `--split` selects the CoralNet groups and the CoralscapesV2 split that the probes score. The default is `val`. The CoralNet groups are the rows with that `split` in the data config's split file (`configs/splits/coralnet.csv`). `--split train` allows only `coralnet` and `val_loss`, and reports the loss as `train_loss`.
+- `--split` selects the CoralNet groups and the CoralscapesV2 split that the probes score. The default is `val`. The CoralNet groups are the rows with that `split` in the data config's split file (`configs/splits/coralnet.csv`). `--split train` allows only `coralnet` and `val_loss`.
+- The loss eval follows `--split`. Its summary key and output subdirectory are:
+  - `--split val`: `val_loss`.
+  - `--split test`: `test_loss`, under the heading "Test loss" in `summary.md`.
+  - `--split train`: `train_loss`. It scores the train groups of the CoralNet split file, with the run's concept source mask applied.
 - `--images-per-source N` scores a seeded random sample of at most N images per CoralNet source. `--sample-seed` sets the seed. The sample is written to `coralnet_<split>_sample.parquet`.
 - `--data-config` defaults to `configs/data_config.yaml`. It sets the sources and splits of every evaluation.
 - `--schema-config` sets the data config whose datasets freeze the concept channels, as in training. The default is `configs/data_config.yaml`.
+- `--probe-points` sets the 95-class probe points (10 per class).
+- `--coralscapes39-probe` sets the 39-class probe points (50 per class).
+- `--svm-c` sets the regularization C of the probes' `LinearSVC`.
+- `--val-loss-max-images N` scores a fixed seeded subset of at most N images per dataset in the loss eval.
+- `--device` sets the torch device of the forward pass.
 - `--max-images-per-unit` and `--max-test-images` limit the data for a quick debug run.
 
-Run the script with `--help` for the rest.
+Run the script with `--help` for the defaults.
 
 ## Read the results
 
 The script writes each section to `summary.json` and `summary.md` in `--output-dir`, and to its own subdirectory, for example `coralnet_val/`.
 
-`summary.json` records `coralnet_split_in_training`. It is true when the data config trains on a CoralNet group that `--split` scores, and the script then logs a warning that names the groups. A score on such a split does not measure generalization.
+`summary.json` records the `bundle`, `split`, `data_config` and `evals` of the run at the top level.
+
+`summary.json` also records `coralnet_split_in_training` and `coralscapes_split_in_training`. Each is true when the data config trains on a CoralNet or CoralscapesV2 group that `--split` scores, and the script then logs a warning that names the groups. A score on such a split does not measure generalization.
 
 CoralNet and Pacific report:
 
@@ -68,6 +79,8 @@ CoralNet and Pacific report:
 - taxonomic accuracy and macro F1 (all, living and coral)
 - binary-concept metrics, with `bleached` and `anthropogenic` called out
 - hierarchical metrics (consistency, mistake severity, ECE)
+
+Each probe writes `metrics.json` to `coralscapes_<split>/` or `coralscapes39_<split>/`. It holds `eval`, `split`, `label_space`, `num_classes` and `by_k`. `by_k` maps each points-per-class value k to `probe` (its training points and train accuracy) and `<split>` (the scores). The 95-class probe also writes the hierarchical metrics and one block per binary concept, and each concept block counts its unannotated pixels in `n_unannotated`.
 
 ## Compare two models
 
@@ -86,4 +99,6 @@ The CoralscapesV2 probe point sets are committed in `configs/eval/`. Scores from
 | File | Set |
 |---|---|
 | `coralscapes_v2_probe_points.json` | 95 classes, 10 points per class (`--per-class 10`) |
-| `coralscapes_v2_39_probe_k50.json` | 39 classes, 50 points per class (`--per-class 50 --label-space legacy39`) |
+| `coralscapes_v2_39_probe_k50.json` | 39 classes, 50 points per class (`--per-class 50 --label-space coralscapes39`) |
+
+Each probe file carries a required `label_space` field, `coralscapes_v2` or `coralscapes39`. The evaluation rejects a file without it.
