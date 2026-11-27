@@ -2,7 +2,7 @@
 """Write the label space of a model: its classes, concept channels and per-source-label resolution.
 
 Reads the tables of every dataset that ``--data-config`` pins, and its taxonomy, from a tables-only
-``--cache-dir`` (filled by ``segdata_spec.sync.sync_tables``); no image is read. Writes
+``--cache-dir`` (filled by ``scripts/sync_data.py --tables-only``); no image is read. Writes
 ``classes.csv``, ``concepts.csv``, ``source_labels.csv`` and ``label_space.meta.yaml`` to ``--out``.
 
 The build refuses, and writes nothing, when a label that trains a class has no concept row, or a
@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> None:
         "--cache-dir",
         type=Path,
         required=True,
-        help="Tables-only directory scripts/sync_data.py (sync_tables) synced --data-config into",
+        help="Cache that scripts/sync_data.py --tables-only (or a full sync) synced --data-config into",
     )
     p.add_argument("--out", type=Path, required=True, help="Label space directory to write")
     p.add_argument("--acknowledge", type=Path, default=None)
