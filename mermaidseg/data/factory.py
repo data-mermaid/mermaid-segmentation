@@ -18,7 +18,7 @@ from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.io import build_eval_transform, compile_transform
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Pin
-from segdata_spec.read import DatasetVersion, open_taxonomy, open_version
+from segdata_spec.read import DatasetVersion, VersionTables, open_taxonomy, open_version
 from segdata_spec.taxonomy import hierarchy_from_table
 
 
@@ -31,7 +31,7 @@ def _transform_for(
     return build_eval_transform(input_size)
 
 
-def source_offsets(versions: Mapping[str, DatasetVersion]) -> dict[str, int]:
+def source_offsets(versions: Mapping[str, DatasetVersion | VersionTables]) -> dict[str, int]:
     """Return each source's global offset, in the order of ``versions``.
 
     The first source gets 0; each next source gets the previous offset plus the previous source's

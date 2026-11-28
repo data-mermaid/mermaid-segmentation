@@ -1,0 +1,28 @@
+dataset,native_name,kind,reason
+coralnet,Hard Coral Tabulate,missing_concepts,No concept row; trains on an all-masked concept vector as before. Row to be added in a follow-up.
+mermaid,Recently dead coral::,missing_concepts,No concept row; trains on an all-masked concept vector as before. Row to be added in a follow-up.
+mermaid,Algal assemblage::,missing_concepts,No concept row; trains on an all-masked concept vector as before. Row to be added in a follow-up.
+coralnet,Xenia,rank_disagreement,MERMAID files Xeniidae under Other invertebrates but its targets under Soft coral; the concept row follows the biology.
+mermaid,Xenia::,rank_disagreement,MERMAID files Xenia under Alcyoniidae (Soft coral) but Xeniidae under Other invertebrates; the concept row follows the biology.
+mermaid,Cespitularia::,rank_disagreement,MERMAID files Cespitularia under Soft coral but Xeniidae under Other invertebrates; the concept row follows the biology.
+mermaid,Rhytisma::,rank_disagreement,MERMAID files Rhytisma under Other invertebrates but Alcyoniidae under Soft coral; the concept row follows the biology.
+mermaid,Rhytisma::Encrusting,rank_disagreement,MERMAID files Rhytisma under Other invertebrates but Alcyoniidae under Soft coral; the concept row follows the biology.
+coralnet,Peyssonnelia,rank_disagreement,MERMAID files Peyssonnelid algae under Crustose coralline algae but Peyssonneliaceae under Macroalgae; the concept row follows the biology.
+mermaid,Peyssonnelid algae::,rank_disagreement,MERMAID files Peyssonnelid algae under Crustose coralline algae but Peyssonneliaceae under Macroalgae; the concept row follows the biology.
+coralscapes_v2,acropora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,fungiidae dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,galaxea dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,goniopora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,lobophylliidae dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,millepora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,pavona dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,pocillopora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,porites dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,seriatopora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,stylophora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,table acropora dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,turbinaria dead,rank_disagreement,Dead coral keeps the family and genus concepts of the coral it was; MERMAID files Dead coral under Bare substrate.
+coralscapes_v2,algae covered lobophylliidae,rank_disagreement,Algae-covered coral keeps the coral's family and genus concepts; its target is Turf algae.
+coralscapes_v2,algae covered pocillopora,rank_disagreement,Algae-covered coral keeps the coral's family and genus concepts; its target is Turf algae.
+coralscapes_v2,algae covered porites,rank_disagreement,Algae-covered coral keeps the coral's family and genus concepts; its target is Turf algae.
+coralscapes_v2,algae covered table acropora,rank_disagreement,Algae-covered coral keeps the coral's family and genus concepts; its target is Turf algae.

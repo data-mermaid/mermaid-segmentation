@@ -365,10 +365,16 @@ class CoralNetDownloader:
 
         Returns:
             ``ok`` with a skip flag for a skipped source; ``ok`` for a source that passed;
-            otherwise the verification failure codes (or ``overview_total_missing``) in
+            otherwise the verification failure codes, ``overview_total_missing``, or
+            ``cannot access source <id>: <reason>`` for a private or missing source, in
             ``errors``.
         """
-        counts = parse_image_status_counts(self.auth.source_overview_html(source_id))
+        overview_html = self.auth.source_overview_html(source_id)
+        accessible, reason = parse_source_access(overview_html)
+        if not accessible:
+            logger.error("Source %s not accessible: %s", source_id, reason)
+            return DownloadResult(False, errors=[f"cannot access source {source_id}: {reason}"])
+        counts = parse_image_status_counts(overview_html)
         if counts.confirmed == 0:
             logger.info("Source %s has zero confirmed images on website; skipping", source_id)
             return DownloadResult(ok=True, skipped_no_confirmed=True)

@@ -8,7 +8,7 @@ from typing import Any
 from mermaidseg.data.config import SyncPlan
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.splits import coverage_checker
-from segdata_spec.sync import SyncResult, sync
+from segdata_spec.sync import SyncResult, sync, sync_tables
 
 
 def run_sync(
@@ -29,6 +29,21 @@ def run_sync(
         taxonomy=plan.taxonomy,
         resize=plan.resize,
         max_workers=max_workers,
+    )
+
+
+def run_table_sync(plan: SyncPlan, cache_dir: Path, client: Any) -> SyncResult:
+    """Download and verify the plan's manifests, tables and taxonomy into ``cache_dir``.
+
+    No image or mask is fetched, and the split-coverage check runs as in ``run_sync``.
+    """
+    return sync_tables(
+        client,
+        plan.pins,
+        cache_dir,
+        bucket=DATASET_BUCKET,
+        taxonomy=plan.taxonomy,
+        check_split=coverage_checker(plan.split_files),
     )
 
 
