@@ -20,8 +20,8 @@ data_version:
       manifest_sha256: 66b77129bcdea58706f04c16084146ff3519db1ab4f0b6afdc06c7dcbb33ec38
       resize: null
     catlin_seaview:
-      version: 20261124-cfc389d
-      manifest_sha256: 9a3b78b600e742ea97a50520e70b3480e0a07a5d2af664450c2ed07c29db0a91
+      version: 20261127-4a6492a
+      manifest_sha256: 2e6032a7c2fc9664a01f9639b045d0741c8720b28e82936ad484aee0d35f5414
       resize: null
     moorea_labeled_corals:
       version: 20261124-cfc389d
@@ -40,12 +40,12 @@ data_version:
     manifest_sha256: fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43
 label_keys_sha1: a33016a28be3c938a74cfc8047b3bae9a8490cb4
 data_config: configs/data_config.yaml
-data_config_sha1: 481533397cf784d9b3b9eec961000e7350983832
+data_config_sha1: 135206db4183c17b3e0ef2c70365e0c4139c4331
 concepts_csv: configs/class_to_concepts.csv
 concepts_csv_sha1: b55540ec6b964a08fbd280dc6f9639a95d3394b9
 schema_config: configs/data_config.yaml
-created: '2026-11-27T16:33:54'
-git_sha: 744ffcd6dfc8be7d92e0268cc64c21ba869d360a
+created: '2026-11-27T19:45:53'
+git_sha: 3f9864f429a0414858acdc1fffeb8e4e1a5015be
 git_dirty: false
 training_config: configs/training_config_cbm_final.yaml
 concept_removal: configs/concept_removals/min_coverage_trainval.csv
@@ -56,7 +56,7 @@ acknowledged: configs/label_spaces/cbm_final/acknowledged.csv
 acknowledged_sha1: d0a76ed01a3d191fda6a50c382d05585a0a23b9b
 n_classes: 78
 n_extra_classes: 7
-n_source_labels: 5728
+n_source_labels: 5727
 drops:
   no_ancestor_in_subset: 66
   not_in_subset: 8
