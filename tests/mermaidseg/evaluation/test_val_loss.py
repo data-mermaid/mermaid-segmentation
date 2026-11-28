@@ -17,7 +17,6 @@ from mermaidseg.evaluation import val_loss
 from mermaidseg.evaluation.val_loss import (
     _Accumulator,
     _bundle_config,
-    _check_layout,
     evaluate_val_loss,
     split_blocks_only,
 )
@@ -43,26 +42,6 @@ def test_accumulator_averages_each_key_over_the_batches_it_appears_in():
     second.add({"loss": 5.0, "multi_hot/bleached": 0.4})
     first.merge(second)
     assert first.means() == pytest.approx({"loss": 3.0, "multi_hot/bleached": 0.3})
-
-
-def _bundle(id2label: dict[int, str], concept_id2name: dict[int, str]) -> SimpleNamespace:
-    return SimpleNamespace(id2label=id2label, concept_id2name=concept_id2name)
-
-
-@pytest.mark.parametrize(
-    ("registry_classes", "concept_names", "match"),
-    [
-        ({1: "acropora", 2: "rubble"}, NAMES, "rubble"),
-        ({1: "acropora", 2: "sand"}, ["bleached", "other", "sand"], "'anthropogenic'"),
-        ({1: "acropora", 2: "sand"}, [*NAMES, "extra"], "lengths: bundle 3 vs registry 4"),
-    ],
-    ids=["class", "concept", "length"],
-)
-def test_layout_check_names_what_differs(registry_classes, concept_names, match):
-    bundle = _bundle({0: "ignore", 1: "acropora", 2: "sand"}, dict(enumerate(NAMES, start=1)))
-    registry = SimpleNamespace(target_id2label=registry_classes)
-    with pytest.raises(ValueError, match=match):
-        _check_layout(bundle, registry, concept_names)
 
 
 def test_bundle_config_takes_the_model_and_training_sections_from_the_bundle():
@@ -337,16 +316,21 @@ def test_val_loss_reads_the_label_space_of_the_bundle_not_the_repo_path_of_its_c
     assert harness.registry_kwargs["label_space_dir"] == tmp_path / "bundle" / "label_space"
 
 
-def test_val_loss_refuses_a_bundle_without_a_label_space(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("listed", "make_dir"),
+    [("classes.csv", True), ("../outside.csv", True), ("classes.csv", False)],
+    ids=["absent-file", "outside-the-directory", "absent-directory"],
+)
+def test_val_loss_refuses_a_listed_label_space_file_that_is_not_in_the_bundle(
+    tmp_path, monkeypatch, listed, make_dir
+):
     harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    (tmp_path / "bundle").mkdir()
+    (tmp_path / "bundle" / "outside.csv").write_text("x\n")
+    harness.bundle.metadata = {"label_space": {listed: hashlib.sha256(b"x\n").hexdigest()}}
 
-    with pytest.raises(ValueError) as excinfo:
-        harness.run(tmp_path, label_space=False)
-
-    assert str(excinfo.value) == (
-        f"bundle {tmp_path / 'bundle'} has no label_space/; it was exported before label "
-        "spaces existed, so re-export it from a retrained run"
-    )
+    with pytest.raises(ValueError, match="is missing"):
+        harness.run(tmp_path, label_space=make_dir)
 
 
 def test_val_loss_refuses_a_bundle_whose_label_space_was_edited_after_export(tmp_path, monkeypatch):
@@ -360,14 +344,6 @@ def test_val_loss_refuses_a_bundle_whose_label_space_was_edited_after_export(tmp
     (space / "classes.csv").write_text("edited\n")
 
     with pytest.raises(ValueError, match="differs from the sha256"):
-        harness.run(tmp_path)
-
-
-def test_val_loss_refuses_a_bundle_whose_metadata_has_no_label_space(tmp_path, monkeypatch):
-    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
-    harness.bundle.metadata = {}
-
-    with pytest.raises(ValueError, match="exported before label spaces existed"):
         harness.run(tmp_path)
 
 

@@ -11,6 +11,7 @@ import pyarrow as pa
 import pytest
 import yaml
 
+import mermaidseg.dataset_reconciliation.label_space_build as build_module
 import scripts.build_label_space as script
 from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.label_space import label_keys_sha1
@@ -182,6 +183,20 @@ def test_a_label_that_trains_a_class_without_a_concept_row_refuses_and_writes_no
     out = tmp_path / "space"
 
     with pytest.raises(ValueError, match=r"native_name=Mystery kind=missing_concepts"):
+        _run(inputs, out)
+
+    assert not out.exists()
+
+
+def test_inconsistent_tables_refuse_and_write_nothing(tmp_path, monkeypatch):
+    inputs = _inputs(tmp_path, _LABELS)
+    out = tmp_path / "space"
+
+    def refuse(_space):
+        raise ValueError("tables are inconsistent")
+
+    monkeypatch.setattr(build_module, "check_label_space_tables", refuse)
+    with pytest.raises(ValueError, match="tables are inconsistent"):
         _run(inputs, out)
 
     assert not out.exists()

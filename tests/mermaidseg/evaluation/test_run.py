@@ -58,7 +58,6 @@ def _options(
         bundle=bundle,
         cache_dir=cache.cache_dir,
         data_config=data_config,
-        schema_config=REPO_ROOT / "configs" / "data_config.yaml",
         output_dir=tmp_path / "out",
         evals=list(run.ALL_EVALS),
         split="val",

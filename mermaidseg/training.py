@@ -183,7 +183,7 @@ def _lineage_inputs(
 ) -> list[Path]:
     """The files a run reads from the repo whose content lineage does not record.
 
-    These are its training and concept schema configs, the files the training config names, the
+    These are its training config, the files the training config names, the
     sidecars of its removal list and mask, and each dataset's split file. The label space
     contributes its listed files, so one untracked file fails the check. Empty config entries are
     skipped.
@@ -196,7 +196,6 @@ def _lineage_inputs(
     sidecars = [training_cfg.concept_removal, training_cfg.concept_source_mask]
     return [
         resolve_repo_path(args.training_config),
-        resolve_repo_path(args.concept_schema_config),
         *_label_space_files(resolve_repo_path(training_cfg.label_space)),
         *(resolve_repo_path(path) for path in named if path),
         *(meta_path(resolve_repo_path(path)) for path in sidecars if path),
@@ -228,12 +227,8 @@ def _copy_label_space(files: list[Path], target: Path) -> dict[str, str]:
 
     The copy is staged in ``.{target name}.partial`` beside ``target`` and renamed onto it, so a
     crash leaves no partial ``target``. An existing ``target`` (a resumed or relaunched run) is
-    kept when its files match ``files``.
-
-    Raises:
-        ValueError: An existing ``target`` differs from ``files``; the message names the files.
+    kept; the caller checks it against ``files`` first (:func:`_check_label_space_copy`).
     """
-    _check_label_space_copy(files, target)
     if target.exists():
         return {path.name: sha256_file(target / path.name) for path in files}
     staging = target.with_name(f".{target.name}.partial")
@@ -413,7 +408,6 @@ def run(args: argparse.Namespace) -> None:
         dataset_dict,
         cfg.training,
         section=section,
-        schema_config=resolve_repo_path(args.concept_schema_config),
         device=device,
     )
     print0(

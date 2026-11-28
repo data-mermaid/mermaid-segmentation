@@ -9,7 +9,12 @@ import pytest
 import yaml
 
 from mermaidseg.dataset_reconciliation.artifact_meta import read_sidecar
-from mermaidseg.dataset_reconciliation.label_space import label_keys_sha1, read_label_space_meta
+from mermaidseg.dataset_reconciliation.label_space import (
+    check_label_space_tables,
+    label_keys_sha1,
+    read_label_space,
+    read_label_space_meta,
+)
 from mermaidseg.io import ConfigDict
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -22,6 +27,7 @@ def _training_section(config: Path) -> dict:
     return yaml.safe_load(config.read_text())["training"]
 
 
+_LABEL_SPACE_DIRS = sorted(path for path in (_REPO / "configs" / "label_spaces").glob("*/"))
 _LABEL_SPACE_CONFIGS = [c for c in _TRAINING_CONFIGS if _training_section(c).get("label_space")]
 # training key -> label space meta key of the sha1 of the file it names.
 _LABEL_SPACE_FILES = {
@@ -92,3 +98,12 @@ def test_the_label_space_was_built_from_the_data_configs_pins(config):
     data_section = yaml.safe_load(_DATA_CONFIG.read_text())["data"]
 
     assert _pins(data_version) == _pins(data_section)
+
+
+def test_a_label_space_directory_is_committed():
+    assert _LABEL_SPACE_DIRS
+
+
+@pytest.mark.parametrize("directory", _LABEL_SPACE_DIRS, ids=lambda path: path.name)
+def test_committed_label_spaces_pass_their_table_checks(directory):
+    check_label_space_tables(read_label_space(directory))

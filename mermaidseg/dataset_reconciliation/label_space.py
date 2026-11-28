@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
-import shutil
-import tempfile
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -292,13 +289,8 @@ def resolve_label_space(
         The label space, with an empty ``meta``.
 
     Raises:
-        ValueError: ``tables`` is empty, ``class_subset`` is unset, or a train group is not in
-            its dataset.
+        ValueError: A train group is not in its dataset.
     """
-    if not tables:
-        raise ValueError("a label space requires at least one dataset")
-    if training_cfg.class_subset is None:
-        raise ValueError("a label space requires training.class_subset")
     names = sorted(dict.fromkeys(str(label).lower() for label in training_cfg.class_subset))
     class_id = {name: i for i, name in enumerate(names, start=1)}
     hierarchy = hierarchy_from_table(benthic_attributes)
@@ -339,133 +331,43 @@ def _write_tables(directory: Path, space: LabelSpace) -> None:
     (directory / META_YAML).write_text(yaml.safe_dump(space.meta, sort_keys=False))
 
 
-def _copy_other_files(source: Path, target: Path) -> None:
-    """Copy the entries of ``source`` that ``_write_tables`` does not produce into ``target``."""
-    produced = {CLASSES_CSV, CONCEPTS_CSV, SOURCE_LABELS_CSV, META_YAML}
-    for entry in source.iterdir():
-        if entry.name in produced:
-            continue
-        if entry.is_dir():
-            shutil.copytree(entry, target / entry.name)
-        else:
-            shutil.copy2(entry, target / entry.name)
-
-
-def _current_umask() -> int:
-    """The process umask, read by setting and restoring it."""
-    previous = os.umask(0)
-    os.umask(previous)
-    return previous
-
-
-def _crashed_swap_leftovers(directory: Path) -> list[Path]:
-    """The ``.{name}.*.old`` backups beside ``directory``; they remain only after a crashed swap."""
-    if not directory.parent.is_dir():
-        return []
-    prefix = f".{directory.name}."
-    return sorted(
-        p
-        for p in directory.parent.iterdir()
-        if p.name.startswith(prefix) and p.name.endswith(".old")
-    )
-
-
 def write_label_space(directory: Path, space: LabelSpace) -> None:
     """Write ``classes.csv``, ``concepts.csv``, ``source_labels.csv`` and the meta YAML.
 
-    The files are written to a temporary sibling of ``directory`` and swapped onto it, so a
-    failure leaves the previous file set. Other files of an existing ``directory``, such as
-    ``acknowledged.csv``, are carried over.
-
-    Raises:
-        ValueError: ``directory`` is missing and a ``.{name}.*.old`` backup sits beside it. A kill
-            between the two renames of the swap leaves that state; restore the backup by renaming
-            it to ``directory``.
+    The files are written in place, creating ``directory`` if needed. Other files of an existing
+    ``directory``, such as ``acknowledged.csv``, are left as they are. Call
+    :func:`check_label_space_tables` first; the write does not validate.
     """
-    if not directory.exists():
-        leftovers = _crashed_swap_leftovers(directory)
-        if leftovers:
-            raise ValueError(
-                f"{directory} is missing but {[str(p) for p in leftovers]} remains from a crashed "
-                f"write; restore it by renaming it to {directory}"
-            )
-    directory.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(dir=directory.parent, prefix=f".{directory.name}.", suffix=".partial")
-    )
-    backup: Path | None = None
-    try:
-        _write_tables(staging, space)
-        os.chmod(staging, 0o777 & ~_current_umask())
-        if directory.exists():
-            _copy_other_files(directory, staging)
-            # An empty directory is a valid os.replace target; a non-empty one is not.
-            backup = Path(
-                tempfile.mkdtemp(dir=directory.parent, prefix=f".{directory.name}.", suffix=".old")
-            )
-            os.replace(directory, backup)
-        os.replace(staging, directory)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        if backup is not None:
-            if directory.exists():
-                shutil.rmtree(backup, ignore_errors=True)
-            else:
-                os.replace(backup, directory)
-        raise
-    if backup is not None:
-        shutil.rmtree(backup, ignore_errors=True)
+    directory.mkdir(parents=True, exist_ok=True)
+    _write_tables(directory, space)
 
 
 def _read_table(directory: Path, file: str, columns: list[str]) -> pd.DataFrame:
-    """Read one CSV with empty cells as ``''``; its integer columns become ``int64``.
-
-    Raises:
-        ValueError: A column of ``columns`` is missing.
-    """
-    path = directory / file
-    df = pd.read_csv(path, dtype=str, keep_default_na=False)
-    missing = [c for c in columns if c not in df.columns]
-    if missing:
-        raise ValueError(f"{path} is missing columns {missing}")
-    df = df[columns]
+    """Read one CSV with empty cells as ``''``; its integer columns become ``int64``."""
+    df = pd.read_csv(directory / file, dtype=str, keep_default_na=False)[columns]
     return df.astype(dict.fromkeys(_INT_COLUMNS[file], "int64"))
 
 
-def _check_row_order_ids(directory: Path, classes: pd.DataFrame, concepts: pd.DataFrame) -> None:
+def _check_row_order_ids(classes: pd.DataFrame, concepts: pd.DataFrame) -> None:
     """Raise unless ``class_id`` is 0..n-1 and ``channel_id`` is 1..n in row order."""
     if classes["class_id"].tolist() != list(range(len(classes))):
-        raise ValueError(
-            f"{directory / CLASSES_CSV} class_id is not 0..{len(classes) - 1} in order"
-        )
+        raise ValueError(f"{CLASSES_CSV} class_id is not 0..{len(classes) - 1} in order")
     if concepts["channel_id"].tolist() != list(range(1, len(concepts) + 1)):
-        raise ValueError(
-            f"{directory / CONCEPTS_CSV} channel_id is not 1..{len(concepts)} in order"
-        )
+        raise ValueError(f"{CONCEPTS_CSV} channel_id is not 1..{len(concepts)} in order")
 
 
-def _check_one_version_per_dataset(path: Path, source_labels: pd.DataFrame) -> None:
+def _check_one_version_per_dataset(source_labels: pd.DataFrame) -> None:
     """Raise when a dataset of ``source_labels`` appears under more than one version."""
     versions = source_labels.groupby("dataset")["version"].unique()
     many = {d: sorted(v) for d, v in versions.items() if len(v) > 1}
     if many:
-        raise ValueError(f"{path} has datasets under more than one version: {many}")
+        raise ValueError(f"{SOURCE_LABELS_CSV} has datasets under more than one version: {many}")
 
 
 def _check_source_labels(
-    directory: Path,
-    source_labels: pd.DataFrame,
-    classes: pd.DataFrame,
-    concepts: pd.DataFrame,
+    source_labels: pd.DataFrame, classes: pd.DataFrame, concepts: pd.DataFrame
 ) -> None:
-    """Raise when the tables are inconsistent.
-
-    Inconsistent means: ids out of row order, a dataset under two versions, a repeated label, or
-    a class or concept that ``source_labels`` names and its table lacks.
-    """
-    path = directory / SOURCE_LABELS_CSV
-    _check_row_order_ids(directory, classes, concepts)
-    _check_one_version_per_dataset(path, source_labels)
+    """Raise on a repeated label, or a class or concept that ``source_labels`` names and its table lacks."""
     duplicated = source_labels.duplicated(["dataset", "version", "label_id"], keep=False)
     if duplicated.any():
         repeated = sorted(
@@ -475,10 +377,12 @@ def _check_source_labels(
                 )
             )
         )
-        raise ValueError(f"{path} repeats (dataset, version, label_id) {repeated}")
+        raise ValueError(f"{SOURCE_LABELS_CSV} repeats (dataset, version, label_id) {repeated}")
     unknown_classes = sorted(set(source_labels["class_id"]) - set(classes["class_id"]))
     if unknown_classes:
-        raise ValueError(f"{path} names class ids not in {CLASSES_CSV}: {unknown_classes}")
+        raise ValueError(
+            f"{SOURCE_LABELS_CSV} names class ids not in {CLASSES_CSV}: {unknown_classes}"
+        )
     named = {
         name
         for column in ("concepts", "false_concepts")
@@ -487,35 +391,43 @@ def _check_source_labels(
     }
     unknown_concepts = sorted(named - set(concepts["name"]))
     if unknown_concepts:
-        raise ValueError(f"{path} names concepts not in {CONCEPTS_CSV}: {unknown_concepts}")
+        raise ValueError(
+            f"{SOURCE_LABELS_CSV} names concepts not in {CONCEPTS_CSV}: {unknown_concepts}"
+        )
+
+
+def check_label_space_tables(space: LabelSpace) -> None:
+    """Raise unless the tables of ``space`` are consistent.
+
+    Consistent means: ``class_id`` 0..n-1 and ``channel_id`` 1..n in row order, each dataset of
+    ``source_labels`` under one version, no repeated ``(dataset, version, label_id)``, and every
+    class and concept that ``source_labels`` names present in its table.
+
+    Raises:
+        ValueError: A table is inconsistent; the message names the file and the problem.
+    """
+    _check_row_order_ids(space.classes, space.concepts)
+    _check_one_version_per_dataset(space.source_labels)
+    _check_source_labels(space.source_labels, space.classes, space.concepts)
 
 
 def read_label_space_meta(directory: Path) -> dict:
-    """Read the provenance of the label space in ``directory``.
-
-    Raises:
-        ValueError: ``label_space.meta.yaml`` is not a mapping.
-    """
-    path = directory / META_YAML
-    meta = yaml.safe_load(path.read_text())
-    if not isinstance(meta, dict):
-        raise ValueError(f"{path} is not a YAML mapping")
-    return meta
+    """Read the provenance of the label space in ``directory``."""
+    return yaml.safe_load((directory / META_YAML).read_text())
 
 
 def read_label_space(directory: Path) -> LabelSpace:
-    """Read a label space written by :func:`write_label_space`.
+    """Read a label space written by :func:`write_label_space`, without checking its tables.
+
+    The builder checks the tables when it writes them and CI checks the committed ones (see
+    :func:`check_label_space_tables`).
 
     Raises:
-        ValueError: A table misses a column; ``class_id`` is not 0..n-1 or ``channel_id`` not
-            1..n in row order; a dataset appears under more than one version;
-            ``source_labels.csv`` repeats a ``(dataset, version, label_id)`` or names a class or
-            concept that its table lacks; or the meta file is not a mapping.
+        KeyError: A table misses a column.
     """
     classes = _read_table(directory, CLASSES_CSV, CLASS_COLUMNS)
     concepts = _read_table(directory, CONCEPTS_CSV, CONCEPT_COLUMNS)
     source_labels = _read_table(directory, SOURCE_LABELS_CSV, SOURCE_LABEL_COLUMNS)
-    _check_source_labels(directory, source_labels, classes, concepts)
     meta = read_label_space_meta(directory)
     return LabelSpace(classes=classes, concepts=concepts, source_labels=source_labels, meta=meta)
 

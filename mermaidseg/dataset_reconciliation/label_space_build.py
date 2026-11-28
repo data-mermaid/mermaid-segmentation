@@ -18,6 +18,7 @@ from mermaidseg.dataset_reconciliation.label_space import (
     ACK_COLUMNS,
     LabelSpace,
     check_label_space,
+    check_label_space_tables,
     label_keys_sha1,
     resolve_label_space,
 )
@@ -84,7 +85,8 @@ def build_label_space(
         git_sha: Commit of the clean tree the inputs are read from.
 
     Raises:
-        ValueError: The label space is refused (see :func:`check_label_space`).
+        ValueError: The label space is refused (see :func:`check_label_space` and
+            :func:`check_label_space_tables`).
     """
     section = DataSection.model_validate(load_section(data_config, "data"))
     training_cfg = ConfigDict(load_section(training_config, "training"))
@@ -118,6 +120,7 @@ def build_label_space(
         schema,
         train_groups=train_groups,
     )
+    check_label_space_tables(space)
     acknowledged_table = _read_acknowledged(acknowledged)
     check_label_space(space, acknowledged_table, hierarchy_from_table(taxonomy.benthic_attributes))
     space.meta.update(

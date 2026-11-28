@@ -159,14 +159,6 @@ def build_train_parser() -> argparse.ArgumentParser:
         help="path to the data config YAML (default: the final-run mixture of pinned versions)",
     )
     parser.add_argument(
-        "--concept-schema-config",
-        default="configs/data_config.yaml",
-        help=(
-            "Data config whose configured datasets freeze the concept channels, so every run "
-            "shares one layout whatever subset of the data it trains on."
-        ),
-    )
-    parser.add_argument(
         "--logger-config",
         default="configs/logger_config.yaml",
         help="path to the logger config YAML",

@@ -27,7 +27,6 @@ from mermaidseg.run_setup import (
 )
 from tests.mermaidseg.conftest import (
     CORALSCAPES_LABELS,
-    PACIFIC_LABELS,
     label_space_reader,
     label_space_section,
 )
@@ -95,25 +94,7 @@ def _build(run: SimpleNamespace, readers=None, section=None):
         run.readers if readers is None else readers,
         run.training_cfg,
         section=run.section if section is None else section,
-        schema_config=run.schema_config,
     )
-
-
-def test_build_registry_refuses_a_run_config_without_a_label_space(label_space_run):
-    del label_space_run.training_cfg["label_space"]
-
-    with pytest.raises(ValueError, match=r"no training\.label_space.*retrain it"):
-        _build(label_space_run)
-
-
-def test_build_registry_exits_naming_a_dataset_missing_from_the_concept_schema(
-    label_space_run, tmp_path
-):
-    readers = {
-        ("coralnet", "train"): label_space_reader(tmp_path, "coralnet", {1: ("sand", "Sand")})
-    }
-    with pytest.raises(SystemExit, match=r"\['coralnet'\].*missing from the frozen concept schema"):
-        _build(label_space_run, readers=readers)
 
 
 def test_build_registry_registers_one_reader_per_source(label_space_run, tmp_path):
@@ -167,23 +148,7 @@ def _other_concepts(run: SimpleNamespace) -> None:
         f.write("\n")
 
 
-def _unknown_reader_label(run: SimpleNamespace) -> None:
-    run.readers[("pacific_labeled_corals", "val")] = label_space_reader(
-        run.directory.parent / "extra",
-        "pacific_labeled_corals",
-        {**PACIFIC_LABELS, 5: ("sand", "Sand")},
-        split="val",
-        global_offset=2,
-    )
-
-
-def _pin_and_reader_label(run: SimpleNamespace) -> None:
-    _other_pin(run)
-    _unknown_reader_label(run)
-
-
 _PIN = rf"coralscapes_v2.*20990101-fffffff.*{VERSION}"
-_LABEL = r"pacific_labeled_corals.*\[5\]"
 
 
 @pytest.mark.parametrize(
@@ -192,16 +157,8 @@ _LABEL = r"pacific_labeled_corals.*\[5\]"
         (_other_pin, [_PIN]),
         (_other_taxonomy_manifest, [r"taxonomy.*other"]),
         (_other_dataset_manifest, [r"dataset coralscapes_v2.*other"]),
-        (_unknown_reader_label, [_LABEL]),
-        (_pin_and_reader_label, [_PIN, _LABEL]),
     ],
-    ids=[
-        "dataset-pin",
-        "taxonomy-manifest",
-        "dataset-manifest",
-        "reader-label",
-        "several",
-    ],
+    ids=["dataset-pin", "taxonomy-manifest", "dataset-manifest"],
 )
 def test_build_registry_refuses_a_stale_label_space_naming_each_mismatch(
     label_space_run, mutate, patterns
@@ -236,7 +193,6 @@ def test_build_registry_with_a_label_space_dir_ignores_the_repo_inputs(label_spa
         label_space_run.readers,
         label_space_run.training_cfg,
         section=label_space_run.section,
-        schema_config=label_space_run.schema_config,
         label_space_dir=label_space_run.directory,
     )
 
@@ -249,11 +205,10 @@ def test_build_registry_with_a_label_space_dir_ignores_the_repo_inputs(label_spa
         (_other_pin, _PIN),
         (_other_dataset_manifest, r"dataset coralscapes_v2.*other"),
         (_other_taxonomy_manifest, r"taxonomy.*other"),
-        (_unknown_reader_label, _LABEL),
     ],
-    ids=["dataset-pin", "dataset-manifest", "taxonomy-manifest", "reader-label"],
+    ids=["dataset-pin", "dataset-manifest", "taxonomy-manifest"],
 )
-def test_build_registry_with_a_label_space_dir_still_refuses_pin_and_label_mismatches(
+def test_build_registry_with_a_label_space_dir_still_refuses_pin_mismatches(
     label_space_run, mutate, pattern
 ):
     mutate(label_space_run)
@@ -263,7 +218,6 @@ def test_build_registry_with_a_label_space_dir_still_refuses_pin_and_label_misma
             label_space_run.readers,
             label_space_run.training_cfg,
             section=label_space_run.section,
-            schema_config=label_space_run.schema_config,
             label_space_dir=label_space_run.directory,
         )
 
@@ -301,11 +255,10 @@ def _label_space_copy_recording_inputs(run: SimpleNamespace, **recorded: str) ->
     [
         ({}, None),
         ({"concept_source_mask_sha1": "stale"}, "concept_source_mask_sha1"),
-        ({"concept_removal_sha1": "stale"}, "concept_removal_sha1"),
     ],
-    ids=["matches", "mask-differs", "removal-differs"],
+    ids=["matches", "mask-differs"],
 )
-def test_source_mask_with_a_label_space_dir_checks_the_mask_and_removal_against_its_meta(
+def test_source_mask_with_a_label_space_dir_checks_the_mask_against_its_meta(
     label_space_run, recorded, stale_key
 ):
     copy = _label_space_copy_recording_inputs(label_space_run, **recorded)

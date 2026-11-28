@@ -68,7 +68,6 @@ class EvalOptions:
     bundle: Path
     cache_dir: Path
     data_config: Path
-    schema_config: Path
     output_dir: Path
     evals: list[str]
     split: Split
@@ -296,7 +295,6 @@ def _run_val_loss(ctx: EvalContext) -> dict[str, dict]:
         batch_size=options.batch_size,
         num_workers=options.num_workers,
         amp_dtype=ctx.predictor.amp_dtype,
-        schema_config=options.schema_config,
         max_images_per_dataset=max_images,
         name=key,
         apply_source_mask=ctx.split == "train",
