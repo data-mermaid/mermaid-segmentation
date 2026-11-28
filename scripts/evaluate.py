@@ -82,12 +82,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=_CONFIGS / "data_config.yaml",
         help="Dataset pins of every eval, and the blocks val_loss scores for --split",
     )
-    p.add_argument(
-        "--schema-config",
-        type=Path,
-        default=_CONFIGS / "data_config.yaml",
-        help="Data config whose datasets freeze the concept channels (as in training)",
-    )
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument(
         "--evals",

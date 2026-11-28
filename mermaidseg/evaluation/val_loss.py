@@ -31,9 +31,8 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -49,11 +48,7 @@ from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.data_parallel import build_step
 from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.model.loss import build_loss
-from mermaidseg.run_setup import (
-    DEFAULT_SCHEMA_CONFIG,
-    build_registry,
-    load_run_concept_source_mask,
-)
+from mermaidseg.run_setup import build_registry, load_run_concept_source_mask
 from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
@@ -81,32 +76,6 @@ class _Accumulator:
 
     def means(self) -> dict[str, float]:
         return {key: self.sums[key] / self.counts[key] for key in sorted(self.sums)}
-
-
-def _first_difference(expected: Sequence[str], actual: Sequence[str]) -> str:
-    """Describe the first position where two name lists differ."""
-    for i, (left, right) in enumerate(zip(expected, actual, strict=False)):
-        if left != right:
-            return f"position {i}: bundle {left!r} vs registry {right!r}"
-    return f"lengths: bundle {len(expected)} vs registry {len(actual)}"
-
-
-def _check_layout(bundle: ModelBundle, registry: Any, channel_names: list[str]) -> None:
-    """Raise ValueError naming the first class or concept the bundle and registry disagree on."""
-    classes = {k: v for k, v in bundle.id2label.items() if k > 0}
-    target = dict(registry.target_id2label)
-    if classes != target:
-        ids = sorted(classes.keys() | target.keys())
-        differing = next(i for i in ids if classes.get(i) != target.get(i))
-        raise ValueError(
-            f"target classes differ from the bundle at id {differing}: "
-            f"bundle {classes.get(differing)!r} vs registry {target.get(differing)!r}"
-        )
-    names = [name for _, name in sorted(bundle.concept_id2name.items())]
-    if names != channel_names:
-        raise ValueError(
-            f"concept channels differ from the bundle at {_first_difference(names, channel_names)}"
-        )
 
 
 def split_blocks_only(section: DataSection, split: Split) -> DataSection:
@@ -151,7 +120,6 @@ def evaluate_val_loss(
     batch_size: int = 8,
     num_workers: int = 8,
     amp_dtype: torch.dtype | None = None,
-    schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
     max_images_per_dataset: int | None = 1000,
     per_pixel_loss_weight: float = 0.5,
     per_image_loss_weight: float = 0.5,
@@ -168,17 +136,11 @@ def evaluate_val_loss(
     ``(dataset, "val")``, only those images (see :func:`mermaidseg.data.factory.build_datasets`).
 
     Raises:
-        ValueError: No dataset of ``section`` has a ``split`` block, ``bundle`` has no
-            ``label_space/`` or lists none in its metadata, or a file of ``label_space/``
-            is missing or differs from its sha256 in the metadata.
+        ValueError: No dataset of ``section`` has a ``split`` block, or a file the bundle
+            metadata lists for ``label_space/`` is missing or differs from its sha256.
     """
     t0 = time.time()
     label_space_dir = Path(bundle.path) / LABEL_SPACE_DIR
-    if not label_space_dir.is_dir() or "label_space" not in bundle.metadata:
-        raise ValueError(
-            f"bundle {bundle.path} has no label_space/; it was exported before label spaces "
-            "existed, so re-export it from a retrained run"
-        )
     require_label_space(label_space_dir, bundle.metadata["label_space"])
     cfg = _bundle_config(bundle)
     resolution = bundle.input_size[0]
@@ -200,12 +162,9 @@ def evaluate_val_loss(
         dataset_dict,
         cfg.training,
         section=section,
-        schema_config=schema_config,
         device=device,
         label_space_dir=label_space_dir,
     )
-    channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
-    _check_layout(bundle, registry, channel_names)
     cfg.training.loss.binary_concept_names = schema.binary_names()
 
     source_mask = None

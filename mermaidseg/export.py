@@ -37,7 +37,7 @@ from segdata_spec.sync import check_published_manifest
 LABEL_SPACE_DIR = "label_space"
 
 # Sections that must not change when a run resumes into an existing sidecar.
-_CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing", "label_space")
+_CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing")
 
 
 def _jsonable(value: Any) -> Any:
@@ -118,8 +118,8 @@ def write_sidecar(
     """Write ``model.json`` atomically into ``run_dir`` and return its path.
 
     ``label_space`` maps each file of the run's label space copy to its sha256. An existing
-    sidecar must carry the same architecture, id2label, concept_id2name, preprocessing and
-    label_space; only its lineage is replaced.
+    sidecar must carry the same architecture, id2label, concept_id2name and preprocessing; its
+    label_space and lineage are replaced.
 
     Raises:
         ValueError: The existing sidecar differs; the message names the differing keys.
@@ -199,8 +199,6 @@ def _require_empty_out_dir(out_dir: Path) -> None:
 
 def require_label_space(source: Path, listed: Mapping[str, str]) -> None:
     """Raise ValueError unless ``source`` holds every file of ``listed`` with its sha256."""
-    if not source.is_dir():
-        raise ValueError(f"label space directory not found: {source}")
     for name, expected in listed.items():
         path = source / name
         if name != Path(name).name or not path.is_file():

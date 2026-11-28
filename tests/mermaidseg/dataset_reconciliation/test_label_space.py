@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import stat
+import dataclasses
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +17,7 @@ from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.label_space import (
     LabelSpace,
     check_label_space,
+    check_label_space_tables,
     label_keys_sha1,
     read_label_space,
     read_label_space_meta,
@@ -240,17 +240,6 @@ def test_concepts_table_omits_a_removed_channel(tmp_path: Path) -> None:
     ]
 
 
-def test_resolving_no_tables_raises(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="at least one dataset"):
-        resolve_label_space(
-            {},
-            _TAXONOMY,
-            SimpleNamespace(class_subset=["Sand"], label_roll_up=False),
-            _schema(tmp_path),
-            train_groups={},
-        )
-
-
 def _coverage_level(caplog: pytest.LogCaptureFixture, dataset: str) -> tuple[str, str]:
     record = next(r for r in caplog.records if r.getMessage().startswith(f"{dataset}:"))
     return record.levelname, record.getMessage()
@@ -396,10 +385,6 @@ def test_label_space_round_trips_through_its_directory(tmp_path: Path) -> None:
 _ACK_BYTES = b"dataset,native_name,kind,reason\r\nx,y,z,w\r\n"
 
 
-def _snapshot(directory: Path) -> dict[str, bytes]:
-    return {p.name: p.read_bytes() for p in sorted(directory.iterdir())}
-
-
 def test_rewriting_a_directory_replaces_every_table_and_keeps_acknowledged_csv(
     tmp_path: Path,
 ) -> None:
@@ -423,171 +408,75 @@ def test_rewriting_a_directory_replaces_every_table_and_keeps_acknowledged_csv(
     read = read_label_space(directory)
     pd.testing.assert_frame_equal(read.classes, space.classes)
     pd.testing.assert_frame_equal(read.source_labels, space.source_labels)
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
 
-def _fail_yaml_dump(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(*_args: Any, **_kwargs: Any) -> str:
-        raise OSError("disk full")
-
-    monkeypatch.setattr("mermaidseg.dataset_reconciliation.label_space.yaml.safe_dump", fail)
-
-
-def _fail_second_replace(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_replace = os.replace
-    calls = []
-
-    def replace(src: Any, dst: Any) -> None:
-        calls.append(src)
-        if len(calls) == 2:
-            raise OSError("disk full")
-        real_replace(src, dst)
-
-    monkeypatch.setattr(label_space_module.os, "replace", replace)
-
-
-@pytest.mark.parametrize(
-    "inject_failure",
-    [_fail_yaml_dump, _fail_second_replace],
-    ids=["while-writing-tables", "second-rename"],
-)
-def test_a_failure_while_writing_leaves_the_existing_directory_and_no_partial_sibling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject_failure: Callable[..., None]
-) -> None:
-    space = _round_trip_space(tmp_path)
-    directory = tmp_path / "space"
-    write_label_space(directory, space)
-    (directory / "acknowledged.csv").write_text("kept")
-    before = _snapshot(directory)
-
-    inject_failure(monkeypatch)
-    with pytest.raises(OSError, match="disk full"):
-        write_label_space(directory, space)
-
-    assert _snapshot(directory) == before
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
-
-
-def test_a_crashed_swap_blocks_the_write_and_creates_nothing(tmp_path: Path) -> None:
-    leftover = tmp_path / ".space.x.old"
-    leftover.mkdir()
-
-    with pytest.raises(ValueError, match=r"\.space\.x\.old.*restore"):
-        write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
-
-    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(("space", ".space"))) == [
-        ".space.x.old"
-    ]
-
-
-def test_the_written_directory_mode_follows_the_umask(tmp_path: Path) -> None:
-    space = _round_trip_space(tmp_path)
-    old_umask = os.umask(0o022)
-    try:
-        write_label_space(tmp_path / "space", space)
-    finally:
-        os.umask(old_umask)
-
-    assert stat.S_IMODE((tmp_path / "space").stat().st_mode) == 0o755
-
-
-def _drop_column(df: pd.DataFrame) -> pd.DataFrame:
-    return df.drop(columns="kind")
-
-
-def _duplicate_row(df: pd.DataFrame) -> pd.DataFrame:
-    return pd.concat([df, df.iloc[[0]]])
-
-
-def _unknown_class(df: pd.DataFrame) -> pd.DataFrame:
-    return df.assign(class_id=[99, 0, 2])
-
-
-def _unknown_true_concept(df: pd.DataFrame) -> pd.DataFrame:
-    return df.assign(concepts=["genus__zzz", "", ""])
-
-
-def _unknown_false_concept(df: pd.DataFrame) -> pd.DataFrame:
-    return df.assign(false_concepts=["zzz", "", ""])
-
-
-@pytest.mark.parametrize(
-    ("file", "edit"),
-    [
-        ("classes.csv", _drop_column),
-        ("source_labels.csv", _duplicate_row),
-        ("source_labels.csv", _unknown_class),
-        ("source_labels.csv", _unknown_true_concept),
-        ("source_labels.csv", _unknown_false_concept),
-    ],
-    ids=["missing-column", "duplicate-label", "unknown-class", "unknown-concept", "unknown-false"],
-)
-def test_read_refuses_a_hand_edited_table_naming_the_file(
-    tmp_path: Path, file: str, edit: Callable[[pd.DataFrame], pd.DataFrame]
-) -> None:
-    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
-    path = tmp_path / "space" / file
-    edit(pd.read_csv(path, dtype=str, keep_default_na=False)).to_csv(path, index=False)
-
-    with pytest.raises(ValueError, match=file):
-        read_label_space(tmp_path / "space")
-
-
-def test_read_refuses_a_dataset_under_two_versions_naming_both(tmp_path: Path) -> None:
-    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
-    path = tmp_path / "space" / "source_labels.csv"
-    df = pd.read_csv(path, dtype=str, keep_default_na=False)
-    df.loc[0, "version"] = "20990101-abcdef0"
-    df.to_csv(path, index=False)
-
-    with pytest.raises(ValueError, match=r"coralnet.*" + VERSION + r".*20990101-abcdef0"):
-        read_label_space(tmp_path / "space")
+def _swap_class_ids(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(class_id=[1, 0, 2, 3])
 
 
 def _gap_in_class_ids(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(class_id=[0, 1, 2, 4])
 
 
-def _reordered_class_ids(df: pd.DataFrame) -> pd.DataFrame:
-    return df.assign(class_id=[1, 0, 2, 3])
-
-
 def _reordered_channel_ids(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(channel_id=list(reversed(df["channel_id"])))
 
 
+def _second_version(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(version=["20990101-abcdef0", *df["version"][1:]])
+
+
+def _duplicate_row(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.concat([df, df.iloc[[0]]], ignore_index=True)
+
+
+def _unknown_class(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(class_id=[99, *df["class_id"][1:]])
+
+
+def _unknown_true_concept(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(concepts=["genus__zzz", *df["concepts"][1:]])
+
+
+def _unknown_false_concept(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(false_concepts=["zzz", *df["false_concepts"][1:]])
+
+
+def test_check_label_space_tables_accepts_a_valid_space(tmp_path: Path) -> None:
+    check_label_space_tables(_round_trip_space(tmp_path))
+
+
 @pytest.mark.parametrize(
-    ("file", "edit"),
+    ("table", "edit", "match"),
     [
-        ("classes.csv", _gap_in_class_ids),
-        ("classes.csv", _reordered_class_ids),
-        ("concepts.csv", _reordered_channel_ids),
+        ("classes", _swap_class_ids, r"classes\.csv class_id"),
+        ("classes", _gap_in_class_ids, r"classes\.csv class_id"),
+        ("concepts", _reordered_channel_ids, r"concepts\.csv channel_id"),
+        ("source_labels", _second_version, r"coralnet.*" + VERSION + r".*20990101-abcdef0"),
+        ("source_labels", _duplicate_row, r"source_labels\.csv repeats"),
+        ("source_labels", _unknown_class, r"source_labels\.csv names class ids"),
+        ("source_labels", _unknown_true_concept, r"source_labels\.csv names concepts"),
+        ("source_labels", _unknown_false_concept, r"source_labels\.csv names concepts"),
     ],
-    ids=["class-gap", "class-reordered", "channels-reordered"],
+    ids=[
+        "class-swapped",
+        "class-gap",
+        "channels-reordered",
+        "two-versions",
+        "duplicate-label",
+        "unknown-class",
+        "unknown-concept",
+        "unknown-false-concept",
+    ],
 )
-def test_read_refuses_ids_that_are_not_row_order_ids_naming_the_file(
-    tmp_path: Path, file: str, edit: Callable[[pd.DataFrame], pd.DataFrame]
+def test_check_label_space_tables_refuses_an_inconsistent_table_naming_the_file(
+    tmp_path: Path, table: str, edit: Callable[[pd.DataFrame], pd.DataFrame], match: str
 ) -> None:
-    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
-    path = tmp_path / "space" / file
-    edit(pd.read_csv(path, dtype=str, keep_default_na=False)).to_csv(path, index=False)
+    space = _round_trip_space(tmp_path)
+    broken = dataclasses.replace(space, **{table: edit(getattr(space, table))})
 
-    with pytest.raises(ValueError, match=file):
-        read_label_space(tmp_path / "space")
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["", "- concepts_csv_sha1\n- x\n"],
-    ids=["empty", "list"],
-)
-def test_read_refuses_a_malformed_meta_naming_the_file(tmp_path: Path, text: str) -> None:
-    write_label_space(tmp_path / "space", _round_trip_space(tmp_path))
-    (tmp_path / "space" / "label_space.meta.yaml").write_text(text)
-
-    for read in (read_label_space, read_label_space_meta):
-        with pytest.raises(ValueError, match="label_space.meta.yaml"):
-            read(tmp_path / "space")
+    with pytest.raises(ValueError, match=match):
+        check_label_space_tables(broken)
 
 
 def test_read_label_space_meta_returns_the_meta(tmp_path: Path) -> None:

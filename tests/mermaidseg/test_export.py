@@ -92,7 +92,6 @@ def test_resume_with_the_same_contract_refreshes_the_lineage(tmp_path: Path):
     [
         ({"id2label": {0: "ignore", 1: "sand"}}, "id2label"),
         ({"model_class": "Other"}, "architecture"),
-        ({"label_space": {"classes.csv": "aa", "concepts.csv": "cc"}}, "label_space"),
     ],
 )
 def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, override, key):
@@ -306,12 +305,3 @@ def test_export_propagates_a_non_missing_key_s3_error_unchanged(deployable, tmp_
     with pytest.raises(ClientError):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=FakeS3({}, error=error))
     assert not (tmp_path / "out").exists()
-
-
-def test_resume_into_a_sidecar_without_a_label_space_key_is_refused_naming_it(tmp_path: Path):
-    write_sidecar(tmp_path, **_sidecar_kwargs())
-    old = {k: v for k, v in _read(tmp_path / MODEL_JSON).items() if k != "label_space"}
-    (tmp_path / MODEL_JSON).write_text(json.dumps(old))
-
-    with pytest.raises(ValueError, match="label_space"):
-        write_sidecar(tmp_path, **_sidecar_kwargs())

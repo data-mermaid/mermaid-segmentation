@@ -158,16 +158,6 @@ def test_copy_label_space_keeps_an_identical_existing_copy(tmp_path):
     assert marker.stat().st_mtime_ns == mtime
 
 
-def test_copy_label_space_refuses_an_existing_copy_that_differs_naming_the_file(tmp_path):
-    files = _source_files(tmp_path)
-    target = tmp_path / "label_space"
-    _copy_label_space(files, target)
-    files[1].write_text("meta.yaml A2")
-
-    with pytest.raises(ValueError, match=r"\['meta\.yaml'\]"):
-        _copy_label_space(files, target)
-
-
 def test_check_label_space_copy_accepts_an_absent_target(tmp_path):
     _check_label_space_copy(_source_files(tmp_path), tmp_path / "label_space")
 
@@ -210,13 +200,10 @@ def test_lineage_inputs_name_every_repo_file_the_run_reads(tmp_path):
             "datasets": {"coralnet": {**pin, "split_file": str(split_file)}, "other": pin},
         }
     )
-    args = argparse.Namespace(
-        training_config=tmp_path / "training.yaml", concept_schema_config=tmp_path / "schema.yaml"
-    )
+    args = argparse.Namespace(training_config=tmp_path / "training.yaml")
 
     assert training._lineage_inputs(args, training_cfg, section) == [
         tmp_path / "training.yaml",
-        tmp_path / "schema.yaml",
         space / "classes.csv",
         space / "concepts.csv",
         space / "source_labels.csv",
@@ -1393,3 +1380,27 @@ def test_the_preempt_checkpoint_of_the_last_update_marks_the_epoch_complete(run_
         cli=["--preempt-checkpoint-every-steps", "2"],
     )
     assert _checkpoint_flags(result.run_dir / "model_preempt4") == (4, True)
+
+
+def test_relaunch_into_a_run_dir_with_a_differing_label_space_copy_is_refused_before_loading(
+    monkeypatch, tmp_path, fresh_run, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    monkeypatch.setattr(training, "run_epoch", _RecordingTrainModel())
+    output_dir = tmp_path / "out"
+    cache_dir = tmp_path / "cache"
+    run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    checkpoint = _save_resume_checkpoint(
+        fresh_run.recorder.calls[0]["meta_model"], tmp_path / "resume.pt", epoch_complete=True
+    )
+    (run_dir / "label_space" / "classes.csv").write_text("edited after the first run")
+    (run_dir / "model.json").unlink()
+    loaded: list[Any] = []
+    monkeypatch.setattr(training, "load_training_checkpoint", lambda *a, **k: loaded.append(a))
+
+    with pytest.raises(ValueError, match="differs from the configured label space"):
+        training.run(_smoke_args(tmp_path, output_dir, cache_dir, epochs=2, checkpoint=checkpoint))
+
+    assert loaded == []
+    assert not (run_dir / "model.json").exists()

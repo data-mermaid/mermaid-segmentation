@@ -46,7 +46,7 @@ Without `--strict`, a failed evaluation is only logged, and the script exits 0. 
 | `coralscapes39` | The same probe on the published 39-class map, 50 pixels per class |
 | `val_loss` | The concept-bottleneck loss components on the `--split` blocks of `--data-config`, per dataset and overall |
 
-`val_loss` reads the label space from the `label_space/` directory of the bundle. It refuses a bundle without one: the bundle was exported before label spaces existed, so re-export it from a retrained run. The dataset and taxonomy pins of `--data-config` must match those of the bundle's label space.
+`val_loss` reads the label space from the `label_space/` directory of the bundle. It refuses a file that `model.json` lists under `label_space` and is missing or differs from its sha256. The dataset and taxonomy pins of `--data-config` must match those of the bundle's label space.
 
 Other options:
 
@@ -57,7 +57,6 @@ Other options:
   - `--split train`: `train_loss`. It scores the train groups of the CoralNet split file, with the run's concept source mask applied. The mask file in the repo must be the one the bundle trained with.
 - `--images-per-source N` scores a seeded random sample of at most N images per CoralNet source. `--sample-seed` sets the seed. The sample is written to `coralnet_<split>_sample.parquet`.
 - `--data-config` defaults to `configs/data_config.yaml`. It sets the sources and splits of every evaluation.
-- `--schema-config` sets the data config whose datasets freeze the concept channels, as in training. The default is `configs/data_config.yaml`.
 - `--probe-points` sets the 95-class probe points (10 per class).
 - `--coralscapes39-probe` sets the 39-class probe points (50 per class).
 - `--svm-c` sets the regularization C of the probes' `LinearSVC`.

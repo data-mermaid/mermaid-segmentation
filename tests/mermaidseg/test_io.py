@@ -147,7 +147,6 @@ CONFIG_FLAGS = (
     "training_config",
     "model_config",
     "data_config",
-    "concept_schema_config",
     "logger_config",
 )
 

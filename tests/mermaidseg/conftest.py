@@ -16,7 +16,6 @@ import pyarrow as pa
 import pytest
 import torch
 import torch.distributed as dist
-import yaml
 from botocore.exceptions import ClientError
 
 from mermaidseg.data import PointDataset
@@ -406,13 +405,6 @@ LABEL_SPACE_TAXONOMY = pa.table(
     {"id": ["1", "2", "3"], "name": ["Acropora", "Porites", "Sand"], "parent_id": [None] * 3}
 )
 
-# training keys -> label space meta key of the file each one names.
-_LABEL_SPACE_FILES = {
-    "concept_mapping_path": "concepts_csv_sha1",
-    "concept_removal": "concept_removal_sha1",
-    "concept_source_mask": "concept_source_mask_sha1",
-}
-
 
 def write_test_label_space(
     directory: Path,
@@ -431,12 +423,7 @@ def write_test_label_space(
         {
             "data_version": section_data_version(section),
             "label_keys_sha1": label_keys_sha1(training_cfg),
-            **{
-                meta_key: (
-                    file_sha1(resolve_repo_path(training_cfg[key])) if training_cfg[key] else None
-                )
-                for key, meta_key in _LABEL_SPACE_FILES.items()
-            },
+            "concepts_csv_sha1": file_sha1(resolve_repo_path(training_cfg.concept_mapping_path)),
         }
     )
     write_label_space(directory, space)
@@ -489,7 +476,7 @@ def label_space_run(tmp_path: Path) -> SimpleNamespace:
 
     ``coralscapes_v2`` (offset 0) holds acropora and sand, ``pacific_labeled_corals`` (offset 2)
     holds porites; the class subset is Acropora and Sand. Attributes: ``readers`` (keyed by
-    ``(name, split)``), ``training_cfg``, ``section``, ``schema_config``, ``concepts_csv``,
+    ``(name, split)``), ``training_cfg``, ``section``, ``concepts_csv``,
     ``space`` and ``directory``.
     """
     concepts_csv = tmp_path / "concepts.csv"
@@ -531,25 +518,10 @@ def label_space_run(tmp_path: Path) -> SimpleNamespace:
         schema,
         section,
     )
-    schema_config = tmp_path / "schema.yaml"
-    schema_config.write_text(
-        yaml.safe_dump(
-            {
-                "data": {
-                    "taxonomy": {"version": "tax-v", "manifest_sha256": "sha-tax"},
-                    "datasets": {
-                        name: {"version": "v", "manifest_sha256": "s", "train": {"groups": "all"}}
-                        for name in sorted(sources)
-                    },
-                }
-            }
-        )
-    )
     return SimpleNamespace(
         readers=readers,
         training_cfg=training_cfg,
         section=section,
-        schema_config=schema_config,
         concepts_csv=concepts_csv,
         space=space,
         directory=directory,

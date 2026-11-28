@@ -26,13 +26,12 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
     load_concept_source_mask,
 )
 from mermaidseg.dataset_reconciliation.label_space import (
-    SOURCE_LABELS_CSV,
     LabelSpace,
     read_label_space,
     read_label_space_meta,
 )
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
-from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
+from mermaidseg.io import REPO_ROOT, resolve_repo_path
 from mermaidseg.lineage import data_version
 from mermaidseg.model.meta import MetaModel
 
@@ -83,12 +82,12 @@ def load_run_concept_source_mask(
 ) -> ConceptSourceMask | None:
     """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``.
 
-    With ``label_space_dir`` (a trained bundle's label space), the mask and removal files must be
-    those the label space was built from.
+    With ``label_space_dir`` (a trained bundle's label space), the mask file must be the one the
+    label space was built from.
 
     Raises:
-        ValueError: With ``label_space_dir``, the mask or removal file differs from the one the
-            label space records.
+        ValueError: With ``label_space_dir``, the mask file differs from the one the label space
+            records.
     """
     path = training_cfg.concept_source_mask
     if not path:
@@ -97,9 +96,6 @@ def load_run_concept_source_mask(
         meta = read_label_space_meta(label_space_dir)
         _check_input_sha1(
             meta, training_cfg, "concept_source_mask", "concept_source_mask_sha1", label_space_dir
-        )
-        _check_input_sha1(
-            meta, training_cfg, "concept_removal", "concept_removal_sha1", label_space_dir
         )
     return load_concept_source_mask(
         resolve_repo_path(path),
@@ -141,32 +137,6 @@ def _pin_mismatches(
     return problems
 
 
-def _missing_reader_labels(space: LabelSpace, readers: Iterable[VersionDataset]) -> list[str]:
-    """Per reader, its ``(dataset, version, label_id)`` labels absent from ``source_labels``."""
-    labels = space.source_labels
-    known = {
-        (dataset, version, int(label_id))
-        for dataset, version, label_id in zip(
-            labels["dataset"], labels["version"], labels["label_id"], strict=True
-        )
-    }
-    problems = []
-    for ds in readers:
-        version = ds.version.manifest.version
-        missing = sorted(
-            int(i)
-            for i in ds.version.labels.column("label_id").to_pylist()
-            if (ds.source_name, version, int(i)) not in known
-        )
-        if missing:
-            more = " ..." if len(missing) > 10 else ""
-            problems.append(
-                f"dataset {ds.source_name} {version}: label ids {missing[:10]}{more} "
-                f"are not in {SOURCE_LABELS_CSV}"
-            )
-    return problems
-
-
 def _check_label_space_current(
     directory: Path,
     space: LabelSpace,
@@ -175,18 +145,14 @@ def _check_label_space_current(
 ) -> None:
     """Raise ValueError naming every way ``space`` is stale for this run.
 
-    The run's dataset and taxonomy pins must be those the label space was built from, and every
-    label of its readers must have a row. The label space may hold datasets the run does not
-    build.
+    The run's dataset and taxonomy pins must be those the label space was built from. The label
+    space may hold datasets the run does not build.
     """
-    problems = [
-        *_pin_mismatches(
-            space.meta.get("data_version") or {},
-            data_version(section),
-            [ds.source_name for ds in readers],
-        ),
-        *_missing_reader_labels(space, readers),
-    ]
+    problems = _pin_mismatches(
+        space.meta.get("data_version") or {},
+        data_version(section),
+        [ds.source_name for ds in readers],
+    )
     if problems:
         raise ValueError(
             f"label space {directory} does not match this run; rebuild it with "
@@ -199,7 +165,6 @@ def build_registry(
     training_cfg: Any,
     *,
     section: DataSection,
-    schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
     device: torch.device | str = "cpu",
     label_space_dir: Path | None = None,
 ) -> tuple[SourceLabelRegistry, ConceptSchema]:
@@ -219,32 +184,17 @@ def build_registry(
         training_cfg: The ``training`` section.
         section: The ``data`` section the readers were built from; its pins must be those of
             the label space.
-        schema_config: Data config whose datasets the built datasets must be among.
         device: Device of the registry's lookup tensors.
         label_space_dir: Label space directory to read in place of ``training.label_space``.
 
     Raises:
-        SystemExit: A built dataset is not in ``schema_config``.
-        ValueError: ``training_cfg`` names no label space, or the label space does not match the
-            run; the message names every mismatch.
+        ValueError: The label space does not match the run; the message names every mismatch.
     """
     by_source: dict[str, VersionDataset] = {}
     for (_, split), ds in dataset_dict.items():
         if ds.source_name not in by_source or split == "train":
             by_source[ds.source_name] = ds
     registry_datasets = list(by_source.values())
-    schema_sources = set(load_section(schema_config, "data")["datasets"])
-    missing = set(by_source) - schema_sources
-    if missing:
-        raise SystemExit(
-            f"built datasets {sorted(missing)} are missing from the frozen concept schema "
-            f"({schema_config})"
-        )
-    if label_space_dir is None and "label_space" not in training_cfg:
-        raise ValueError(
-            "the run config has no training.label_space; it was trained before label spaces "
-            "existed, so retrain it or evaluate with a config that names one"
-        )
     directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
     space = read_label_space(directory)
     _check_label_space_current(directory, space, section, registry_datasets)

@@ -1,6 +1,6 @@
 # Regenerate the derived configs
 
-Three committed configs are built by scripts from `configs/data_config.yaml`, the synced data and `configs/class_to_concepts.csv`. This runbook rebuilds them after their inputs change. If you change an input and do not rebuild, the next run trains on the old values. Training refuses a label space whose dataset or taxonomy pins differ from the run's, or that lacks a label the run reads. CI checks the other inputs.
+Three committed configs are built by scripts from `configs/data_config.yaml`, the synced data and `configs/class_to_concepts.csv`. This runbook rebuilds them after their inputs change. If you change an input and do not rebuild, the next run trains on the old values. Training refuses a label space whose dataset or taxonomy pins differ from the run's. CI checks the other inputs.
 
 - [What to rebuild, and when](#what-to-rebuild-and-when)
 - [Before you start](#before-you-start)
@@ -100,9 +100,8 @@ The build refuses, and writes nothing, in these cases:
 - A family, genus or species concept names a MERMAID attribute under a different top-level root than the target of the label, and `acknowledged.csv` does not list it.
 - A row of `acknowledged.csv` matches no case. This includes a row for a label that drops to background, which is never a missing-concept case. The error says `stale acknowledgement`.
 - A row of `acknowledged.csv` has a `kind` that is not a case kind, or an empty `reason`.
-- `--out` is missing and a `.<name>.*.old` backup sits beside it. A kill during an earlier write leaves this state. Rename the backup to `--out`, then run the build again.
 
-The build writes to a temporary directory and swaps it onto `--out`, so a failed build leaves the previous files. Other files in `--out`, such as `acknowledged.csv`, stay.
+Before it writes, the build runs `check_label_space_tables`: `class_id` is 0..n-1 and `channel_id` is 1..n in row order, each dataset of `source_labels.csv` has one version, no `(dataset, version, label_id)` repeats, and every class and concept that `source_labels.csv` names is in its table. A failed check writes nothing. The build writes the four files in place; other files in `--out`, such as `acknowledged.csv`, stay. `tests/configs/test_derived_configs.py` runs the same check on every committed label space.
 
 Commit the whole directory, `acknowledged.csv` included.
 
@@ -123,5 +122,5 @@ A change to the derived configs changes model outputs. Run the evaluation and pu
 | `FileNotFoundError` for a manifest or table | The cache is empty, or was synced from a different data config. | Run `scripts/sync_data.py` with the same data config and `--cache-dir`. |
 | `DirtyTree` from a builder | Tracked files differ from `HEAD`, or a `--data-config` or `--schema-config` is not a git-tracked file. | Commit or stash the changes, then build again. If the dirt is the first config's output, commit it before you build the second. For an untracked input, commit the input or pass a tracked file. The label space also needs the training config, concept table, removal list, source mask, `acknowledged.csv` and each dataset's split file tracked. |
 | `tests/configs/test_derived_configs.py` fails in CI | `configs/class_to_concepts.csv` changed after a sidecar was built, so its `concepts_csv_sha1` no longer matches. | Rebuild both derived configs, in the order of this page. |
-| At training start, `ValueError: label space ... does not match this run; rebuild it with scripts/build_label_space.py` | The dataset or taxonomy pins differ from those the label space was built from, or a label that a reader holds has no row. The error lists each mismatch. | Rebuild the label space. |
+| At training start, `ValueError: label space ... does not match this run; rebuild it with scripts/build_label_space.py` | The dataset or taxonomy pins differ from those the label space was built from. The error lists each mismatch. | Rebuild the label space. |
 | `tests/configs/test_derived_configs.py` fails in CI on a label space | The label keys, concept table, removal list or source mask changed after the label space was built, or its pins differ from `configs/data_config.yaml`. | Rebuild the label space last, from a clean tree. |
