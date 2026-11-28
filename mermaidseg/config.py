@@ -122,6 +122,7 @@ class TrainingConfig(_Strict):
     class_subset: list[str]
     padding: int
     label_roll_up: bool
+    label_space: str
 
 
 class ModelConfig(_Strict):

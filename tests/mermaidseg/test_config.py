@@ -57,6 +57,12 @@ def test_unknown_key_raises_naming_the_file(tmp_path: Path, section: str, keys: 
         setup_config(paths)
 
 
+def test_a_training_config_without_a_label_space_raises_naming_the_key(tmp_path: Path):
+    paths = _mutated(tmp_path, "training", lambda section: section.pop("label_space"))
+    with pytest.raises(ValueError, match=r"(?s)training\.yaml.*label_space"):
+        setup_config(paths)
+
+
 @pytest.mark.parametrize(
     ("section", "keys"),
     [

@@ -82,6 +82,26 @@ def test_ca1_two_regions_publish_parquet_images_and_classes(tmp_path, fake_s3):
     assert manifest["s3"]["image_key_template"] == "ds/images/{region}/{image_id}.jpg"
     assert manifest["ingestion"]["images_uploaded"] == 3
     assert manifest["ingestion"]["dropped"] == {"damaged_images": 0}
+    assert manifest["ingestion"]["details"]["case_merged_labels"] == {}
+
+
+def test_labels_differing_only_by_case_merge_across_regions(tmp_path, fake_s3):
+    jpg = jpg_bytes(64)
+    root = write_catlin_tree(
+        tmp_path / "raw",
+        {
+            "ATL": f"{CATLIN_CSV_HEADER}\n1,1,1,Other Hard corals\n",
+            "PAC_AUS": f"{CATLIN_CSV_HEADER}\n7,2,2,Other hard corals\n",
+        },
+        {"ATL/1": jpg, "PAC_AUS/7": jpg},
+    )
+
+    catlin_seaview.run(_args(tmp_path, root), fake_s3)
+
+    assert _parquet(fake_s3)["source_label_name"].tolist() == ["Other Hard corals"] * 2
+    assert _json(fake_s3, "classes.json") == {"unlabeled": 0, "Other Hard corals": 1}
+    details = _json(fake_s3, "manifest.json")["ingestion"]["details"]
+    assert details["case_merged_labels"] == {"Other hard corals": "Other Hard corals"}
 
 
 def test_ca2_truncated_jpg_is_dropped_recorded_and_not_uploaded(tmp_path, fake_s3):

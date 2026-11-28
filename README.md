@@ -52,9 +52,9 @@ scripts/train.py
        labels and concepts from mermaidseg/dataset_reconciliation/
        MetaModel (mermaidseg/model/meta.py), Logger over a wandb or MLflow tracker (mermaidseg/logger.py)
   -> outputs/model_checkpoints/<run>/
-       model_step* checkpoints (with lineage; model_preempt* on Slurm; model_final at the end of a run), config.yaml, model.json
+       model_step* checkpoints (with lineage; model_preempt* on Slurm; model_final at the end of a run), config.yaml, model.json, label_space/
   -> scripts/export.py (mermaidseg/export.py)
-  -> bundle: weights.safetensors + model.json
+  -> bundle: weights.safetensors + model.json + label_space/
   -> mermaidseg/inference/
        load_bundle (bundle.py), preprocess (preprocess.py), CBMPredictor (predictor.py)
        used by scripts/evaluate.py
@@ -115,7 +115,7 @@ The project uses two formats.
 
 **Checkpoints.** Training and resume checkpoints are `torch.save` pickles. They hold the full state (model, optimizer and scheduler) that a resume needs. The code loads them with `weights_only=True` (`read_checkpoint` in `mermaidseg/run_setup.py`). `AGENTS.md` 9.6 allows `weights_only=False` only for a resume checkpoint that this project's own training wrote, with a comment at the call site. No production call site uses it. Load every other checkpoint with `weights_only=True`.
 
-**Bundle.** The deployable bundle is SafeTensors plus `model.json` (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing, lineage and the sha256 of the weights, so a bundle describes itself.
+**Bundle.** The deployable bundle is SafeTensors, `model.json` and a `label_space/` directory (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing, lineage and the sha256 of the weights, so a bundle describes itself. `label_space/` holds the label space files that the run trained on; `load_bundle` ignores it.
 
 ## Concept Bottleneck Models
 
@@ -130,7 +130,7 @@ Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accu
 | [docs/runbooks/set-up-slurm.md](docs/runbooks/set-up-slurm.md) | Setting up the Slurm cluster |
 | [docs/runbooks/training-datasets.md](docs/runbooks/training-datasets.md) | Pinned dataset versions, filling the data cache, and adding a dataset |
 | [docs/runbooks/coralnet-data.md](docs/runbooks/coralnet-data.md) | Recreating or updating the CoralNet data end to end |
-| [docs/runbooks/derived-configs.md](docs/runbooks/derived-configs.md) | Regenerating the concept removal list and concept source mask |
+| [docs/runbooks/derived-configs.md](docs/runbooks/derived-configs.md) | Regenerating the concept removal list, the concept source mask and the label space |
 | [docs/runbooks/train-on-slurm.md](docs/runbooks/train-on-slurm.md) | Training on Slurm |
 | [docs/runbooks/train-on-sagemaker.md](docs/runbooks/train-on-sagemaker.md) | Training on SageMaker |
 | [docs/runbooks/export-a-model.md](docs/runbooks/export-a-model.md) | Exporting a checkpoint to a bundle |

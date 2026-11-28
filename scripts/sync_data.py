@@ -15,6 +15,8 @@ The config's ``data:`` section pins each dataset, for example:
           split_file: splits/catlin_seaview.csv
           train: {use: [train]}
 
+With ``--tables-only`` it syncs only the manifests, tables and taxonomy (no image or mask).
+
 Run it with:
 
     python scripts/sync_data.py --data-config configs/my_data_config.yaml --cache-dir /scratch/cache
@@ -30,7 +32,7 @@ import yaml
 from botocore.config import Config
 
 from mermaidseg.data.config import sync_plan
-from mermaidseg.data.sync import format_summary, run_sync
+from mermaidseg.data.sync import format_summary, run_sync, run_table_sync
 from mermaidseg.io import REPO_ROOT
 
 
@@ -44,14 +46,25 @@ def main(argv: list[str] | None = None) -> int:
         "--cache-dir", type=Path, required=True, help="directory the versions are downloaded into"
     )
     p.add_argument(
-        "--workers", type=int, default=16, help="threads downloading images (default: 16)"
+        "--workers",
+        type=int,
+        default=16,
+        help="threads downloading images (default: 16; ignored with --tables-only)",
+    )
+    p.add_argument(
+        "--tables-only",
+        action="store_true",
+        help="sync only the manifests, tables and taxonomy, with no image or mask",
     )
     args = p.parse_args(argv)
     cfg = yaml.safe_load(args.data_config.read_text())
     plan = sync_plan(cfg["data"], REPO_ROOT)
     # The client's connection pool must hold one connection per worker.
     client = boto3.client("s3", config=Config(max_pool_connections=max(args.workers, 10)))
-    result = run_sync(plan, args.cache_dir, client, args.workers)
+    if args.tables_only:
+        result = run_table_sync(plan, args.cache_dir, client)
+    else:
+        result = run_sync(plan, args.cache_dir, client, args.workers)
     print(format_summary(result))
     return 0
 

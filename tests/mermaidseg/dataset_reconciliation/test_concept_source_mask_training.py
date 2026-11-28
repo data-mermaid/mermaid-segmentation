@@ -11,10 +11,11 @@ import yaml
 from torch.utils.data import DataLoader
 
 from mermaidseg.data import PointDataset
-from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path
+from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.concept_removal import CoverageRule, concept_coverage
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
+    ConceptSourceMask,
     attach_source_rows,
     load_concept_source_mask,
 )
@@ -22,7 +23,11 @@ from mermaidseg.dataset_reconciliation.concepts import apply_concept_removal
 from mermaidseg.model.concept_masking import apply_concept_source_mask
 from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.data.conftest import ImageSpec, open_written
-from tests.mermaidseg.dataset_reconciliation.test_concept_source_mask import CHANNELS, _schema
+from tests.mermaidseg.dataset_reconciliation.test_concept_source_mask import (
+    CHANNELS,
+    MASK_CONCEPTS_SHA1,
+    _schema,
+)
 
 BLEACHED = CHANNELS.index("bleached")
 
@@ -30,7 +35,6 @@ BLEACHED = CHANNELS.index("bleached")
 def _write_mask(
     tmp_path,
     rows: list[tuple[str, str]],
-    concepts_csv=None,
     source_ids: list[str] | None = None,
 ) -> Any:
     """Write a mask CSV and sidecar; ``source_ids`` (the counted sources) default to the rows'."""
@@ -41,21 +45,27 @@ def _write_mask(
     meta: dict[str, Any] = {
         "dataset": "coralnet",
         "rule": "only_false",
+        "concepts_csv_sha1": MASK_CONCEPTS_SHA1,
         "source_ids": source_ids if source_ids is not None else sorted({s for s, _ in rows}),
     }
-    if concepts_csv is not None:
-        meta["concepts_csv_sha1"] = file_sha1(concepts_csv)
     meta_path(path).write_text(yaml.safe_dump(meta))
     return path
+
+
+def _load(path: Any, removed_concepts: list[str] | None = None) -> ConceptSourceMask:
+    return load_concept_source_mask(
+        path,
+        _schema(),
+        concepts_csv_sha1=MASK_CONCEPTS_SHA1,
+        removed_concepts=removed_concepts or [],
+    )
 
 
 # ---------- loading the mask ----------
 
 
 def test_keep_table_rows_and_columns(tmp_path):
-    mask = load_concept_source_mask(
-        _write_mask(tmp_path, [("12", "bleached"), ("7", "branching")]), _schema()
-    )
+    mask = _load(_write_mask(tmp_path, [("12", "bleached"), ("7", "branching")]))
     assert mask.source_ids == ("7", "12")  # numeric order
     assert mask.num_masked == 2
     keep = mask.keep
@@ -68,25 +78,15 @@ def test_keep_table_rows_and_columns(tmp_path):
 def test_mask_refuses_taxonomic_or_unknown_concepts(tmp_path):
     for concept in ("genus__acropora", "not_a_concept"):
         with pytest.raises(ValueError, match="not binary channels"):
-            load_concept_source_mask(_write_mask(tmp_path, [("1", concept)]), _schema())
+            _load(_write_mask(tmp_path, [("1", concept)]))
 
 
 def test_mask_skips_removed_concepts(tmp_path):
     path = _write_mask(tmp_path, [("1", "tubular"), ("1", "bleached")])
     with pytest.raises(ValueError, match="tubular"):
-        load_concept_source_mask(path, _schema())
-    mask = load_concept_source_mask(path, _schema(), removed_concepts=["tubular"])
+        _load(path)
+    mask = _load(path, removed_concepts=["tubular"])
     assert mask.num_masked == 1
-
-
-def test_mask_checks_the_concept_table_sha1(tmp_path):
-    table = tmp_path / "concepts.csv"
-    table.write_text("a,b\n1,2\n")
-    path = _write_mask(tmp_path, [("1", "bleached")], concepts_csv=table)
-    load_concept_source_mask(path, _schema(), concepts_csv=table)
-    table.write_text("a,b\n1,3\n")
-    with pytest.raises(ValueError, match="sha1"):
-        load_concept_source_mask(path, _schema(), concepts_csv=table)
 
 
 def test_apply_zeroes_only_masked_channels():
@@ -125,9 +125,7 @@ def _reader(tmp_path, name: str, groups: list[str], **kwargs: Any) -> PointDatas
 def test_coralnet_rows_come_from_the_image_group_and_follow_the_retried_image(tmp_path):
     ds = _reader(tmp_path, "coralnet", ["s5", "s123"], transform=_crop_top_left)
     image, labels = ds[1]  # unchanged without a mask
-    mask = load_concept_source_mask(
-        _write_mask(tmp_path, [("5", "bleached"), ("123", "bleached")]), _schema()
-    )
+    mask = _load(_write_mask(tmp_path, [("5", "bleached"), ("123", "bleached")]))
 
     (attached,) = attach_source_rows([ds], mask)
 
@@ -139,22 +137,20 @@ def test_coralnet_rows_come_from_the_image_group_and_follow_the_retried_image(tm
 
 def test_counted_source_without_masked_pairs_gets_row_zero(tmp_path):
     ds = _reader(tmp_path, "coralnet", ["s5", "s7"])
-    mask = load_concept_source_mask(
-        _write_mask(tmp_path, [("5", "bleached")], source_ids=["5", "7"]), _schema()
-    )
+    mask = _load(_write_mask(tmp_path, [("5", "bleached")], source_ids=["5", "7"]))
     attach_source_rows([ds], mask)
     assert ds[1][2] == 0  # source 7 was counted and has nothing to mask
 
 
 def test_source_the_mask_never_counted_is_refused(tmp_path):
     ds = _reader(tmp_path, "coralnet", ["s5", "s7"])
-    mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
+    mask = _load(_write_mask(tmp_path, [("5", "bleached")]))
     with pytest.raises(ValueError, match=r"1 coralnet source.*\b7\b"):
         attach_source_rows([ds], mask)
 
 
 def test_other_datasets_get_row_zero_and_a_repeated_dataset_stays_one_object(tmp_path):
-    mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
+    mask = _load(_write_mask(tmp_path, [("5", "bleached")]))
     other = _reader(tmp_path, "coralscapes_v2", ["s5", "train"])
 
     out = attach_source_rows([other, other], mask)

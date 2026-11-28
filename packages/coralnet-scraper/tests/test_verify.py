@@ -49,6 +49,7 @@ def test_a_complete_source_passes_with_its_counts(fake_s3):
         "annotation_rows": 3,
         "annotated_images": 2,
         "image_objects": 3,
+        "pinned_images": 0,
     }
 
 
@@ -148,3 +149,37 @@ def test_warnings_are_recorded_without_blocking(fake_s3, store_kwargs, extra_obj
 
     assert v.ok is True
     assert v.warnings == [warning]
+
+
+def _verify_pinned(fake_s3, pinned: set[int], expected_total: int = 2):
+    return verify_source(
+        fake_s3, "b", "p", 1, expected_total=expected_total, pinned=frozenset(pinned)
+    )
+
+
+def test_a_listed_image_with_no_object_passes_when_pinned(fake_s3):
+    _store(fake_s3, rows=_LIST_ROWS[:2], images=(11,))
+
+    v = _verify_pinned(fake_s3, {12})
+
+    assert v.ok is True
+    assert v.stats["pinned_images"] == 1
+
+
+def test_a_zero_byte_object_fails_even_when_pinned(fake_s3):
+    _store(fake_s3, rows=_LIST_ROWS[:2], images=(11,))
+    fake_s3.put("b", "p/s1/images/12.jpg", b"")
+
+    v = _verify_pinned(fake_s3, {12})
+
+    assert v.failures == ["image_objects_missing:1"]
+    assert v.stats["pinned_images"] == 0
+
+
+def test_an_unlisted_pinned_id_is_neither_an_orphan_nor_counted(fake_s3):
+    _store(fake_s3, rows=_LIST_ROWS[:2], images=(11, 12))
+
+    v = _verify_pinned(fake_s3, {99})
+
+    assert (v.failures, v.warnings) == ([], [])
+    assert v.stats["pinned_images"] == 0

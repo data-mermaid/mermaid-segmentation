@@ -242,3 +242,23 @@ class _NeverStreamed:
 
     def iter_content(self, chunk_size: int) -> Iterator[bytes]:
         raise AssertionError("body read despite a declared length over the cap")
+
+
+def test_pinned_images_are_not_downloaded(fake_s3):
+    dl = CoralNetDownloader("u", "p", max_workers=2, s3=fake_s3)
+    fake_s3.put("b", "p/s1/images/1.jpg", b"JPEG!")
+
+    with patch.object(dl.images, "download_images", return_value=ImageFailures()) as download:
+        dl.images.download_missing_images(_refs({1: [1, 2, 3]}), 1, "b", "p", pinned=frozenset({2}))
+
+    assert [r.id for r in download.call_args.args[0]] == [3]
+
+
+def test_a_pinned_image_with_a_zero_byte_object_is_downloaded(fake_s3):
+    dl = CoralNetDownloader("u", "p", max_workers=2, s3=fake_s3)
+    fake_s3.put("b", "p/s1/images/2.jpg", b"")
+
+    with patch.object(dl.images, "download_images", return_value=ImageFailures()) as download:
+        dl.images.download_missing_images(_refs({1: [2, 3]}), 1, "b", "p", pinned=frozenset({2}))
+
+    assert [r.id for r in download.call_args.args[0]] == [2, 3]

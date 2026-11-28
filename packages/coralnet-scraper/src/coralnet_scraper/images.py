@@ -291,24 +291,37 @@ class ImageFetcher:
         )
 
     def download_missing_images(
-        self, refs: list[ImageRef], source_id: int, bucket_name: str, s3_prefix: str
+        self,
+        refs: list[ImageRef],
+        source_id: int,
+        bucket_name: str,
+        s3_prefix: str,
+        *,
+        pinned: frozenset[int] = frozenset(),
     ) -> ImageFailures:
         """Download every image of ``refs`` that has no non-empty object on S3 yet.
+
+        An image whose id is in ``pinned`` and that has no object at all is skipped: a
+        published version holds it. A zero-byte object is downloaded again even when pinned.
 
         Returns:
             The failure counts of :meth:`download_images`.
         """
         images_prefix = f"{s3_io.source_prefix(s3_prefix, source_id)}images/"
-        stored = {
-            key
-            for key, size in s3_io.object_sizes(self.s3, bucket_name, images_prefix).items()
-            if size > 0
-        }
-        todo = [
-            r for r in refs if s3_io.object_key_image(s3_prefix, source_id, str(r.id)) not in stored
-        ]
+        sizes = s3_io.object_sizes(self.s3, bucket_name, images_prefix)
+        stored = {key for key, size in sizes.items() if size > 0}
+
+        def key_of(r: ImageRef) -> str:
+            return s3_io.object_key_image(s3_prefix, source_id, str(r.id))
+
+        unpinned = [r for r in refs if not (r.id in pinned and key_of(r) not in sizes)]
+        todo = [r for r in unpinned if key_of(r) not in stored]
         logger.info(
-            "Source %s: %d of %d images already on S3", source_id, len(refs) - len(todo), len(refs)
+            "Source %s: %d of %d images already on S3, %d pinned",
+            source_id,
+            len(unpinned) - len(todo),
+            len(refs),
+            len(refs) - len(unpinned),
         )
         failures = self.download_images(todo, source_id, bucket_name, s3_prefix)
         if failures != ImageFailures():

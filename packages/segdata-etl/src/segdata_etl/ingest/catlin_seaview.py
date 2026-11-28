@@ -20,7 +20,7 @@ import requests
 from tqdm.auto import tqdm
 
 from ..common.images import find_undecodable
-from ..common.labels import build_classes_and_colors
+from ..common.labels import build_classes_and_colors, canonicalize
 from ..common.manifest import IngestSource, build_manifest
 from ..common.release import S3Target, list_keys, preflight, put_raw_release, upload_files
 
@@ -246,6 +246,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
         n_before,
     )
 
+    raw_to_canonical = canonicalize(set(annotations["source_label_name"]))
+    annotations["source_label_name"] = annotations["source_label_name"].map(raw_to_canonical)
+    merges = {raw: canon for raw, canon in raw_to_canonical.items() if raw != canon}
     classes, colors = build_classes_and_colors(annotations["source_label_name"])
 
     uploaded = _upload_images(
@@ -264,7 +267,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         parquet_columns=PARQUET_COLUMNS,
         dropped={"damaged_images": sum(len(ids) for ids in damaged.values())},
         images_uploaded=sum(uploaded.values()),
-        details={"damaged_images": damaged},
+        details={"damaged_images": damaged, "case_merged_labels": merges},
     )
     put_raw_release(
         client,

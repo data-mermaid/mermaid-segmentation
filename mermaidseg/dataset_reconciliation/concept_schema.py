@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import torch
 
 from mermaidseg.dataset_reconciliation.concept_ranks import (
     TAXONOMIC_CONCEPTS,
@@ -23,7 +22,8 @@ from mermaidseg.dataset_reconciliation.concepts import (
     read_class_to_concepts,
 )
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from mermaidseg.dataset_reconciliation.label_space import LabelSpace
 
 # MERMAID label names are "BA::GF", but class_to_concepts.csv keys their rows by the bare BA.
 TARGET_KEYED_CONCEPT_DATASETS: frozenset[str] = frozenset({"mermaid"})
@@ -126,6 +126,33 @@ class ConceptSchema:
             row_by_key=row_by_key,
         )
 
+    @classmethod
+    def from_label_space(cls, space: LabelSpace) -> ConceptSchema:
+        """Build the schema of a label space's ``concepts`` table.
+
+        The channels, their order and ``concept_value2id`` are those :meth:`from_csv` gives for
+        the inputs the label space was resolved from. ``row_by_key`` is empty: the per-label
+        rows come from :meth:`LabelSpace.lookups`.
+        """
+        names = [str(name) for name in space.concepts["name"]]
+        rank_values: dict[str, list[str]] = {}
+        concept_value2id: dict[str, dict] = {}
+        for name, rank in zip(names, space.concepts["rank"], strict=True):
+            if rank:
+                rank_values.setdefault(rank, []).append(name.partition("__")[2])
+                # Placeholder keeps the rank at its channel position in the dict order.
+                concept_value2id.setdefault(rank, {})
+            else:
+                concept_value2id[name] = {"not_given": 0, "FALSE": 1, "TRUE": 2}
+        for rank, values in rank_values.items():
+            concept_value2id[rank] = _rank_value2id(values)
+        return cls(
+            channel_names=tuple(names),
+            concept_value2id=concept_value2id,
+            num_channels=len(names),
+            row_by_key={},
+        )
+
     def row_for(self, source: str, label_name: str) -> np.ndarray:
         """Return the length-``C`` concept vector for ``(source, label_name)``."""
         key = (source.lower(), label_name.lower())
@@ -149,22 +176,13 @@ class ConceptSchema:
         return {i + 1: name for i, name in enumerate(self.channel_names)}
 
 
-def build_source_to_concepts(
-    global_id2source: dict[int, tuple[str, str]],
-    schema: ConceptSchema,
-) -> torch.Tensor:
-    """Build ``(N+1, C)`` lookup tensor from global source ids and a frozen schema."""
-    max_gid = max(global_id2source) if global_id2source else 0
-    table = np.zeros((max_gid + 1, schema.num_channels), dtype=np.float32)
-    warned: set[tuple[str, str]] = set()
-    for gid, (source, label) in global_id2source.items():
-        key = (source.lower(), label.lower())
-        if key not in schema.row_by_key and key not in warned:
-            warned.add(key)
-            logger.warning(
-                "unmapped source label (concept mapping): source_dataset=%r label=%r",
-                key[0],
-                key[1],
-            )
-        table[gid] = schema.row_for(source, label)
-    return torch.from_numpy(table)
+def _rank_value2id(values: list[str]) -> dict[str, list[int]]:
+    """``concept_value2id`` entry of a rank whose channels hold ``values``, in channel order.
+
+    ``not_given`` is all zeros; each value is 2 in its own channel and 1 in the others.
+    """
+    width = len(values)
+    mapping: dict[str, list[int]] = {"not_given": [0] * width}
+    for index, value in enumerate(values):
+        mapping[value] = [2 if i == index else 1 for i in range(width)]
+    return mapping
