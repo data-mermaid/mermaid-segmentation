@@ -60,8 +60,8 @@ data:
       manifest_sha256: 66b77129bcdea58706f04c16084146ff3519db1ab4f0b6afdc06c7dcbb33ec38
       val: {groups: all}
     catlin_seaview:
-      version: 20261124-cfc389d
-      manifest_sha256: 9a3b78b600e742ea97a50520e70b3480e0a07a5d2af664450c2ed07c29db0a91
+      version: 20261127-4a6492a
+      manifest_sha256: 2e6032a7c2fc9664a01f9639b045d0741c8720b28e82936ad484aee0d35f5414
       train: {groups: all}
     moorea_labeled_corals:
       version: 20261124-cfc389d
