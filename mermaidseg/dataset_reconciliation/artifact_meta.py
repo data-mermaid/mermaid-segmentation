@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from pathlib import Path
 
 import pandas as pd
@@ -79,17 +79,16 @@ def repo_relative(path: Path) -> str:
 
 
 def concept_sidecar_meta(
-    data_config: Path, concepts_csv: Path, schema_config: Path, git: Mapping[str, object]
+    data_config: Path, concepts_csv: Path, schema_config: Path, git_sha: str
 ) -> dict[str, object]:
-    """Sidecar fields shared by the derived concept artifacts: input paths, sha1s, time, git state."""
+    """Sidecar fields shared by the derived concept artifacts: input paths, concept table sha1, time, git sha."""
     return {
         "data_config": repo_relative(data_config),
-        "data_config_sha1": file_sha1(data_config),
         "concepts_csv": repo_relative(concepts_csv),
         "concepts_csv_sha1": file_sha1(concepts_csv),
         "schema_config": repo_relative(schema_config),
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
-        **git,
+        "git_sha": git_sha,
     }
 
 

@@ -4,8 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from segdata_spec.errors import PublishRefused
-from segdata_spec.git import Publishable, on_remote, probe_git, publishable_repo
+from segdata_spec.errors import DirtyTree, PublishRefused
+from segdata_spec.git import (
+    Publishable,
+    clean_git_state,
+    on_remote,
+    probe_git,
+    publishable_repo,
+)
 
 
 def _run(cwd: Path, *args: str) -> None:
@@ -158,3 +164,41 @@ def test_publishable_repo_refuses_a_missing_uv_lock(tmp_path, monkeypatch):
 def test_publishable_repo_raises_when_no_root_holds_git_and_uv_lock(tmp_path):
     with pytest.raises(FileNotFoundError, match="uv.lock"):
         publishable_repo(tmp_path)
+
+
+def test_clean_git_state_returns_head_for_a_clean_unpushed_repo_without_a_lock_check(tmp_path):
+    work, _ = _repo_with_lock(tmp_path)
+    _make_unpushed(work)
+    nested = work / "pkg"
+    nested.mkdir()
+
+    state = clean_git_state(nested)
+
+    assert state.sha == _head(work)
+    assert state.pushed is False
+
+
+def test_clean_git_state_refuses_a_modified_tracked_file(tmp_path):
+    work, _ = _repo_with_lock(tmp_path)
+    _make_dirty(work)
+
+    with pytest.raises(DirtyTree, match="uncommitted"):
+        clean_git_state(work)
+
+
+def test_clean_git_state_accepts_a_tracked_input(tmp_path):
+    work, _ = _repo_with_lock(tmp_path)
+
+    state = clean_git_state(work, inputs=[work / "f.txt"])
+
+    assert state.sha == _head(work)
+
+
+@pytest.mark.parametrize("where", ["untracked_in_repo", "outside_repo"])
+def test_clean_git_state_refuses_an_input_that_is_not_a_tracked_file_of_the_repo(tmp_path, where):
+    work, _ = _repo_with_lock(tmp_path)
+    path = (work if where == "untracked_in_repo" else tmp_path) / "cfg.yaml"
+    path.write_text("x")
+
+    with pytest.raises(DirtyTree, match="cfg.yaml"):
+        clean_git_state(work, inputs=[path])

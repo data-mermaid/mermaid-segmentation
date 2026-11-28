@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 import yaml
 
 from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
@@ -28,8 +27,6 @@ LABELS = {  # label -> (genus one-hot as 1/2, bleached, branching)
     "sand": [1, 1, 1, 1],
     "unknown": [0, 0, 0, 0],  # every concept not_given
 }
-# concepts_csv_sha1 of the test mask sidecars, and of the label space they are loaded against.
-MASK_CONCEPTS_SHA1 = "c" * 40
 
 
 def _schema() -> ConceptSchema:
@@ -78,31 +75,16 @@ def test_counts_and_only_false_pairs():
     assert list(zip(masked["source_id"], masked["concept"], strict=True)) == [(1, "bleached")]
 
 
-def _sidecar(**fields) -> str:
-    return yaml.safe_dump({"concepts_csv_sha1": MASK_CONCEPTS_SHA1, **fields})
-
-
-@pytest.mark.parametrize(("given", "refused"), [("d" * 40, True), (MASK_CONCEPTS_SHA1, False)])
-def test_loading_a_mask_checks_its_concepts_sha1_against_the_given_one(tmp_path, given, refused):
-    path = tmp_path / "mask.csv"
-    pd.DataFrame({"source_id": ["1"], "concept": ["bleached"]}).to_csv(path, index=False)
-    meta_path(path).write_text(_sidecar(dataset="coralnet", source_ids=["1"]))
-
-    if refused:
-        with pytest.raises(ValueError, match=f"sha1 {MASK_CONCEPTS_SHA1}.*{given}"):
-            load_concept_source_mask(path, _schema(), concepts_csv_sha1=given)
-    else:
-        assert load_concept_source_mask(path, _schema(), concepts_csv_sha1=given).num_masked == 1
-
-
 def test_non_numeric_source_ids_follow_the_numeric_ones_in_the_keep_table(tmp_path):
     path = tmp_path / "mask.csv"
     pd.DataFrame(
         {"source_id": ["b", "12", "7"], "concept": ["bleached"] * 3, "n_false": [1, 1, 1]}
     ).to_csv(path, index=False)
-    meta_path(path).write_text(_sidecar(dataset="coralnet", source_ids=["b", "12", "7"]))
+    meta_path(path).write_text(
+        yaml.safe_dump({"dataset": "coralnet", "source_ids": ["b", "12", "7"]})
+    )
 
-    mask = load_concept_source_mask(path, _schema(), concepts_csv_sha1=MASK_CONCEPTS_SHA1)
+    mask = load_concept_source_mask(path, _schema())
 
     assert mask.source_ids == ("7", "12", "b")
     assert mask.row_by_source() == {"7": 1, "12": 2, "b": 3}

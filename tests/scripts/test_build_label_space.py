@@ -12,8 +12,10 @@ import pytest
 import yaml
 
 import scripts.build_label_space as script
+from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.label_space import label_keys_sha1
 from mermaidseg.io import REPO_ROOT, ConfigDict
+from segdata_spec.git import DirtyTree, GitState
 from segdata_spec.manifest import Pin
 from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
@@ -25,7 +27,6 @@ _TAXONOMY = pa.table(
         "parent_id": [None, "1", "1", None],
     }
 )
-_GIT = {"git_sha": "abc1234", "git_dirty": False}
 # s7 is train, s8 is val: its point must not be counted.
 _IMAGES = [ImageSpec("i1", group="s7"), ImageSpec("i2", group="s8")]
 _POINTS = [("i1", 0, 0, 1), ("i1", 0, 1, 3), ("i1", 1, 0, 3), ("i2", 0, 0, 3)]
@@ -39,8 +40,16 @@ _MYSTERY = {"label_id": 5, "name": "Mystery", "mermaid_benthic_attribute": "Pori
 
 
 @pytest.fixture(autouse=True)
-def fixed_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(script, "git_state", lambda: dict(_GIT))
+def clean_tree(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, ...]]:
+    """The builder records the sha of a clean tree; return the ``inputs`` each check received."""
+    checked: list[tuple[Path, ...]] = []
+
+    def clean(_start, *, inputs=()):
+        checked.append(tuple(inputs))
+        return GitState("abc1234", False, True)
+
+    monkeypatch.setattr(script, "clean_git_state", clean)
+    return checked
 
 
 def _inputs(tmp_path: Path, labels: list[dict[str, Any]], *, train: bool = True) -> dict[str, Any]:
@@ -90,9 +99,13 @@ def _inputs(tmp_path: Path, labels: list[dict[str, Any]], *, train: bool = True)
     )
     training_config = tmp_path / "training_config.yaml"
     training_config.write_text(yaml.safe_dump(training))
+    schema_config = tmp_path / "schema_config.yaml"
+    schema_config.write_text(data_config.read_text())
     return {
         "cache_dir": cache_dir,
         "data_config": data_config,
+        "schema_config": schema_config,
+        "split_file": split_file,
         "training_config": training_config,
         "concepts": concepts,
         "pin": pin,
@@ -108,7 +121,7 @@ def _run(inputs: dict[str, Any], out: Path, *extra: str) -> None:
             "--data-config",
             str(inputs["data_config"]),
             "--schema-config",
-            str(inputs["data_config"]),
+            str(inputs["schema_config"]),
             "--training-config",
             str(inputs["training_config"]),
             "--out",
@@ -145,7 +158,8 @@ def test_the_build_writes_the_four_files_with_the_pins_in_the_meta(tmp_path):
     training = ConfigDict(yaml.safe_load(inputs["training_config"].read_text())["training"])
     assert meta["label_keys_sha1"] == label_keys_sha1(training)
     assert meta["concepts_csv_sha1"] == hashlib.sha1(inputs["concepts"].read_bytes()).hexdigest()
-    assert (meta["git_sha"], meta["git_dirty"]) == ("abc1234", False)
+    assert meta["git_sha"] == "abc1234"
+    assert not {"git_dirty", "data_config_sha1", "acknowledged_sha1"} & set(meta)
     assert meta["acknowledged"] is None
     assert (meta["n_classes"], meta["n_extra_classes"], meta["n_source_labels"]) == (3, 0, 3)
     assert meta["drops"] == {"unmapped": 1}
@@ -184,7 +198,7 @@ def test_an_acknowledged_label_does_not_refuse(tmp_path):
     _run(inputs, out, "--acknowledge", str(acknowledged))
 
     meta = yaml.safe_load((out / "label_space.meta.yaml").read_text())
-    assert meta["acknowledged_sha1"] == hashlib.sha1(acknowledged.read_bytes()).hexdigest()
+    assert meta["acknowledged"] == str(acknowledged)
     assert (out / "source_labels.csv").is_file()
 
 
@@ -229,3 +243,62 @@ def test_the_schema_configs_datasets_decide_which_concept_rows_exist(
 
     rows = pd.read_csv(out / "source_labels.csv", keep_default_na=False).set_index("native_name")
     assert rows.loc["Sand", "concept_status"] == status
+
+
+def test_a_dirty_tree_refuses_before_any_output_is_written(tmp_path, monkeypatch):
+    inputs = _inputs(tmp_path, _LABELS)
+    out = tmp_path / "space"
+
+    def refuse(_start, *, inputs=()):
+        raise DirtyTree("dirty")
+
+    monkeypatch.setattr(script, "clean_git_state", refuse)
+
+    with pytest.raises(DirtyTree):
+        _run(inputs, out)
+
+    assert not out.exists()
+
+
+def test_the_inputs_the_meta_pins_must_be_tracked_files(tmp_path, clean_tree):
+    inputs = _inputs(tmp_path, _LABELS)
+    removal, mask = tmp_path / "removal.csv", tmp_path / "mask.csv"
+    removal.write_text("concept\n")
+    meta_path(removal).write_text("{}\n")
+    mask.write_text("source_id,concept\n")
+    training = yaml.safe_load(inputs["training_config"].read_text())
+    training["training"].update(concept_removal=str(removal), concept_source_mask=str(mask))
+    inputs["training_config"].write_text(yaml.safe_dump(training))
+    acknowledged = tmp_path / "ack.csv"
+    acknowledged.write_text("dataset,native_name,kind,reason\n")
+
+    _run(inputs, tmp_path / "space", "--acknowledge", str(acknowledged))
+
+    (checked,) = clean_tree
+    assert set(checked) == {
+        inputs["data_config"],
+        inputs["schema_config"],
+        inputs["training_config"],
+        inputs["concepts"],
+        inputs["split_file"],
+        acknowledged,
+        removal,
+        mask,
+    }
+
+
+def test_an_empty_optional_input_and_a_missing_acknowledged_file_are_not_checked(
+    tmp_path, clean_tree
+):
+    inputs = _inputs(tmp_path, _LABELS)
+
+    _run(inputs, tmp_path / "space")
+
+    (checked,) = clean_tree
+    assert set(checked) == {
+        inputs["data_config"],
+        inputs["schema_config"],
+        inputs["training_config"],
+        inputs["concepts"],
+        inputs["split_file"],
+    }

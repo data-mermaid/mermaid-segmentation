@@ -175,9 +175,9 @@ def concept_mapping_path_of(run_config: dict) -> Path:
     return resolve_repo_path(run_config["training"]["concept_mapping_path"])
 
 
-def run_removed_concepts(run_config: dict, taxonomy_csv: str | Path) -> list[str]:
+def run_removed_concepts(run_config: dict) -> list[str]:
     """Channels removed by the run's ``training.concept_removal``, if any."""
-    return concept_removal_list(run_config["training"], taxonomy_csv)
+    return concept_removal_list(run_config["training"])
 
 
 def concept_names_of(bundle: ModelBundle) -> list[str]:
@@ -426,9 +426,7 @@ def run_evaluations(options: EvalOptions) -> dict:
 
     removed_concepts: list[str] = []
     if needs_concepts:
-        removed_concepts = run_removed_concepts(
-            bundle.config, concept_mapping_path_of(bundle.config)
-        )
+        removed_concepts = run_removed_concepts(bundle.config)
         logger.info("Concept removal of the bundle's run: %d channels", len(removed_concepts))
     hierarchy = None
     if any(entry.needs_hierarchy for entry in selected):

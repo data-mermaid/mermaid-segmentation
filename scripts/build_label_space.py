@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from mermaidseg.data.config import DataSection
 from mermaidseg.dataset_reconciliation.artifact_meta import repo_relative
 from mermaidseg.dataset_reconciliation.label_space import (
     CLASSES_CSV,
@@ -31,9 +32,30 @@ from mermaidseg.dataset_reconciliation.label_space_build import (
     build_label_space,
     summarize_label_space,
 )
-from mermaidseg.io import REPO_ROOT
-from mermaidseg.lineage import git_state
+from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
 from mermaidseg.run_setup import DEFAULT_SCHEMA_CONFIG
+from segdata_spec.git import clean_git_state
+
+
+def _tracked_inputs(args: argparse.Namespace, acknowledged: Path) -> tuple[Path, ...]:
+    """The repo files the build reads or the meta pins.
+
+    These are the configs, concept table, removal list, mask, acknowledged file and each dataset's
+    split file. An empty optional key, an entry without a split file and a missing ``acknowledged`` file name
+    nothing.
+    """
+    training = load_section(args.training_config, "training")
+    data = DataSection.model_validate(load_section(args.data_config, "data"))
+    named = [training["concept_mapping_path"], training["concept_removal"]]
+    named.append(training["concept_source_mask"])
+    return (
+        args.data_config,
+        args.training_config,
+        args.schema_config,
+        *(resolve_repo_path(value) for value in named if value),
+        *((acknowledged,) if acknowledged.is_file() else ()),
+        *(REPO_ROOT / e.split_file for e in data.datasets.values() if e.split_file is not None),
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -55,14 +77,16 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     acknowledged = args.acknowledge or args.out / "acknowledged.csv"
 
-    git = git_state()
+    git = clean_git_state(
+        Path(__file__).resolve().parent, inputs=_tracked_inputs(args, acknowledged)
+    )
     space = build_label_space(
         args.data_config,
         args.training_config,
         args.schema_config,
         args.cache_dir,
         acknowledged,
-        git,
+        git.sha,
     )
     write_label_space(args.out, space)
 

@@ -1,6 +1,6 @@
 # Regenerate the derived configs
 
-Three committed configs are built by scripts from `configs/data_config.yaml`, the synced data and `configs/class_to_concepts.csv`. This runbook rebuilds them after their inputs change. If you change an input and do not rebuild, the next run trains on the old values. Training refuses a stale label space.
+Three committed configs are built by scripts from `configs/data_config.yaml`, the synced data and `configs/class_to_concepts.csv`. This runbook rebuilds them after their inputs change. If you change an input and do not rebuild, the next run trains on the old values. Training refuses a label space whose dataset or taxonomy pins differ from the run's, or that lacks a label the run reads. CI checks the other inputs.
 
 - [What to rebuild, and when](#what-to-rebuild-and-when)
 - [Before you start](#before-you-start)
@@ -16,11 +16,11 @@ Three committed configs are built by scripts from `configs/data_config.yaml`, th
 |---|---|---|---|
 | `configs/concept_removals/min_coverage_trainval.csv` | `scripts/build_concept_removal.py` | The data config, the `stats/label_counts.parquet` of each dataset it pins, `configs/class_to_concepts.csv` | A pin or a split selection in the data config, or `class_to_concepts.csv` |
 | `configs/concept_source_masks/coralnet_only_false.csv` | `scripts/build_concept_source_mask.py` | The data config, the `points.parquet` of the pinned `coralnet` version, `configs/class_to_concepts.csv` | The `coralnet` pin or its split selection, `configs/splits/coralnet.csv`, or `class_to_concepts.csv` |
-| `configs/label_spaces/<name>/` (`cbm_final`) | `scripts/build_label_space.py` | The data config, the tables and taxonomy of each pinned dataset, the label keys of the training config (`class_subset`, `label_roll_up`, concept paths), `configs/class_to_concepts.csv`, the removal list and the source mask | A change to `class_subset`, `label_roll_up`, `class_to_concepts.csv`, the removal list or the source mask, or a new dataset or taxonomy pin. Rebuild it after the other two. |
+| `configs/label_spaces/<name>/` (`cbm_final`) | `scripts/build_label_space.py` | The data config, the schema config, the tables and taxonomy of each pinned dataset, the label keys of the training config (`class_subset`, `label_roll_up`, concept paths), `configs/class_to_concepts.csv`, the removal list, the source mask and each dataset's `split_file` (for example `configs/splits/coralnet.csv`) | A change to `class_subset`, `label_roll_up`, `class_to_concepts.csv`, the removal list or the source mask, or a new dataset or taxonomy pin. Rebuild it after the other two. Refuses a dirty tree or an untracked input (`DirtyTree`). |
 
 Both training configs (`configs/training_config_cbm_final.yaml` and `configs/training_config_cbm_final_hires.yaml`) point at the removal list, the source mask and `configs/label_spaces/cbm_final` (`training.label_space`).
 
-Each CSV has a `.meta.yaml` sidecar beside it. It records the inputs, their sha1 hashes, the dataset versions, the full commit sha that built it (`git_sha`) and whether tracked files differed from that commit (`git_dirty`). To see whether a CSV is stale, compare its recorded inputs with the current files.
+Each CSV has a `.meta.yaml` sidecar beside it. It records the inputs, the sha1 hash of the concept table (`concepts_csv_sha1`), the dataset versions and the full commit sha that built it (`git_sha`). To see whether a CSV is stale, compare its recorded inputs with the current files. A test in CI, `tests/configs/test_derived_configs.py`, checks each committed training config. For every `training.concept_removal` and `training.concept_source_mask` CSV it names, the sidecar's `concepts_csv_sha1` must match the file at that config's `training.concept_mapping_path`. A missing sidecar fails the test. For each training config that sets `training.label_space`, the test also checks that the label space's `label_keys_sha1` matches the config's label keys, that its sha1 of the concept table, removal list and source mask match the files the config names, and that its dataset and taxonomy pins equal those of `configs/data_config.yaml`.
 
 The CoralscapesV2 probe point sets are derived too. They belong to evaluation; see [Rebuild the probe point sets](evaluate-a-model.md#rebuild-the-probe-point-sets).
 
@@ -73,9 +73,9 @@ The label space is the resolved list of classes and concept channels of a model.
 - `classes.csv`: `class_id`, `name`, `kind` (`ignore`, `mermaid` or `extra`) and `mermaid_benthic_attribute_id`.
 - `concepts.csv`: the concept channel layout.
 - `source_labels.csv`: every row of each `labels.parquet`, with its target, roll-up, class, drop reason, train-split count and concept values.
-- `label_space.meta.yaml`: the dataset and taxonomy pins, the sha1 of the label keys, the sha1 of each input file and the git state.
+- `label_space.meta.yaml`: the dataset and taxonomy pins, the sha1 of the label keys, the sha1 of the concept table, removal list and source mask, and the commit sha that built it (`git_sha`).
 
-Rebuild the removal list and the source mask first, because their sha1 hashes go into the label space.
+Rebuild the removal list and the source mask first, because their sha1 hashes go into the label space. Each builder needs a clean tree, so commit between builds: commit the inputs, build and commit the removal list and the source mask, then build the label space last and commit it.
 
 ```bash
 uv run python scripts/build_label_space.py \
@@ -108,9 +108,9 @@ Commit the whole directory, `acknowledged.csv` included.
 
 ## After a rebuild
 
-1. Build from a clean, committed tree. A dirty tree is recorded in the sidecar, not refused. Each builder reads the git state before it writes, so its own CSV and sidecar do not mark the tree dirty. Rebuild the removal list and the source mask, commit them, then build the label space last from that clean tree, so its meta records `git_dirty: false`. Before you commit, check that each sidecar says `git_dirty: false`.
+1. Commit the input change first (for example `configs/class_to_concepts.csv`), then build from that clean tree. The label space reads the data config, the training config, the schema config, the concept table, the removal list, the source mask, `acknowledged.csv` and each dataset's split file; all must be tracked. Each builder refuses a tree where tracked files differ from `HEAD` before it writes anything, and it refuses a `--data-config` or `--schema-config` that is not a git-tracked file of the repo (`DirtyTree`). The sidecar's `git_sha` is the input commit. If you rebuild both configs, commit the first one's output before you build the second, or write it outside the repo; otherwise the second build sees a dirty tree.
 2. Review the diff of each CSV and its `.meta.yaml`.
-3. Commit the derived configs together with the input change that caused them.
+3. Commit the derived CSVs and their sidecars.
 4. For SageMaker, merge and build the image again. A job reads `configs/` from its image. See [Build the training image](train-on-sagemaker.md#build-the-training-image).
 
 A change to the derived configs changes model outputs. Run the evaluation and put the metrics in the PR. See [Compare two models](evaluate-a-model.md#compare-two-models).
@@ -121,6 +121,7 @@ A change to the derived configs changes model outputs. Run the evaluation and pu
 |---|---|---|
 | `NotSynced` from a builder | `--cache-dir` has no sync marker for a version that the data config selects. | Run `scripts/sync_data.py` with the same data config and `--cache-dir`. |
 | `FileNotFoundError` for a manifest or table | The cache is empty, or was synced from a different data config. | Run `scripts/sync_data.py` with the same data config and `--cache-dir`. |
-| `ValueError: <path> was built for a concept table with sha1 ..., but this run uses <csv> (sha1 ...)` from `scripts/build_label_space.py` | The removal list was built for another version of `configs/class_to_concepts.csv`. | Rebuild the removal list, then the label space. |
-| At training start, `ValueError: <path> was built for a concept table with sha1 ..., but this run's label space uses sha1 ...` from the source mask loader | The source mask was built for another version of `configs/class_to_concepts.csv` than the label space records. | Rebuild the source mask, then the label space. |
-| At training start, `ValueError: label space ... does not match this run; rebuild it with scripts/build_label_space.py` | The pins, label keys, concepts CSV, removal list or source mask differ from those the label space was built from. The error lists each mismatch. | Rebuild the label space. |
+| `DirtyTree` from a builder | Tracked files differ from `HEAD`, or a `--data-config` or `--schema-config` is not a git-tracked file. | Commit or stash the changes, then build again. If the dirt is the first config's output, commit it before you build the second. For an untracked input, commit the input or pass a tracked file. The label space also needs the training config, concept table, removal list, source mask, `acknowledged.csv` and each dataset's split file tracked. |
+| `tests/configs/test_derived_configs.py` fails in CI | `configs/class_to_concepts.csv` changed after a sidecar was built, so its `concepts_csv_sha1` no longer matches. | Rebuild both derived configs, in the order of this page. |
+| At training start, `ValueError: label space ... does not match this run; rebuild it with scripts/build_label_space.py` | The dataset or taxonomy pins differ from those the label space was built from, or a label that a reader holds has no row. The error lists each mismatch. | Rebuild the label space. |
+| `tests/configs/test_derived_configs.py` fails in CI on a label space | The label keys, concept table, removal list or source mask changed after the label space was built, or its pins differ from `configs/data_config.yaml`. | Rebuild the label space last, from a clean tree. |

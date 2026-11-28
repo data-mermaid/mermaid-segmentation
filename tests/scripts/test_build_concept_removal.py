@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
+import pytest
 import yaml
 
 import scripts.build_concept_removal as script
 from mermaidseg.dataset_reconciliation.concept_removal import REMOVAL_COLUMNS
+from segdata_spec.errors import DirtyTree
+from segdata_spec.git import GitState
 from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
@@ -18,6 +23,19 @@ LABELS = pd.DataFrame(
         "mermaid_benthic_attribute": [None] * 4,
     }
 )
+
+
+@pytest.fixture(autouse=True)
+def clean_tree(monkeypatch) -> list[tuple[Path, ...]]:
+    """The builders record the sha of a clean tree; return the ``inputs`` each check received."""
+    checked: list[tuple[Path, ...]] = []
+
+    def clean(_start, *, inputs=()):
+        checked.append(tuple(inputs))
+        return GitState("abc", False, True)
+
+    monkeypatch.setattr(script, "clean_git_state", clean)
+    return checked
 
 
 def _write_inputs(tmp_path):
@@ -114,18 +132,41 @@ def test_main_writes_the_channels_that_fail_the_rule_over_the_train_groups(tmp_p
     meta = yaml.safe_load((tmp_path / "removal.meta.yaml").read_text())
     assert meta["datasets_counted"] == ["coralnet"]
     assert meta["dataset_versions"] == {"coralnet": pin.version}
-    assert {"git_sha", "git_dirty"} <= set(meta)
+    assert meta["git_sha"] == "abc"
+    assert not {"git_dirty", "data_config_sha1"} & set(meta)
     assert "git_commit" not in meta
 
 
-def test_git_state_is_read_before_the_output_is_written(tmp_path, monkeypatch):
+def test_a_dirty_tree_refuses_before_any_output_is_written(tmp_path, monkeypatch):
     cache_dir, data_config, concepts, _ = _write_inputs(tmp_path)
     out = tmp_path / "new_dir" / "removal.csv"
-    monkeypatch.setattr(
-        script,
-        "git_state",
-        lambda: {"git_sha": "x", "git_dirty": out.exists()},
-    )
+
+    def refuse(_start, *, inputs=()):
+        raise DirtyTree("dirty")
+
+    monkeypatch.setattr(script, "clean_git_state", refuse)
+
+    with pytest.raises(DirtyTree):
+        script.main(
+            [
+                "--cache-dir",
+                str(cache_dir),
+                "--data-config",
+                str(data_config),
+                "--schema-config",
+                str(data_config),
+                "--concepts",
+                str(concepts),
+                "--out",
+                str(out),
+            ]
+        )
+
+    assert not out.parent.exists()
+
+
+def test_the_data_and_schema_configs_are_checked_as_tracked_inputs(tmp_path, clean_tree):
+    cache_dir, data_config, concepts, _ = _write_inputs(tmp_path)
 
     script.main(
         [
@@ -138,9 +179,8 @@ def test_git_state_is_read_before_the_output_is_written(tmp_path, monkeypatch):
             "--concepts",
             str(concepts),
             "--out",
-            str(out),
+            str(tmp_path / "removal.csv"),
         ]
     )
 
-    meta = yaml.safe_load((out.parent / "removal.meta.yaml").read_text())
-    assert (meta["git_sha"], meta["git_dirty"]) == ("x", False)
+    assert clean_tree == [(data_config, data_config)]

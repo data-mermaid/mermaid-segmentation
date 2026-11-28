@@ -28,7 +28,6 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
 from mermaidseg.dataset_reconciliation.label_space import (
     SOURCE_LABELS_CSV,
     LabelSpace,
-    label_keys_sha1,
     read_label_space,
     read_label_space_meta,
 )
@@ -58,12 +57,12 @@ def concept_mapping_path(training_cfg: Any) -> str:
     return str(resolve_repo_path(training_cfg.concept_mapping_path))
 
 
-def concept_removal_list(training_cfg: Any, mapping_path: str | Path) -> list[str]:
+def concept_removal_list(training_cfg: Any) -> list[str]:
     """Channel names listed by ``training.concept_removal`` (a CSV path), or none."""
     path = training_cfg["concept_removal"]
     if not path:
         return []
-    return load_concept_removal(resolve_repo_path(path), concepts_csv=mapping_path)
+    return load_concept_removal(resolve_repo_path(path))
 
 
 def _check_input_sha1(
@@ -84,10 +83,8 @@ def load_run_concept_source_mask(
 ) -> ConceptSourceMask | None:
     """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``.
 
-    The mask must be built for the concept table whose sha1 the label space records. That label
-    space is ``label_space_dir``, else the one ``training.label_space`` names. With
-    ``label_space_dir`` (a trained bundle's), the mask and removal files must also be those the
-    label space was built from.
+    With ``label_space_dir`` (a trained bundle's label space), the mask and removal files must be
+    those the label space was built from.
 
     Raises:
         ValueError: With ``label_space_dir``, the mask or removal file differs from the one the
@@ -96,28 +93,19 @@ def load_run_concept_source_mask(
     path = training_cfg.concept_source_mask
     if not path:
         return None
-    directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
-    meta = read_label_space_meta(directory)
     if label_space_dir is not None:
+        meta = read_label_space_meta(label_space_dir)
         _check_input_sha1(
-            meta, training_cfg, "concept_source_mask", "concept_source_mask_sha1", directory
+            meta, training_cfg, "concept_source_mask", "concept_source_mask_sha1", label_space_dir
         )
-        _check_input_sha1(meta, training_cfg, "concept_removal", "concept_removal_sha1", directory)
-    removal = training_cfg.concept_removal
+        _check_input_sha1(
+            meta, training_cfg, "concept_removal", "concept_removal_sha1", label_space_dir
+        )
     return load_concept_source_mask(
         resolve_repo_path(path),
         schema,
-        concepts_csv_sha1=meta["concepts_csv_sha1"],
-        removed_concepts=load_concept_removal(resolve_repo_path(removal)) if removal else [],
+        removed_concepts=concept_removal_list(training_cfg),
     )
-
-
-# Training key -> label space meta key of the sha1 of the file it names.
-_LABEL_SPACE_FILES = {
-    "concept_mapping_path": "concepts_csv_sha1",
-    "concept_removal": "concept_removal_sha1",
-    "concept_source_mask": "concept_source_mask_sha1",
-}
 
 
 def _pin(pin: Mapping[str, Any]) -> tuple[str, str]:
@@ -153,26 +141,6 @@ def _pin_mismatches(
     return problems
 
 
-def _input_mismatches(meta: Mapping[str, Any], training_cfg: Any) -> list[str]:
-    """The label keys and input files of ``training_cfg`` that differ from the label space meta."""
-    problems = []
-    keys_sha1 = label_keys_sha1(training_cfg)
-    if keys_sha1 != meta.get("label_keys_sha1"):
-        problems.append(
-            f"label_keys_sha1: the run's training keys give {keys_sha1}, "
-            f"the label space {meta.get('label_keys_sha1')}"
-        )
-    for key, meta_key in _LABEL_SPACE_FILES.items():
-        value = training_cfg[key]
-        current = file_sha1(resolve_repo_path(value)) if value else None
-        if current != meta.get(meta_key):
-            problems.append(
-                f"{key}: {value or 'none'} has sha1 {current}, "
-                f"the label space {meta_key} {meta.get(meta_key)}"
-            )
-    return problems
-
-
 def _missing_reader_labels(space: LabelSpace, readers: Iterable[VersionDataset]) -> list[str]:
     """Per reader, its ``(dataset, version, label_id)`` labels absent from ``source_labels``."""
     labels = space.source_labels
@@ -202,18 +170,14 @@ def _missing_reader_labels(space: LabelSpace, readers: Iterable[VersionDataset])
 def _check_label_space_current(
     directory: Path,
     space: LabelSpace,
-    training_cfg: Any,
     section: DataSection,
     readers: Sequence[VersionDataset],
-    *,
-    check_inputs: bool,
 ) -> None:
     """Raise ValueError naming every way ``space`` is stale for this run.
 
     The run's dataset and taxonomy pins must be those the label space was built from, and every
-    label of its readers must have a row. With ``check_inputs``, its label keys and input files
-    must be those the label space was built from too. The label space may hold datasets the run
-    does not build.
+    label of its readers must have a row. The label space may hold datasets the run does not
+    build.
     """
     problems = [
         *_pin_mismatches(
@@ -221,7 +185,6 @@ def _check_label_space_current(
             data_version(section),
             [ds.source_name for ds in readers],
         ),
-        *(_input_mismatches(space.meta, training_cfg) if check_inputs else []),
         *_missing_reader_labels(space, readers),
     ]
     if problems:
@@ -243,8 +206,8 @@ def build_registry(
     """Label registry over ``dataset_dict``, from the label space of ``training.label_space``.
 
     With ``label_space_dir`` (a trained bundle's label space), that directory is read instead and
-    only the dataset pins and reader labels are checked: the label space is fixed, so the
-    repository's label keys and input files are not compared with it.
+    the label space is fixed, so the repository's label keys and input files are not compared
+    with it.
 
     The registry reads one reader per source: its train split, else the first split listed.
     Every split of a source shares its global offset (see
@@ -284,14 +247,7 @@ def build_registry(
         )
     directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
     space = read_label_space(directory)
-    _check_label_space_current(
-        directory,
-        space,
-        training_cfg,
-        section,
-        registry_datasets,
-        check_inputs=label_space_dir is None,
-    )
+    _check_label_space_current(directory, space, section, registry_datasets)
     schema = ConceptSchema.from_label_space(space)
     registry = SourceLabelRegistry(registry_datasets, space).to(device)
     return registry, schema

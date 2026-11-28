@@ -20,6 +20,7 @@ from mermaidseg.checkpoint import checkpoint_dir, prune_rolling_checkpoints, wri
 from mermaidseg.config import to_plain_dict
 from mermaidseg.data.config import DataSection
 from mermaidseg.data.factory import build_datasets
+from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.dataset_reconciliation.label_space import (
     CLASSES_CSV,
@@ -175,6 +176,32 @@ def _label_space_files(source: Path) -> list[Path]:
     files = [source / name for name in _LABEL_SPACE_FILES]
     acknowledged = source / _ACKNOWLEDGED_CSV
     return files + [acknowledged] if acknowledged.is_file() else files
+
+
+def _lineage_inputs(
+    args: argparse.Namespace, training_cfg: Any, section: DataSection
+) -> list[Path]:
+    """The files a run reads from the repo whose content lineage does not record.
+
+    These are its training and concept schema configs, the files the training config names, the
+    sidecars of its removal list and mask, and each dataset's split file. The label space
+    contributes its listed files, so one untracked file fails the check. Empty config entries are
+    skipped.
+    """
+    named = [
+        training_cfg.concept_mapping_path,
+        training_cfg.concept_removal,
+        training_cfg.concept_source_mask,
+    ]
+    sidecars = [training_cfg.concept_removal, training_cfg.concept_source_mask]
+    return [
+        resolve_repo_path(args.training_config),
+        resolve_repo_path(args.concept_schema_config),
+        *_label_space_files(resolve_repo_path(training_cfg.label_space)),
+        *(resolve_repo_path(path) for path in named if path),
+        *(meta_path(resolve_repo_path(path)) for path in sidecars if path),
+        *(REPO_ROOT / e.split_file for e in section.datasets.values() if e.split_file is not None),
+    ]
 
 
 def _check_label_space_copy(files: list[Path], target: Path) -> None:
@@ -440,6 +467,7 @@ def run(args: argparse.Namespace) -> None:
             resolved_config=to_plain_dict(cfg_logger),
             seed=seed,
             data_version=data_version(section),
+            inputs=_lineage_inputs(args, cfg.training, section),
         )
         if checkpoint_data is not None:
             lineage = inherit_lineage(lineage, checkpoint_data["lineage"])

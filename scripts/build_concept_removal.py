@@ -38,8 +38,8 @@ from mermaidseg.dataset_reconciliation.concept_removal import (
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concepts import DEFAULT_CLASS_TO_CONCEPTS_CSV
 from mermaidseg.io import REPO_ROOT, load_section
-from mermaidseg.lineage import git_state
 from mermaidseg.run_setup import DEFAULT_SCHEMA_CONFIG
+from segdata_spec.git import clean_git_state
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -65,7 +65,9 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument(f"--{name.replace('_', '-')}", type=int, default=value)
     args = p.parse_args(argv)
     rule = CoverageRule(**{name: getattr(args, name) for name in rule.as_dict()})
-    git = git_state()
+    git = clean_git_state(
+        Path(__file__).resolve().parent, inputs=(args.data_config, args.schema_config)
+    )
 
     section = DataSection.model_validate(load_section(args.data_config, "data"))
     counts = section_train_label_counts(section, args.cache_dir)
@@ -96,7 +98,7 @@ def main(argv: list[str] | None = None) -> None:
         "n_removed": int(len(removed)),
         "removed_by_kind": {k: int(v) for k, v in by_kind["sum"].items()},
         "channels_by_kind": {k: int(v) for k, v in by_kind["size"].items()},
-        **concept_sidecar_meta(args.data_config, args.concepts, args.schema_config, git),
+        **concept_sidecar_meta(args.data_config, args.concepts, args.schema_config, git.sha),
     }
     meta_path(args.out).write_text(yaml.safe_dump(meta, sort_keys=False))
 

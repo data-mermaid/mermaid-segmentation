@@ -28,7 +28,6 @@ from mermaidseg.data.config import DataSection, entry_split_groups
 from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.dataset_reconciliation.artifact_meta import (
     check_label_keys,
-    file_sha1,
     read_sidecar,
     select_groups,
     source_id_of_group,
@@ -155,19 +154,14 @@ def removed_concepts(coverage: pd.DataFrame) -> pd.DataFrame:
     return removed[REMOVAL_COLUMNS]
 
 
-def load_concept_removal(path: str | Path, *, concepts_csv: str | Path | None = None) -> list[str]:
+def load_concept_removal(path: str | Path) -> list[str]:
     """Concept channel names listed in a removal CSV (``scripts/build_concept_removal.py``).
 
-    With ``concepts_csv``, its sha1 must match the one in the ``.meta.yaml`` sidecar.
+    Raises:
+        FileNotFoundError: The CSV has no ``.meta.yaml`` sidecar.
     """
     path = Path(path)
-    meta = read_sidecar(path, artifact="concept removal")
-    if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
-        raise ValueError(
-            f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
-            f"but this run uses {concepts_csv} (sha1 {file_sha1(concepts_csv)}). "
-            "Rebuild it with scripts/build_concept_removal.py."
-        )
+    read_sidecar(path, artifact="concept removal")
     df = pd.read_csv(path, dtype={"concept": str})
     return df["concept"].tolist()
 

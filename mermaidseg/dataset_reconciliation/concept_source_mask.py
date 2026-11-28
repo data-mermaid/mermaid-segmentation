@@ -205,7 +205,6 @@ def load_concept_source_mask(
     path: str | Path,
     schema: ConceptSchema,
     *,
-    concepts_csv_sha1: str,
     removed_concepts: Iterable[str] = (),
 ) -> ConceptSourceMask:
     """Read a mask CSV from ``scripts/build_concept_source_mask.py`` into a keep table.
@@ -213,17 +212,9 @@ def load_concept_source_mask(
     Checks, before training starts:
     - every concept is a binary channel of ``schema``; concepts in ``removed_concepts`` (removed
       from the run by ``training.concept_removal``) are skipped, anything else is an error;
-    - ``concepts_csv_sha1`` (the run's concept table, from its label space meta) matches the one
-      recorded in the ``.meta.yaml`` sidecar, so a mask built for another concept table is refused.
     """
     path = Path(path)
     meta = read_sidecar(path, artifact="concept source mask")
-    if meta.get("concepts_csv_sha1") != concepts_csv_sha1:
-        raise ValueError(
-            f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
-            f"but this run's label space uses sha1 {concepts_csv_sha1}. "
-            "Rebuild it with scripts/build_concept_source_mask.py."
-        )
 
     df = pd.read_csv(path, dtype={"source_id": str, "concept": str})
 

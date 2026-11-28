@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +67,7 @@ def build_label_space(
     schema_config: Path,
     cache_dir: Path,
     acknowledged: Path,
-    git: Mapping[str, object],
+    git_sha: str,
 ) -> LabelSpace:
     """Resolve and check the label space of a run from a tables-only cache, with its meta filled.
 
@@ -82,7 +81,7 @@ def build_label_space(
         schema_config: Data config whose datasets freeze the concept channels.
         cache_dir: Tables-only cache.
         acknowledged: ``ACK_COLUMNS`` CSV of acknowledged cases; a missing file has none.
-        git: ``mermaidseg.lineage.git_state()``, read before anything is written.
+        git_sha: Commit of the clean tree the inputs are read from.
 
     Raises:
         ValueError: The label space is refused (see :func:`check_label_space`).
@@ -107,7 +106,7 @@ def build_label_space(
     schema = ConceptSchema.from_csv(
         mapping_path,
         sources=schema_sources,
-        removed_concepts=concept_removal_list(training_cfg, mapping_path),
+        removed_concepts=concept_removal_list(training_cfg),
     )
     taxonomy = open_taxonomy(
         cache_dir, DATASET_BUCKET, Pin(name=TAXONOMY_NAME, **section.taxonomy.model_dump())
@@ -125,13 +124,13 @@ def build_label_space(
         {
             "data_version": data_version(section),
             "label_keys_sha1": label_keys_sha1(training_cfg),
-            **concept_sidecar_meta(data_config, Path(mapping_path), schema_config, git),
+            **concept_sidecar_meta(data_config, Path(mapping_path), schema_config, git_sha),
             "training_config": repo_relative(training_config),
             **_file_fields("concept_removal", _optional_path(training_cfg["concept_removal"])),
             **_file_fields(
                 "concept_source_mask", _optional_path(training_cfg["concept_source_mask"])
             ),
-            **_file_fields("acknowledged", acknowledged if acknowledged.is_file() else None),
+            "acknowledged": repo_relative(acknowledged) if acknowledged.is_file() else None,
             **_count_meta(space),
         }
     )

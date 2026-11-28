@@ -8,8 +8,11 @@ import pytest
 import yaml
 
 from segdata_etl import cli
+from segdata_etl.splits import builder
 from segdata_etl.splits.anneal import anneal
 from segdata_etl.splits.builder import SplitParams, _best_assignment, build_split
+from segdata_spec.errors import DirtyTree
+from segdata_spec.git import GitState
 from segdata_spec.manifest import ParentRef
 from segdata_spec.splits import check_coverage
 
@@ -30,6 +33,12 @@ SOURCES = [10, 11, 12, 13, 14, 15, 16, 17, 99]
 def _published_taxonomy(monkeypatch: pytest.MonkeyPatch, fixture_cache: FixtureCache) -> None:
     """Hand the CLI the fake bucket that holds the fixture taxonomy's manifest."""
     monkeypatch.setattr(cli, "_client_for", lambda _args: fixture_cache.published)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The builder records the sha of a clean tree; the test checkout may be dirty."""
+    monkeypatch.setattr(builder, "clean_git_state", lambda _start: GitState("abc1234", False, True))
 
 
 def _write_inputs(tmp_path: Path) -> dict[str, Path]:
@@ -158,6 +167,22 @@ def test_meta_records_each_input_sha256(built):
     meta = yaml.safe_load((out_dir / "coralnet.meta.yaml").read_text())
     recorded = {name: entry["sha256"] for name, entry in meta["inputs"].items()}
     assert recorded == {name: sha256_of(path) for name, path in inputs.items()}
+
+
+def test_meta_records_the_git_sha_and_no_dirty_flag(built):
+    meta = yaml.safe_load((built[0] / "coralnet.meta.yaml").read_text())
+    assert meta["git"] == {"sha": "abc1234"}
+
+
+def test_a_dirty_tree_stops_the_build_before_any_output(tmp_path, fixture_cache, monkeypatch):
+    def refuse(_start):
+        raise DirtyTree("dirty")
+
+    monkeypatch.setattr(builder, "clean_git_state", refuse)
+    argv, out_dir, _ = _argv(tmp_path, fixture_cache, _publish(fixture_cache))
+    with pytest.raises(DirtyTree):
+        cli.main(argv)
+    assert not out_dir.exists()
 
 
 def test_null_crc_in_a_universe_source_stops_the_build(tmp_path, fixture_cache):
