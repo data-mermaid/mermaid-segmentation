@@ -126,7 +126,7 @@ def _write_label_space_dir(directory: Path) -> dict[str, str]:
 def write_run(
     run_dir: Path,
     *,
-    git_dirty: bool | None = False,
+    git_dirty: bool = False,
     config: dict[str, Any] | None = None,
     mean: Sequence[float] = IMAGENET_MEAN,
     std: Sequence[float] = IMAGENET_STD,

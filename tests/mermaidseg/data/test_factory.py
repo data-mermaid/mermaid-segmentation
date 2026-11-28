@@ -26,7 +26,12 @@ LABELS = {5: "five"}
 
 def _section(pin: Pin, **entry: Any) -> DataSection:
     cfg = {"version": pin.version, "manifest_sha256": pin.manifest_sha256, **entry}
-    return DataSection.model_validate({"datasets": {pin.name: cfg}})
+    return DataSection.model_validate(
+        {
+            "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
+            "datasets": {pin.name: cfg},
+        }
+    )
 
 
 def _points(tmp_path: Path, images: list[ImageSpec], points: list[Any]) -> tuple[Path, Pin]:
@@ -172,6 +177,7 @@ def test_every_split_of_a_source_shares_its_offset(tmp_path: Path) -> None:
     )
     section = DataSection.model_validate(
         {
+            "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
             "datasets": {
                 "a": {
                     "version": pin_a.version,
@@ -184,7 +190,7 @@ def test_every_split_of_a_source_shares_its_offset(tmp_path: Path) -> None:
                     "manifest_sha256": pin_b.manifest_sha256,
                     "val": {"groups": "all"},
                 },
-            }
+            },
         }
     )
     built = _build(section, cache_dir, tmp_path)

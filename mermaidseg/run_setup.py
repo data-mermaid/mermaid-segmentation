@@ -120,8 +120,8 @@ _LABEL_SPACE_FILES = {
 }
 
 
-def _pin(pin: Mapping[str, Any] | None) -> tuple[str, str] | None:
-    return None if pin is None else (pin["version"], pin["manifest_sha256"])
+def _pin(pin: Mapping[str, Any]) -> tuple[str, str]:
+    return (pin["version"], pin["manifest_sha256"])
 
 
 def _describe_pin(pin: tuple[str, str] | None) -> str:
@@ -136,14 +136,15 @@ def _pin_mismatches(
     problems = []
     for name in sorted(datasets):
         run_pin = _pin(run_version["datasets"][name])
-        space_pin = _pin(space_datasets.get(name))
+        space_entry = space_datasets.get(name)
+        space_pin = None if space_entry is None else _pin(space_entry)
         if run_pin != space_pin:
             problems.append(
                 f"dataset {name}: the run pins {_describe_pin(run_pin)}, "
                 f"the label space {_describe_pin(space_pin)}"
             )
     run_taxonomy = _pin(run_version["taxonomy"])
-    space_taxonomy = _pin(space_version.get("taxonomy"))
+    space_taxonomy = _pin(space_version["taxonomy"])
     if run_taxonomy != space_taxonomy:
         problems.append(
             f"taxonomy: the run pins {_describe_pin(run_taxonomy)}, "

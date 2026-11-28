@@ -215,7 +215,12 @@ def test_the_schema_configs_datasets_decide_which_concept_rows_exist(
     schema_config = tmp_path / "schema_config.yaml"
     schema_config.write_text(
         yaml.safe_dump(
-            {"data": {"datasets": {schema_dataset: data["data"]["datasets"]["coralnet"]}}}
+            {
+                "data": {
+                    "taxonomy": data["data"]["taxonomy"],
+                    "datasets": {schema_dataset: data["data"]["datasets"]["coralnet"]},
+                }
+            }
         )
     )
     out = tmp_path / "space"

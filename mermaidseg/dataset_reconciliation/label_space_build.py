@@ -85,12 +85,9 @@ def build_label_space(
         git: ``mermaidseg.lineage.git_state()``, read before anything is written.
 
     Raises:
-        ValueError: ``data_config`` pins no taxonomy, or the label space is refused (see
-            :func:`check_label_space`).
+        ValueError: The label space is refused (see :func:`check_label_space`).
     """
     section = DataSection.model_validate(load_section(data_config, "data"))
-    if section.taxonomy is None:
-        raise ValueError(f"{data_config} pins no taxonomy; the label space needs its hierarchy")
     training_cfg = ConfigDict(load_section(training_config, "training"))
     tables = {
         name: open_tables(

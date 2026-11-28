@@ -99,6 +99,7 @@ def write_eval_cache(tmp_path: Path) -> EvalCache:
     )
     split_file = _write_split_file(tmp_path / "splits" / "coralnet.csv")
     data = {
+        "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
         "datasets": {
             "coralnet": {
                 **_pin_entry(coralnet),
@@ -111,6 +112,6 @@ def write_eval_cache(tmp_path: Path) -> EvalCache:
                 "val": {"groups": "all", "annotators": ["host", "archived"]},
             },
             "coralscapes_v2": {**_pin_entry(coralscapes), "test": {"groups": ["test"]}},
-        }
+        },
     }
     return EvalCache(cache_dir=cache_dir, data=data, split_file=split_file)

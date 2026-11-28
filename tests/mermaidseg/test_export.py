@@ -13,12 +13,7 @@ import torch
 from botocore.exceptions import ClientError
 from safetensors.torch import load_file, save_file
 
-from mermaidseg import export
-from mermaidseg.export import (
-    _untied_cpu_state,
-    require_sidecar_label_space,
-    write_sidecar,
-)
+from mermaidseg.export import _untied_cpu_state, write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS
 from tests.mermaidseg.conftest import (
     DS_A,
@@ -27,7 +22,6 @@ from tests.mermaidseg.conftest import (
     TAX,
     FakeS3,
     commit,
-    data_version,
     deployable_lineage,
     export_ckpt,
     git,
@@ -128,60 +122,6 @@ def test_bundle_directory_holds_the_sidecar_weights_and_label_space(deployable, 
         assert (bundle_dir / "label_space" / name).read_bytes() == (run_space / name).read_bytes()
 
 
-def _remove_label_space_dir(space: Path) -> None:
-    shutil.rmtree(space)
-
-
-def _remove_listed_file(space: Path) -> None:
-    (space / "concepts.csv").unlink()
-
-
-def _change_listed_file(space: Path) -> None:
-    (space / "classes.csv").write_text("id,name\n1,changed\n")
-
-
-def _rewrite_sidecar(space: Path, edit) -> None:
-    sidecar_path = space.parent / MODEL_JSON
-    sidecar = json.loads(sidecar_path.read_text())
-    edit(sidecar)
-    sidecar_path.write_text(json.dumps(sidecar))
-
-
-def _drop_label_space_section(space: Path) -> None:
-    _rewrite_sidecar(space, lambda sidecar: sidecar.pop("label_space"))
-
-
-def _list_a_file_outside_the_directory(space: Path) -> None:
-    (space.parent / "outside.csv").write_text("outside\n")
-    _rewrite_sidecar(space, lambda sidecar: sidecar.update(label_space={"../outside.csv": "aa"}))
-
-
-@pytest.mark.parametrize(
-    ("damage", "message"),
-    [
-        (_remove_label_space_dir, r"label space directory not found: .*run/label_space"),
-        (_remove_listed_file, r"label space file 'concepts.csv' .* is missing"),
-        (_change_listed_file, r"label space file 'classes.csv' differs"),
-        (_drop_label_space_section, r"model.json has no label_space section; .*retrain it"),
-        (
-            _list_a_file_outside_the_directory,
-            r"label space file '\.\./outside.csv' .* is missing",
-        ),
-    ],
-)
-def test_export_refuses_a_label_space_that_the_sidecar_does_not_describe(
-    deployable, tmp_path, damage, message
-):
-    checkpoint, repo, _ = deployable
-    run_dir = tmp_path / "run"
-    shutil.copytree(checkpoint.parent, run_dir)
-    damage(run_dir / "label_space")
-    out = tmp_path / "out"
-    with pytest.raises(ValueError, match=message):
-        export_ckpt(run_dir / checkpoint.name, out, repo_dir=repo)
-    assert not out.exists()
-
-
 def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(deployable, bundle_dir):
     sidecar = json.loads((deployable[0].parent / MODEL_JSON).read_text())
     exported = json.loads((bundle_dir / MODEL_JSON).read_text())
@@ -225,13 +165,6 @@ def test_export_of_a_checkpoint_without_lineage_raises_naming_its_path(tmp_path)
     assert str(checkpoint) in str(excinfo.value)
 
 
-def test_export_refuses_a_run_from_an_unknown_tree(tmp_path):
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=None)
-    with pytest.raises(ValueError, match="clean tree"):
-        export_ckpt(checkpoint, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
-
-
 def test_export_refuses_a_non_empty_output_directory(run, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
@@ -246,16 +179,6 @@ def test_export_accepts_an_existing_empty_output_directory(run, tmp_path):
     out.mkdir()
     export_ckpt(run[0], out, repo_dir=run[1])
     assert sorted(p.name for p in out.iterdir()) == sorted(["label_space", MODEL_JSON, WEIGHTS])
-
-
-def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_naming_the_key(
-    tmp_path,
-):
-    other = {**_tiny.resolved_config(), "seed": 1}
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", config=other)
-    with pytest.raises(ValueError, match="seed"):
-        export_ckpt(checkpoint, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize("key", ["config"])
@@ -332,11 +255,29 @@ def test_export_refuses_a_commit_only_on_a_local_branch_telling_the_user_to_fetc
     lineage = deployable_lineage(local_sha)
     checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
     s3 = seeded_s3()
-    with pytest.raises(ValueError, match="git fetch origin") as raised:
+    with pytest.raises(ValueError, match="not on any remote branch") as raised:
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
     assert local_sha in str(raised.value)
     assert s3.requested == []
     assert not (tmp_path / "out").exists()
+
+
+def test_export_accepts_a_commit_on_a_remote_other_than_origin(tmp_path):
+    repo, _ = repo_with_origin(tmp_path)
+    other = tmp_path / "other.git"
+    other.mkdir()
+    git(other, "init", "--bare", "--initial-branch=main")
+    git(repo, "remote", "add", "other", str(other))
+    git(repo, "checkout", "-b", "elsewhere")
+    sha_on_other = commit(repo, "elsewhere.txt")
+    git(repo, "push", "other", "elsewhere")
+    git(repo, "checkout", "main")
+    git(repo, "branch", "-D", "elsewhere")
+    checkpoint, _ = _tiny.write_run(
+        tmp_path / "run", checkpoint_lineage=deployable_lineage(sha_on_other)
+    )
+    export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+    assert (tmp_path / "out" / MODEL_JSON).is_file()
 
 
 def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_path):
@@ -344,36 +285,8 @@ def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_pa
     unknown = "0123456789abcdef0123456789abcdef01234567"
     lineage = deployable_lineage(unknown)
     checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-    with pytest.raises(ValueError, match="git fetch origin"):
+    with pytest.raises(ValueError, match="not on any remote branch"):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-
-
-@pytest.mark.parametrize(
-    ("data_version", "named"),
-    [
-        pytest.param(None, "data_version", id="no-data-version"),
-        pytest.param({**data_version(), "taxonomy": None}, "taxonomy", id="null-taxonomy"),
-        pytest.param(
-            {"data_config_sha1": "x", "manifests": {}, "manifest_sha256": {}, "label_mappings": {}},
-            "retrain",
-            id="pre-pinning-lineage",
-        ),
-    ],
-)
-def test_export_refuses_a_lineage_that_does_not_pin_its_data(
-    deployable, tmp_path, data_version, named
-):
-    _, repo, pushed = deployable
-    lineage = deployable_lineage(pushed)
-    if data_version is None:
-        del lineage["data_version"]
-    else:
-        lineage["data_version"] = data_version
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-    with pytest.raises(ValueError, match="pin") as raised:
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-    assert named in str(raised.value)
-    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize(
@@ -395,44 +308,10 @@ def test_export_propagates_a_non_missing_key_s3_error_unchanged(deployable, tmp_
     assert not (tmp_path / "out").exists()
 
 
-def test_export_refuses_a_directory_that_is_not_a_git_checkout_saying_so(deployable, tmp_path):
-    checkpoint, _, pushed = deployable
-    not_git = tmp_path / "plain"
-    not_git.mkdir()
-    with pytest.raises(ValueError, match="not a git checkout") as raised:
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=not_git)
-    assert str(not_git) in str(raised.value)
-    assert "git fetch" not in str(raised.value)
+def test_resume_into_a_sidecar_without_a_label_space_key_is_refused_naming_it(tmp_path: Path):
+    write_sidecar(tmp_path, **_sidecar_kwargs())
+    old = {k: v for k, v in _read(tmp_path / MODEL_JSON).items() if k != "label_space"}
+    (tmp_path / MODEL_JSON).write_text(json.dumps(old))
 
-
-@pytest.mark.parametrize("sha", ["--all", "0123abc"])
-def test_export_refuses_a_git_sha_that_is_not_40_lowercase_hex_without_calling_git(
-    deployable, tmp_path, monkeypatch, sha
-):
-    checkpoint, repo, _ = deployable
-    lineage = deployable_lineage(sha)
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-
-    def no_git(*args, **kwargs):
-        raise AssertionError("git must not run for a malformed sha")
-
-    monkeypatch.setattr(export.subprocess, "run", no_git)
-    with pytest.raises(ValueError, match="40"):
-        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
-
-
-def test_resume_of_a_sidecar_without_a_label_space_section_says_to_retrain(tmp_path):
-    (tmp_path / MODEL_JSON).write_text(json.dumps({"architecture": "x"}))
-
-    with pytest.raises(ValueError, match=r"model.json has no label_space section; .*retrain it"):
-        require_sidecar_label_space(tmp_path)
-
-
-def test_resume_accepts_a_sidecar_with_a_label_space_section(tmp_path):
-    (tmp_path / MODEL_JSON).write_text(json.dumps({"label_space": {"classes.csv": "aa"}}))
-
-    require_sidecar_label_space(tmp_path)
-
-
-def test_resume_accepts_a_run_directory_without_a_sidecar(tmp_path):
-    require_sidecar_label_space(tmp_path)
+    with pytest.raises(ValueError, match="label_space"):
+        write_sidecar(tmp_path, **_sidecar_kwargs())

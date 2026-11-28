@@ -38,14 +38,18 @@ def _git_sha() -> str | None:
     return out.strip() if out is not None else None
 
 
-def _git_dirty() -> bool | None:
-    """Whether tracked files differ from HEAD; untracked files do not count."""
+def _git_dirty() -> bool:
+    """Whether tracked files differ from HEAD, or git cannot be read; untracked files do not count."""
     out = _git_output("status", "--porcelain", "--untracked-files=no")
-    return None if out is None else bool(out.strip())
+    return True if out is None else bool(out.strip())
 
 
 def git_state() -> dict[str, str | bool | None]:
-    """``{"git_sha", "git_dirty"}`` of the checkout; each is None when git is unavailable."""
+    """``{"git_sha", "git_dirty"}`` of the checkout.
+
+    ``git_sha`` is None when git is unavailable; ``git_dirty`` is a bool and counts an unreadable
+    tree as dirty.
+    """
     return {"git_sha": _git_sha(), "git_dirty": _git_dirty()}
 
 
@@ -64,7 +68,7 @@ def data_version(section: DataSection) -> dict:
 
     Returns:
         ``{"datasets": {name: {"version", "manifest_sha256", "resize"}},
-        "taxonomy": {"version", "manifest_sha256"} | None}``. ``resize`` is the entry's resize spec
+        "taxonomy": {"version", "manifest_sha256"}}``. ``resize`` is the entry's resize spec
         as a dict, or None.
     """
     return {
@@ -76,14 +80,14 @@ def data_version(section: DataSection) -> dict:
             }
             for name, entry in section.datasets.items()
         },
-        "taxonomy": section.taxonomy.model_dump() if section.taxonomy is not None else None,
+        "taxonomy": section.taxonomy.model_dump(),
     }
 
 
 def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> dict:
     """Everything needed to trace a run back to its code, environment, config and data.
 
-    ``git_dirty`` counts tracked changes only; None (git unavailable) is as untrusted as True.
+    ``git_dirty`` counts tracked changes only; unreadable git counts as dirty.
     Inside a checkout (``REPO_ROOT/.git`` exists as a directory or a worktree file) git gives the
     revision and dirty state. Without ``.git``, a non-empty ``MERMAIDSEG_GIT_SHA`` is the revision of
     a CI-built image: it is recorded as ``git_sha`` with ``git_dirty`` False (the tree is committed by
@@ -92,7 +96,7 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
     build_sha = os.environ.get(BUILD_GIT_SHA_ENV)
     if build_sha and not (Path(REPO_ROOT) / ".git").exists():
         git_sha: str | None = build_sha
-        git_dirty: bool | None = False
+        git_dirty = False
     else:
         git_sha, git_dirty = _git_sha(), _git_dirty()
     return {
@@ -106,12 +110,8 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
     }
 
 
-def _pin_differences(
-    label: str, new: dict | None, old: dict | None, fields: tuple[str, ...]
-) -> list[str]:
+def _pin_differences(label: str, new: dict, old: dict, fields: tuple[str, ...]) -> list[str]:
     """One line per field of ``fields`` that differs between two pins, naming ``label``."""
-    if new is None or old is None:
-        return [] if new is old else [f"{label}: pinned {old!r} in the checkpoint, {new!r} now"]
     return [
         f"{label}: {field} {old.get(field)!r} in the checkpoint, {new.get(field)!r} now"
         for field in fields
@@ -136,7 +136,7 @@ def _data_differences(new: dict, old: dict) -> list[str]:
                 ("version", "manifest_sha256", "resize"),
             )
     lines += _pin_differences(
-        "taxonomy", new.get("taxonomy"), old.get("taxonomy"), ("version", "manifest_sha256")
+        "taxonomy", new["taxonomy"], old["taxonomy"], ("version", "manifest_sha256")
     )
     return lines
 
@@ -149,15 +149,9 @@ def check_same_data(data_version: dict, source: dict) -> None:
         source: Lineage stored in the checkpoint; its ``data_version`` is the reference.
 
     Raises:
-        ValueError: If ``source`` records no data pins (written before data pinning), so the
-            checkpoint cannot be resumed. Otherwise, naming every dataset or taxonomy pin
-            (version, manifest_sha256, resize) that differs, and every dataset added or removed.
+        ValueError: Naming every dataset or taxonomy pin (version, manifest_sha256, resize)
+            that differs, and every dataset added or removed.
     """
-    if "data_version" not in source:
-        raise ValueError(
-            "The checkpoint records no data pins, so it cannot be resumed. "
-            "Use --init-weights to start a new run from its weights."
-        )
     differences = _data_differences(data_version, source["data_version"])
     if differences:
         raise ValueError(
@@ -180,20 +174,12 @@ def inherit_lineage(lineage: dict, source: dict) -> dict:
     Returns:
         A new dict with the fields of ``lineage`` plus ``parent`` and a combined ``git_dirty``.
         ``parent`` is a dict holding only the source's ``git_sha``, ``git_dirty`` and
-        ``data_version``. ``git_dirty`` is True if either side is True, else None if either side
-        is unknown, else False.
+        ``data_version``. ``git_dirty`` is True if either side is True.
     """
-    own_dirty = lineage.get("git_dirty")
-    source_dirty = source.get("git_dirty")
-    if own_dirty is True or source_dirty is True:
-        git_dirty = True
-    elif own_dirty is None or source_dirty is None:
-        git_dirty = None
-    else:
-        git_dirty = False
+    git_dirty = lineage["git_dirty"] or source["git_dirty"]
     parent = {
         "git_sha": source.get("git_sha"),
-        "git_dirty": source_dirty,
+        "git_dirty": source["git_dirty"],
         "data_version": source.get("data_version"),
     }
     return {**lineage, "git_dirty": git_dirty, "parent": parent}

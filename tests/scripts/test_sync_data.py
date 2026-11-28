@@ -10,10 +10,16 @@ import pytest
 import scripts.sync_data as script
 from mermaidseg.data.config import SyncPlan
 from mermaidseg.io import REPO_ROOT
+from segdata_spec.manifest import Pin
 from segdata_spec.sync import SyncResult
+
+_TAXONOMY_PIN = Pin(name="mermaid-benthic", version="20261121-ab12cd3", manifest_sha256="c" * 64)
 
 _CONFIG = """
 data:
+  taxonomy:
+    version: 20261121-ab12cd3
+    manifest_sha256: cccc
   datasets:
     coralnet:
       version: 20261120-ab12cd3
@@ -29,8 +35,13 @@ def test_main_plans_syncs_and_prints(
     config.write_text(_CONFIG)
     cache_dir = tmp_path / "cache"
     seen: dict[str, Any] = {}
-    plan = SyncPlan(pins={}, taxonomy=None, selection={}, split_files={})
-    result = SyncResult(datasets={}, taxonomy=None)
+    plan = SyncPlan(
+        pins={},
+        taxonomy=_TAXONOMY_PIN,
+        selection={},
+        split_files={},
+    )
+    result = SyncResult(datasets={}, taxonomy=plan.taxonomy)
 
     def _sync_plan(data_cfg: Any, repo_root: Path) -> SyncPlan:
         seen["plan_args"] = (data_cfg, repo_root)
@@ -53,13 +64,14 @@ def test_main_plans_syncs_and_prints(
     assert code == 0
     assert seen["plan_args"] == (
         {
+            "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "cccc"},
             "datasets": {
                 "coralnet": {
                     "version": "20261120-ab12cd3",
                     "manifest_sha256": "aaaa",
                     "train": {"groups": "all"},
                 }
-            }
+            },
         },
         REPO_ROOT,
     )
@@ -77,7 +89,7 @@ def test_workers_flag_sets_max_workers_and_the_pool_size(
 
     def _run_sync(p: SyncPlan, cache: Path, client: Any, max_workers: int) -> SyncResult:
         seen["workers"], seen["client"] = max_workers, client
-        return SyncResult(datasets={}, taxonomy=None)
+        return SyncResult(datasets={}, taxonomy=_TAXONOMY_PIN)
 
     monkeypatch.setattr(script, "run_sync", _run_sync)
     monkeypatch.setattr(script.boto3, "client", lambda name, config: (name, config))

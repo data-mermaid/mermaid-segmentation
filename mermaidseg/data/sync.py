@@ -59,6 +59,6 @@ def format_summary(result: SyncResult) -> str:
         if r.skipped:
             line += f", skipped {len(r.skipped)} undecodable: {sorted(r.skipped)}"
         lines.append(line)
-    if result.taxonomy is not None:
-        lines.append(f"taxonomy: version {result.taxonomy.version}")
+    assert result.taxonomy is not None  # run_sync always passes the required pin
+    lines.append(f"taxonomy: version {result.taxonomy.version}")
     return "\n".join(lines)

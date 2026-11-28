@@ -34,10 +34,12 @@ def _publish(tmp_path: Path) -> tuple[FakeS3, Pin]:
     return publish_points(tmp_path, images=IMAGES, labels=LABELS, points=POINTS)
 
 
-def _plan(pin: Pin, groups: set[str] | None, resize: ResizeSpec | None = None) -> SyncPlan:
+def _plan(
+    pin: Pin, taxonomy: Pin, groups: set[str] | None, resize: ResizeSpec | None = None
+) -> SyncPlan:
     return SyncPlan(
         pins={"ds": pin},
-        taxonomy=None,
+        taxonomy=taxonomy,
         selection={"ds": groups},
         split_files={},
         resize={"ds": resize},
@@ -51,7 +53,8 @@ def _image_files(cache_dir: Path) -> set[str]:
 def test_run_sync_fills_the_cache_so_a_reader_opens_it(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
     cache_dir = tmp_path / "synced"
-    run_sync(_plan(pin, None), cache_dir, fake)
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
+    run_sync(_plan(pin, taxonomy, None), cache_dir, fake)
     ds = PointDataset(open_version(cache_dir, DATASET_BUCKET, pin), split="val", global_offset=0)
     assert len(ds) == 2
     _, mask = ds[0]
@@ -72,9 +75,10 @@ class _RecordingS3(FakeS3):
 
 def test_run_table_sync_caches_the_tables_and_fetches_no_image(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
     client = _RecordingS3(fake)
     cache_dir = tmp_path / "synced"
-    result = run_table_sync(_plan(pin, None), cache_dir, client)
+    result = run_table_sync(_plan(pin, taxonomy, None), cache_dir, client)
     assert len(open_tables(cache_dir, DATASET_BUCKET, pin).images) == 2
     assert _image_files(cache_dir) == set()
     assert not any(k.endswith(".jpg") for k in client.fetched)
@@ -85,15 +89,18 @@ def test_run_table_sync_fails_on_an_unlisted_group(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
     split_file = tmp_path / "splits.csv"
     split_file.write_text("group,split\ng1,train\n")
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
     with pytest.raises(SplitCoverageError, match=r"\['g2'\]"):
-        plan = replace(_plan(pin, None), split_files={"ds": split_file})
+        plan = replace(_plan(pin, taxonomy, None), split_files={"ds": split_file})
         run_table_sync(plan, tmp_path / "synced", fake)
 
 
 def test_sync_plan_split_file_reaches_the_coverage_guard(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
     (tmp_path / "splits.csv").write_text("group,split\ng1,train\n")
     data_cfg = {
+        "taxonomy": {"version": taxonomy.version, "manifest_sha256": taxonomy.manifest_sha256},
         "datasets": {
             "ds": {
                 "version": pin.version,
@@ -101,7 +108,7 @@ def test_sync_plan_split_file_reaches_the_coverage_guard(tmp_path: Path) -> None
                 "split_file": "splits.csv",
                 "train": {"use": ["train"]},
             }
-        }
+        },
     }
     plan = sync_plan(data_cfg, repo_root=tmp_path)
     cache_dir = tmp_path / "synced"
@@ -113,7 +120,8 @@ def test_sync_plan_split_file_reaches_the_coverage_guard(tmp_path: Path) -> None
 def test_run_sync_forwards_the_selection(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
     cache_dir = tmp_path / "synced"
-    run_sync(_plan(pin, {"g1"}), cache_dir, fake)
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
+    run_sync(_plan(pin, taxonomy, {"g1"}), cache_dir, fake)
     assert _image_files(cache_dir) == {"i1.jpg"}
 
 
@@ -160,7 +168,8 @@ def test_run_sync_forwards_each_datasets_resize(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
     spec = ResizeSpec(max_edge=4)
     cache_dir = tmp_path / "synced"
-    result = run_sync(_plan(pin, None, resize=spec), cache_dir, fake)
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
+    result = run_sync(_plan(pin, taxonomy, None, resize=spec), cache_dir, fake)
     assert result.datasets["ds"].resize == spec
     ds = PointDataset(
         open_version(cache_dir, DATASET_BUCKET, pin, resize=spec), split="val", global_offset=0

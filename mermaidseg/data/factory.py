@@ -138,8 +138,8 @@ def build_datasets(
     return datasets
 
 
-def load_benthic_hierarchy(section: DataSection, cache_dir: Path) -> dict[str, str | None] | None:
-    """Return the benthic-attribute hierarchy of the section's pinned taxonomy, or None unpinned.
+def load_benthic_hierarchy(section: DataSection, cache_dir: Path) -> dict[str, str | None]:
+    """Return the benthic-attribute hierarchy of the section's pinned taxonomy.
 
     Args:
         section: The validated ``data`` section.
@@ -152,7 +152,5 @@ def load_benthic_hierarchy(section: DataSection, cache_dir: Path) -> dict[str, s
         FileNotFoundError: The pinned taxonomy is not in the cache.
         segdata_spec.errors.PinMismatch: The cached taxonomy differs from the pin.
     """
-    if section.taxonomy is None:
-        return None
     pin = Pin(name=TAXONOMY_NAME, **section.taxonomy.model_dump())
     return hierarchy_from_table(open_taxonomy(cache_dir, DATASET_BUCKET, pin).benthic_attributes)

@@ -72,7 +72,10 @@ def _datasets() -> dict[tuple[str, str], str]:
 def _train_section(**train_blocks: dict[str, Any]) -> DataSection:
     pin = {"version": "v", "manifest_sha256": "s"}
     return DataSection.model_validate(
-        {"datasets": {name: {**pin, "train": block} for name, block in train_blocks.items()}}
+        {
+            "taxonomy": pin,
+            "datasets": {name: {**pin, "train": block} for name, block in train_blocks.items()},
+        }
     )
 
 
@@ -760,7 +763,7 @@ def test_resumed_run_continues_the_global_step_from_its_checkpoint(
     assert first_checkpoint.stat().st_mtime_ns == first_written
 
 
-def _patch_git_dirty(monkeypatch: pytest.MonkeyPatch, git_dirty: bool | None) -> None:
+def _patch_git_dirty(monkeypatch: pytest.MonkeyPatch, git_dirty: bool) -> None:
     """Make ``collect_lineage`` report ``git_dirty`` whatever the checkout looks like."""
     real_collect = training.collect_lineage
 
@@ -895,7 +898,7 @@ def test_init_weights_from_a_checkpoint_with_other_data_trains_and_records_its_p
     assert sidecar["lineage"]["parent"]["data_version"] == saved["lineage"]["data_version"]
 
 
-def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
+def _lineage(taxonomy: dict[str, str]) -> dict[str, Any]:
     pin = {"version": "v1", "manifest_sha256": "aa11", "resize": None}
     return {
         "git_sha": "abc123",
@@ -905,25 +908,16 @@ def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize(
-    ("taxonomy", "taxonomy_params"),
-    [
-        (
-            {"version": "t1", "manifest_sha256": "tt"},
-            {"lineage/taxonomy/version": "t1", "lineage/taxonomy/manifest_sha256": "tt"},
-        ),
-        (None, {}),
-    ],
-    ids=["pinned-taxonomy", "absent-taxonomy"],
-)
-def test_lineage_params_flatten_the_dataset_and_taxonomy_pins(taxonomy, taxonomy_params):
+def test_lineage_params_flatten_the_dataset_and_taxonomy_pins():
+    taxonomy = {"version": "t1", "manifest_sha256": "tt"}
     assert _lineage_params(_lineage(taxonomy)) == {
         "lineage/git_sha": "abc123",
         "lineage/git_dirty": False,
         "lineage/uv_lock_sha256": "deadbeef",
         "lineage/datasets/coralnet/version": "v1",
         "lineage/datasets/coralnet/manifest_sha256": "aa11",
-        **taxonomy_params,
+        "lineage/taxonomy/version": "t1",
+        "lineage/taxonomy/manifest_sha256": "tt",
     }
 
 

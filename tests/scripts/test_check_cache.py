@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-import pyarrow as pa
 import pytest
 import yaml
 
@@ -19,7 +18,6 @@ from tests.mermaidseg.data.conftest import (
     IMAGE_PREFIX,
     VERSION,
     ImageSpec,
-    write_taxonomy,
     write_version,
 )
 
@@ -46,13 +44,15 @@ def _entry(pin: Pin, train: dict, sha: str | None = None) -> dict:
     }
 
 
-def _write_config(tmp_path: Path, entries: dict[str, dict], taxonomy: dict | None = None) -> Path:
+# The data section requires a taxonomy pin; training no longer opens it, so it is not cached.
+_TAXONOMY_PIN = {"version": "20260101-abc1234", "manifest_sha256": "0" * 64}
+
+
+def _write_config(tmp_path: Path, entries: dict[str, dict]) -> Path:
     split_file = tmp_path / "split.csv"
     split_file.write_text("group,split\na,train\nb,val\n")
     entries = {n: {**e, "split_file": str(split_file)} for n, e in entries.items()}
-    section: dict = {"datasets": entries}
-    if taxonomy is not None:
-        section["taxonomy"] = taxonomy
+    section = {"taxonomy": _TAXONOMY_PIN, "datasets": entries}
     path = tmp_path / "data_config.yaml"
     path.write_text(yaml.safe_dump({"data": section}))
     return path
@@ -70,7 +70,7 @@ def _two_datasets(tmp_path: Path) -> tuple[Path, dict[str, Pin]]:
 
 
 def _config_for(
-    tmp_path: Path, pins: dict[str, Pin], wrong_sha: frozenset[str] = frozenset()
+    tmp_path: Path, cache_dir: Path, pins: dict[str, Pin], wrong_sha: frozenset[str] = frozenset()
 ) -> Path:
     entries = {
         name: _entry(pin, {"groups": "all"}, "0" * 64 if name in wrong_sha else None)
@@ -86,7 +86,7 @@ def _marker_file(cache_dir: Path, pin: Pin) -> Path:
 
 def test_synced_datasets_report_one_ok_line_each_and_exit_zero(tmp_path, capsys):
     cache_dir, pins = _two_datasets(tmp_path)
-    config = _config_for(tmp_path, pins)
+    config = _config_for(tmp_path, cache_dir, pins)
 
     code, lines = _run(config, cache_dir, capsys)
 
@@ -95,38 +95,6 @@ def test_synced_datasets_report_one_ok_line_each_and_exit_zero(tmp_path, capsys)
         f"ds_x: version {VERSION}, resize original, ok",
         f"ds_y: version {VERSION}, resize original, ok",
     ]
-
-
-def test_pinned_taxonomy_present_reports_ok(tmp_path, capsys):
-    cache_dir, pin = _write_dataset(tmp_path, "ds_x")
-    table = pa.table({"id": ["1"], "name": ["Hard coral"], "parent_id": [None]})
-    tax = write_taxonomy(cache_dir, tmp_path, table)
-    config = _write_config(
-        tmp_path,
-        {"ds_x": _entry(pin, {"groups": "all"})},
-        taxonomy={"version": tax.version, "manifest_sha256": tax.manifest_sha256},
-    )
-
-    code, lines = _run(config, cache_dir, capsys)
-
-    assert code == 0
-    assert f"taxonomy: version {tax.version}, ok" in lines
-
-
-def test_pinned_taxonomy_absent_from_the_cache_fails(tmp_path, capsys):
-    cache_dir, pin = _write_dataset(tmp_path, "ds_x")
-    config = _write_config(
-        tmp_path,
-        {"ds_x": _entry(pin, {"groups": "all"})},
-        taxonomy={"version": "20260101-abc1234", "manifest_sha256": "0" * 64},
-    )
-
-    code, lines = _run(config, cache_dir, capsys)
-
-    assert code == 1
-    assert lines[0] == f"ds_x: version {VERSION}, resize original, ok"
-    assert lines[1].startswith("taxonomy: ")
-    assert "scripts/sync_data.py" in lines[1]
 
 
 @pytest.mark.parametrize(
@@ -155,7 +123,9 @@ def test_selected_groups_must_exist_and_be_synced(tmp_path, capsys, synced, trai
 
     assert code == (0 if ok else 1)
     if ok:
-        assert lines == [f"ds_x: version {VERSION}, resize original, ok"]
+        assert lines == [
+            f"ds_x: version {VERSION}, resize original, ok",
+        ]
     else:
         assert not lines[0].endswith(", ok")
         assert lines[0].startswith("ds_x: ")
@@ -195,7 +165,9 @@ def _break_marker_bytes(cache_dir: Path, pin: Pin) -> bool:
 def test_a_broken_dataset_fails_while_the_good_one_is_still_checked(tmp_path, capsys, breakage):
     cache_dir, pins = _two_datasets(tmp_path)
     wrong_sha = breakage(cache_dir, pins["ds_x"])
-    config = _config_for(tmp_path, pins, frozenset({"ds_x"}) if wrong_sha else frozenset())
+    config = _config_for(
+        tmp_path, cache_dir, pins, frozenset({"ds_x"}) if wrong_sha else frozenset()
+    )
 
     code, lines = _run(config, cache_dir, capsys)
 

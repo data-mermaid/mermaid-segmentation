@@ -536,10 +536,11 @@ def label_space_run(tmp_path: Path) -> SimpleNamespace:
         yaml.safe_dump(
             {
                 "data": {
+                    "taxonomy": {"version": "tax-v", "manifest_sha256": "sha-tax"},
                     "datasets": {
                         name: {"version": "v", "manifest_sha256": "s", "train": {"groups": "all"}}
                         for name in sorted(sources)
-                    }
+                    },
                 }
             }
         )

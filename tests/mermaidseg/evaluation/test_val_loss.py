@@ -29,7 +29,10 @@ from tests.mermaidseg.conftest import cbm_mask_config, cbm_meta, concept_keep, s
 
 NAMES = ["bleached", "anthropogenic", "sand"]
 _VAL_SECTION = DataSection.model_validate(
-    {"datasets": {"ds": {"version": "v", "manifest_sha256": "x", "val": {"groups": "all"}}}}
+    {
+        "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
+        "datasets": {"ds": {"version": "v", "manifest_sha256": "x", "val": {"groups": "all"}}},
+    }
 )
 
 
@@ -85,6 +88,7 @@ def _split_section() -> DataSection:
     """``a`` has all three blocks; ``b`` only a train block, with transform and repeat."""
     return DataSection.model_validate(
         {
+            "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
             "datasets": {
                 "a": {
                     "version": "v",
@@ -104,7 +108,7 @@ def _split_section() -> DataSection:
                     },
                 },
                 "c": {"version": "v", "manifest_sha256": "x", "test": {"groups": ["g4"]}},
-            }
+            },
         }
     )
 

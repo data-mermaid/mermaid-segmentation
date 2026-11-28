@@ -132,13 +132,14 @@ def _section(pin: Pin, entry: dict[str, Any]) -> DataSection:
     """A data section pinning ``pin`` as ``coralnet`` with the split blocks of ``entry``."""
     return DataSection.model_validate(
         {
+            "taxonomy": {"version": "20261121-ab12cd3", "manifest_sha256": "c" * 64},
             "datasets": {
                 "coralnet": {
                     "version": pin.version,
                     "manifest_sha256": pin.manifest_sha256,
                     **entry,
                 }
-            }
+            },
         }
     )
 

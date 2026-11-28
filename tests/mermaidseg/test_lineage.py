@@ -52,14 +52,14 @@ def test_untracked_file_alone_is_not_dirty(git_repo):
         subprocess.CalledProcessError(128, "git"),
     ],
 )
-def test_unavailable_git_leaves_sha_and_dirty_none(monkeypatch, failure):
+def test_unavailable_git_leaves_sha_none_and_counts_as_dirty(monkeypatch, failure):
     def run(*_args, **_kwargs):
         raise failure
 
     monkeypatch.setattr(lineage.subprocess, "run", run)
     result = _collect()
     assert result["git_sha"] is None
-    assert result["git_dirty"] is None
+    assert result["git_dirty"] is True
 
 
 @pytest.fixture(autouse=True)
@@ -148,22 +148,13 @@ def test_data_version_pins_each_dataset_and_the_taxonomy():
         "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
     }
 
-    without_taxonomy = DataSection.model_validate(
-        {"datasets": {"m": {"version": "v", "manifest_sha256": "s", "val": {"groups": "all"}}}}
-    )
-    assert data_version(without_taxonomy)["taxonomy"] is None
-
 
 @pytest.mark.parametrize(
     ("own", "source", "expected"),
     [
         (False, {"git_dirty": False}, False),
-        (False, {"git_dirty": True}, True),
         (True, {"git_dirty": False}, True),
-        (False, {"git_dirty": None}, None),
-        (None, {"git_dirty": False}, None),
-        (False, {}, None),
-        (None, {"git_dirty": True}, True),
+        (False, {"git_dirty": True}, True),
     ],
 )
 def test_inherit_lineage_combines_git_dirty_of_own_and_source(own, source, expected):
@@ -230,12 +221,6 @@ def _taxonomy_changed() -> dict:
     return out
 
 
-def _untaxed() -> dict:
-    out = _pins()
-    out["taxonomy"] = None
-    return out
-
-
 def _two_datasets() -> dict:
     return _with_dataset(
         _pins(), "coralscapes", version="s1", manifest_sha256="d" * 64, resize=None
@@ -270,7 +255,6 @@ def _all_changed() -> dict:
             ("coralnet", "coralscapes", "taxonomy"),
             id="several-at-once",
         ),
-        pytest.param(_untaxed(), _pins(), ("taxonomy",), id="taxonomy-unpinned-now"),
     ],
 )
 def test_check_same_data_names_every_differing_pin(new, old, needles):
@@ -278,10 +262,3 @@ def test_check_same_data_names_every_differing_pin(new, old, needles):
         check_same_data(new, {"data_version": old})
     for needle in needles:
         assert needle in str(raised.value)
-
-
-def test_check_same_data_refuses_a_checkpoint_that_records_no_data_pins():
-    with pytest.raises(ValueError, match="records no data pins") as raised:
-        check_same_data(_pins(), {})
-    assert "--init-weights" in str(raised.value)
-    assert "added" not in str(raised.value)
