@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-import pyarrow as pa
 import pytest
 import yaml
 
@@ -19,7 +18,6 @@ from tests.mermaidseg.data.conftest import (
     IMAGE_PREFIX,
     VERSION,
     ImageSpec,
-    write_taxonomy,
     write_version,
 )
 
@@ -46,18 +44,15 @@ def _entry(pin: Pin, train: dict, sha: str | None = None) -> dict:
     }
 
 
-def _cached_taxonomy(cache_dir: Path, tmp_path: Path) -> dict:
-    """Write a taxonomy into the cache and return its pin as a config block."""
-    table = pa.table({"id": ["1"], "name": ["Hard coral"], "parent_id": [None]})
-    tax = write_taxonomy(cache_dir, tmp_path, table)
-    return {"version": tax.version, "manifest_sha256": tax.manifest_sha256}
+# The data section requires a taxonomy pin; training no longer opens it, so it is not cached.
+_TAXONOMY_PIN = {"version": "20260101-abc1234", "manifest_sha256": "0" * 64}
 
 
-def _write_config(tmp_path: Path, entries: dict[str, dict], taxonomy: dict) -> Path:
+def _write_config(tmp_path: Path, entries: dict[str, dict]) -> Path:
     split_file = tmp_path / "split.csv"
     split_file.write_text("group,split\na,train\nb,val\n")
     entries = {n: {**e, "split_file": str(split_file)} for n, e in entries.items()}
-    section = {"taxonomy": taxonomy, "datasets": entries}
+    section = {"taxonomy": _TAXONOMY_PIN, "datasets": entries}
     path = tmp_path / "data_config.yaml"
     path.write_text(yaml.safe_dump({"data": section}))
     return path
@@ -81,7 +76,7 @@ def _config_for(
         name: _entry(pin, {"groups": "all"}, "0" * 64 if name in wrong_sha else None)
         for name, pin in pins.items()
     }
-    return _write_config(tmp_path, entries, _cached_taxonomy(cache_dir, tmp_path))
+    return _write_config(tmp_path, entries)
 
 
 def _marker_file(cache_dir: Path, pin: Pin) -> Path:
@@ -99,24 +94,7 @@ def test_synced_datasets_report_one_ok_line_each_and_exit_zero(tmp_path, capsys)
     assert lines == [
         f"ds_x: version {VERSION}, resize original, ok",
         f"ds_y: version {VERSION}, resize original, ok",
-        f"taxonomy: version {VERSION}, ok",
     ]
-
-
-def test_pinned_taxonomy_absent_from_the_cache_fails(tmp_path, capsys):
-    cache_dir, pin = _write_dataset(tmp_path, "ds_x")
-    config = _write_config(
-        tmp_path,
-        {"ds_x": _entry(pin, {"groups": "all"})},
-        taxonomy={"version": "20260101-abc1234", "manifest_sha256": "0" * 64},
-    )
-
-    code, lines = _run(config, cache_dir, capsys)
-
-    assert code == 1
-    assert lines[0] == f"ds_x: version {VERSION}, resize original, ok"
-    assert lines[1].startswith("taxonomy: ")
-    assert "scripts/sync_data.py" in lines[1]
 
 
 @pytest.mark.parametrize(
@@ -139,9 +117,7 @@ def test_pinned_taxonomy_absent_from_the_cache_fails(tmp_path, capsys):
 def test_selected_groups_must_exist_and_be_synced(tmp_path, capsys, synced, train, ok, named):
     cache_dir, pin = _write_dataset(tmp_path, "ds_x")
     _marker_file(cache_dir, pin).write_bytes(dump_marker(SyncMarker(None, frozenset(synced))))
-    config = _write_config(
-        tmp_path, {"ds_x": _entry(pin, train)}, _cached_taxonomy(cache_dir, tmp_path)
-    )
+    config = _write_config(tmp_path, {"ds_x": _entry(pin, train)})
 
     code, lines = _run(config, cache_dir, capsys)
 
@@ -149,7 +125,6 @@ def test_selected_groups_must_exist_and_be_synced(tmp_path, capsys, synced, trai
     if ok:
         assert lines == [
             f"ds_x: version {VERSION}, resize original, ok",
-            f"taxonomy: version {VERSION}, ok",
         ]
     else:
         assert not lines[0].endswith(", ok")
@@ -205,9 +180,7 @@ def test_a_broken_dataset_fails_while_the_good_one_is_still_checked(tmp_path, ca
 
 def test_an_error_outside_the_known_failures_propagates(tmp_path, capsys, monkeypatch):
     cache_dir, pin = _write_dataset(tmp_path, "ds_x")
-    config = _write_config(
-        tmp_path, {"ds_x": _entry(pin, {"groups": "all"})}, _cached_taxonomy(cache_dir, tmp_path)
-    )
+    config = _write_config(tmp_path, {"ds_x": _entry(pin, {"groups": "all"})})
 
     def boom(*args, **kwargs):
         raise RuntimeError("unexpected")
@@ -220,9 +193,7 @@ def test_an_error_outside_the_known_failures_propagates(tmp_path, capsys, monkey
 
 def test_an_invalid_data_config_raises(tmp_path, capsys):
     cache_dir, pin = _write_dataset(tmp_path, "ds_x")
-    config = _write_config(
-        tmp_path, {"ds_x": _entry(pin, {"groups": "all"})}, _cached_taxonomy(cache_dir, tmp_path)
-    )
+    config = _write_config(tmp_path, {"ds_x": _entry(pin, {"groups": "all"})})
     doc = yaml.safe_load(config.read_text())
     doc["data"]["unknown_key"] = 1
     config.write_text(yaml.safe_dump(doc))

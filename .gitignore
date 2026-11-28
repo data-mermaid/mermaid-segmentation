@@ -247,3 +247,7 @@ inat/outputs/
 .DS_Store
 .smoke/
 /wandb/
+
+# label-space write staging and backup directories
+configs/label_spaces/.*.partial/
+configs/label_spaces/.*.old/

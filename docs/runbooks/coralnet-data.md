@@ -11,7 +11,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - [Before you start](#before-you-start)
 - [Recreate the data from scratch](#recreate-the-data-from-scratch)
 - [Update the data](#update-the-data)
-- [Adopt an existing bucket](#adopt-an-existing-bucket)
+- [Reuse a published raw version](#reuse-a-published-raw-version)
 - [Tune the request rate](#tune-the-request-rate)
 - [Train on a published version](#train-on-a-published-version)
 - [Publish CoralNet dataset versions](#publish-coralnet-dataset-versions)
@@ -32,7 +32,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the bucket that holds the scrape.
 - **Request rate.** The scraper sends requests without a rate limit unless you set one. To choose a limit, see [Tune the request rate](#tune-the-request-rate).
 
-- **Earlier scraper version.** If the bucket was filled by an earlier scraper version, its source folders have no `_complete.json`. Do [Adopt an existing bucket](#adopt-an-existing-bucket) first. A plain run would scrape every source again.
+- **Published raw version.** If a `coralnet-raw` version is already published, pass its pin to `verify-existing` and to every scraper run. See [Reuse a published raw version](#reuse-a-published-raw-version).
 
 Run every command from the repository root.
 
@@ -76,6 +76,8 @@ See [Outputs](../../packages/segdata-etl/README.md#outputs) and [Check a build f
 
 ## Update the data
 
+If a `coralnet-raw` version is published, add its pin flags to each scraper run below. See [Reuse a published raw version](#reuse-a-published-raw-version).
+
 ### Add new sources
 
 Run the scraper without flags. It skips each source that has a `_complete.json` marker on S3, so it downloads new sources and finishes any source that is incomplete.
@@ -112,47 +114,64 @@ uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> 
 
 Use an unused tag; see [Run](../../packages/segdata-etl/README.md#run).
 
-## Adopt an existing bucket
+## Reuse a published raw version
 
-Use this once for a bucket that an earlier version of the scraper filled, so it has sources without `_complete.json`. The earlier version inferred "done" from `annotations.csv`, so its sources can be incomplete.
+Pass the pin of the latest published `coralnet-raw` version to the scraper. An image that has no scrape object and that the pinned version holds then counts as present: `verify-existing` does not require it in the scrape, and a scraper run does not download it again. A zero-byte scrape object counts as missing even when pinned, and a scraper run downloads it again. Use this for a bucket with sources that have no `_complete.json`, and for every rescrape after the first publish.
+
+Before you start, get these:
+
+- The pin of the latest published `coralnet-raw` version: its version and manifest sha256. `segdata build coralnet raw` printed both when you staged it. The version is under `s3://mermaid-ic-datasets/datasets/coralnet-raw/<version>/`.
+- AWS credentials that read `mermaid-ic-datasets`. The scraper syncs the pinned version's tables into `--cache-dir` (default `outputs/segdata-cache`).
+
+The pin flags go before the subcommand name. See the [scraper flags](../../packages/coralnet-scraper/README.md#run).
 
 1. Tune the request rate; see [Tune the request rate](#tune-the-request-rate).
-2. Verify the sources that have no marker and mark those that pass:
+2. Verify the sources that have no marker against the pin, and mark those that pass:
 
    ```bash
-   uv run --package coralnet-scraper coralnet-scrape verify-existing
+   uv run --package coralnet-scraper coralnet-scrape \
+     --parent-version <raw> --parent-manifest-sha256 <sha> verify-existing
    ```
 
-   This sends one overview request per source and reads every source's CSVs from S3. A source with zero Confirmed images or zero images is logged as skipped, gets no marker, and does not fail the command. Exit code 1 means at least one source failed verification.
-3. Run the scraper without flags. It downloads every source that has no marker again. Image objects already on S3 are skipped.
+   This sends one overview request per source and reads every source's CSVs from S3. A source with zero Confirmed images or zero images is logged as skipped, gets no marker, and does not fail the command. Exit code 1 means at least one source failed verification. A marker whose `pinned_images` is more than 0 also records the pin under `parent`.
+3. Run the scraper with the same pin. It downloads each source that has no marker. Non-empty image objects already on S3 are skipped. An image with no scrape object that the pinned version holds is skipped; a zero-byte object is downloaded again.
+
+   ```bash
+   uv run --package coralnet-scraper coralnet-scrape --parent-version <raw> --parent-manifest-sha256 <sha>
+   ```
 
    > **Warning:** `--prune` deletes cannot be undone unless the bucket has S3 versioning enabled. Before step 4, read the `orphan_image_objects:<n>` count in each source's marker.
-4. For each source that has an `orphan_image_objects` warning in its marker, delete the image objects that are not in its image list. Step 2 already marked these sources, and the scraper skips a marked source, so remove the markers first:
+4. For each source that has an `orphan_image_objects` warning in its marker, delete the image objects that are not in its image list. The orphan check reads the scrape only, so the pin does not change which objects are orphans. Step 2 already marked these sources, and the scraper skips a marked source, so remove the markers first:
 
-   1. Remove the marker of each source:
+   1. Remove the marker of each source. `invalidate` takes no pin flags:
 
       ```bash
       uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
       ```
 
-   2. Run the scraper with `--prune --dry-run` on the same sources. It logs each orphan key as `would prune orphan image object <key>` and deletes nothing. A source that verifies is left without a marker:
+   2. Run the scraper with the pin and `--prune --dry-run` on the same sources. It logs each orphan key as `would prune orphan image object <key>` and deletes nothing. A source that verifies is left without a marker:
 
       ```bash
-      uv run --package coralnet-scraper coralnet-scrape --prune --dry-run --source-ids <id>,<id>,...
+      uv run --package coralnet-scraper coralnet-scrape --parent-version <raw> --parent-manifest-sha256 <sha> \
+        --prune --dry-run --source-ids <id>,<id>,...
       ```
 
-   3. Check the logged keys, then run the scraper with `--prune` on the same sources:
+   3. Check the logged keys, then run the scraper with the pin and `--prune` on the same sources:
 
       ```bash
-      uv run --package coralnet-scraper coralnet-scrape --prune --source-ids <id>,<id>,...
+      uv run --package coralnet-scraper coralnet-scrape --parent-version <raw> --parent-manifest-sha256 <sha> \
+        --prune --source-ids <id>,<id>,...
       ```
 
-   `--prune` deletes only for a source that verifies in that run.
+   `--prune` deletes only for a source that verifies in that run. Without the pin, the run downloads again from CoralNet every image that is only in the pinned version, and the marker gets no `parent`. `verify-existing` without the pin fails such a source with `image_objects_missing`.
 5. Rebuild the dataset under a new version tag:
 
    ```bash
    uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> --upload-to-s3
    ```
+
+   `build-images` logs the `not_found` images of sources whose marker has `parent` as `not_found in pinned sources: <n> (checked against the parent by the raw build)`. `build-images` does not count `not_found` images of sources whose marker has `parent` toward exit code 1, because the pinned version is expected to hold them. `build coralnet raw` checks them against the parent pin and stops with `PinnedImageLost` if the parent lacks one.
+6. Stage the next raw version with the same pin. See [Stage the raw version](#stage-the-raw-version).
 
 ## Tune the request rate
 
@@ -235,7 +254,9 @@ Run this step on an EC2 host in `us-east-1`, not a laptop. A full corpus reads f
 uv run --package segdata-etl segdata build coralnet raw --stage-dir <stage> --build-run <run>
 ```
 
-The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build. A carried image that disagrees with the parent's size stops the build with a `ValueError`; see [When a publish fails](#when-a-publish-fails).
+The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads a parent staged under `<stage>` first; otherwise it syncs the published parent from `mermaid-ic-datasets` into `--cache-dir`. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build.
+
+If the marker of any included source has `parent`, the build needs the parent pin: without `--parent-version` and `--parent-manifest-sha256` it stops with `ParentRequired`. Pass the pin that the scraper used. If a pinned source has an annotated image that neither the scrape nor the parent holds, the build stops with `PinnedImageLost`. A carried image that disagrees with the parent's size stops the build with a `ValueError`; see [When a publish fails](#when-a-publish-fails).
 
 To delete scrape originals safely, go in this order:
 
@@ -324,6 +345,8 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `PublishRefused` from `promote` (version with carried keys) with another message | The parent's image store differs, or a carried image key is missing or differs. Nothing was written. Publish the parent first. |
 | `PublishRefused: plan keys differ from images.parquet` (`promote`) | `copies.jsonl` or `uploads.jsonl` names a key that is not in `images.parquet`, or names a key twice. Stage the version again. |
 | `ValueError` from `build coralnet raw` naming carried images (size differs from the parent's, or "carried images have points outside the parent's size") | The scrape build disagrees with the published parent for an image it would carry. Each error names at most 10 ids. Do not carry the image. Investigate it. Restore or upload its original so the build probes it, or drop the parent pin. |
+| `ParentRequired` from `build coralnet raw` | An included source's marker has `parent`, so its images are complete only together with that version. Run again with `--parent-version` and `--parent-manifest-sha256`. |
+| `PinnedImageLost` from `build coralnet raw` | A pinned source has an image that is in neither the scrape bucket nor the parent. The message names the sources and at most 10 image ids. Check that the parent pin is the one in the sources' markers. Otherwise run `invalidate --source-ids <id>` and rescrape those sources. |
 | `PinMismatch` | A pin's sha256 does not match the manifest in the store. Copy the pin again from the output of the command that published it. |
 | `ValueError` from `curate` listing benthic attribute or growth form ids missing from the taxonomy | The API maps a label to an attribute or growth form that the pinned taxonomy lacks. Nothing was staged. Stage and publish a newer taxonomy, then pin it. |
 | `curate` stops on a connection error or an HTTP error from `api.datamermaid.org` | The label mapping could not be fetched. Nothing was staged. Check network access, then run again. |
@@ -347,7 +370,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `build-annotations` excluded a source with `csv_read_failed` | Rebuild first. If it repeats, run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
 | `build-annotations` excluded a source with `columns_missing` or `annotations_empty` | The CSV on S3 is bad, or, for `annotations_empty`, the source may have no annotations. Run `invalidate --source-ids <id>`, run the scraper without flags to export it again, then rebuild. |
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
-| `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. For `coralnet-raw` with a parent pin whose published parent holds the image, no re-upload is needed: the build carries the image. |
+| `build-images` reports `not_found` outside `not_found in pinned sources: <n> (checked against the parent by the raw build)` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. For `coralnet-raw` with a parent pin whose published parent holds the image, no re-upload is needed: the build carries the image. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
 | `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. `invalidate` deletes the marker and `_partial/`, so the scraper runs the walk and the export again. Only the deleted images download again, because the image stage skips non-empty objects. `segdata build coralnet raw` drops the image until then. |
 

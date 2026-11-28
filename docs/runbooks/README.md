@@ -15,7 +15,7 @@ Each runbook gives the steps for one task, in order, from the prerequisites to a
 |---|---|
 | [Get the training datasets](training-datasets.md) | Fill the data cache from the pinned dataset versions, add a dataset, or update the MERMAID data |
 | [Recreate and update the CoralNet data](coralnet-data.md) | Scrape CoralNet, then build and publish the CoralNet dataset versions that training pins |
-| [Regenerate the derived configs](derived-configs.md) | Rebuild the concept removal list and the concept source mask from the synced cache |
+| [Regenerate the derived configs](derived-configs.md) | Rebuild the concept removal list, the concept source mask and the label space from the synced cache |
 
 ## Train, export and evaluate
 

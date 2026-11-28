@@ -129,7 +129,8 @@ class CoralNetSession:
             True on success; False when the login fails, after logging the error.
         """
         try:
-            self._perform_login(self.session)
+            with self._login_lock:
+                self._perform_login(self.session)
             self.logged_in = True
             logger.info("CoralNet login successful for %s", self.username)
             return True

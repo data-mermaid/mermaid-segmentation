@@ -8,7 +8,7 @@ from typing import Any
 from mermaidseg.data.config import SyncPlan
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.splits import coverage_checker
-from segdata_spec.sync import SyncResult, sync
+from segdata_spec.sync import SyncResult, sync, sync_tables
 
 
 def run_sync(
@@ -32,15 +32,33 @@ def run_sync(
     )
 
 
+def run_table_sync(plan: SyncPlan, cache_dir: Path, client: Any) -> SyncResult:
+    """Download and verify the plan's manifests, tables and taxonomy into ``cache_dir``.
+
+    No image or mask is fetched, and the split-coverage check runs as in ``run_sync``.
+    """
+    return sync_tables(
+        client,
+        plan.pins,
+        cache_dir,
+        bucket=DATASET_BUCKET,
+        taxonomy=plan.taxonomy,
+        check_split=coverage_checker(plan.split_files),
+    )
+
+
 def format_summary(result: SyncResult) -> str:
     """One line per dataset (name, version, resize id), then the taxonomy version.
 
-    The resize id is ``original`` for a dataset cached without resizing.
+    The resize id is ``original`` for a dataset cached without resizing. A dataset that skipped
+    undecodable images ends its line with their count and ids.
     """
-    lines = [
-        f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}"
-        for name, r in result.datasets.items()
-    ]
+    lines = []
+    for name, r in result.datasets.items():
+        line = f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}"
+        if r.skipped:
+            line += f", skipped {len(r.skipped)} undecodable: {sorted(r.skipped)}"
+        lines.append(line)
     assert result.taxonomy is not None  # run_sync always passes the required pin
     lines.append(f"taxonomy: version {result.taxonomy.version}")
     return "\n".join(lines)

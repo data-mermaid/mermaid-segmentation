@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from segdata_spec._marker import load_synced, marker_files
@@ -161,6 +162,14 @@ def _read_version(cache_dir: Path, bucket: str, pin: Pin) -> tuple[Manifest, dic
     return manifest, _read_tables(cache_dir, bucket, prefix, manifest.files)
 
 
+def _without_images(table: pa.Table, image_ids: frozenset[str]) -> pa.Table:
+    """Return the rows of ``table`` whose ``image_id`` is not in ``image_ids``."""
+    if not image_ids:
+        return table
+    value_set = pa.array(sorted(image_ids), pa.string())
+    return table.filter(pc.invert(pc.is_in(table.column("image_id"), value_set=value_set)))
+
+
 def open_version(
     cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
 ) -> DatasetVersion:
@@ -173,6 +182,9 @@ def open_version(
     original sizes into the resized pixel grid, and ``image_path`` and ``mask_path`` resolve into
     ``<cache_dir>/resized/<resize.id>/``.
 
+    Images that a sync skipped because their original does not decode (the markers' ``skipped``
+    ids) are left out of ``images``, ``points`` and ``label_counts``.
+
     Raises:
         NotSynced: No marker exists for ``pin`` and ``resize``.
         CorruptSyncMarker: A marker file cannot be parsed.
@@ -182,8 +194,11 @@ def open_version(
     """
     marker = load_synced(_require_marker_dir(cache_dir, bucket, pin, resize))
     manifest, tables = _read_version(cache_dir, bucket, pin)
-    images = tables["images.parquet"]
+    images = _without_images(tables["images.parquet"], marker.skipped)
     points = tables.get("points.parquet")
+    if points is not None:
+        points = _without_images(points, marker.skipped)
+    label_counts = _without_images(tables["stats/label_counts.parquet"], marker.skipped)
     if resize is not None:
         if points is not None:
             points = scale_points(points, images, resize)
@@ -193,7 +208,7 @@ def open_version(
         images=images,
         points=points,
         labels=tables["labels.parquet"],
-        label_counts=tables["stats/label_counts.parquet"],
+        label_counts=label_counts,
         cache_dir=cache_dir,
         resize=resize,
         synced_groups=marker.groups,

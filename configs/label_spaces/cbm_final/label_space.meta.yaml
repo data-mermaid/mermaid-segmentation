@@ -1,0 +1,63 @@
+data_version:
+  datasets:
+    coralnet:
+      version: 20261124-cfc389d
+      manifest_sha256: a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4
+      resize:
+        max_edge: 2048
+        filter: lanczos
+        jpeg_quality: 95
+    mermaid:
+      version: 20261124-cfc389d
+      manifest_sha256: f7a1495475bcf0feeedfe91230e376233a41a00d22c57209eac8142865b049a8
+      resize: null
+    coralscapes_v2:
+      version: 20261124-cfc389d
+      manifest_sha256: ec8c584a21bb71bff0d4894dfb62a9d273f2abf9ce24b9666a59617b4a9d208d
+      resize: null
+    benthos_yuval:
+      version: 20261124-cfc389d
+      manifest_sha256: 66b77129bcdea58706f04c16084146ff3519db1ab4f0b6afdc06c7dcbb33ec38
+      resize: null
+    catlin_seaview:
+      version: 20261124-cfc389d
+      manifest_sha256: 9a3b78b600e742ea97a50520e70b3480e0a07a5d2af664450c2ed07c29db0a91
+      resize: null
+    moorea_labeled_corals:
+      version: 20261124-cfc389d
+      manifest_sha256: 0f5d7ad98c478558d1018bfff293257fca9179c09b60f9932d846a6fb21d0230
+      resize: null
+    pacific_labeled_corals:
+      version: 20261124-cfc389d
+      manifest_sha256: 9b4d482e96a7a6d1fd9266c3a46acce9f0c8a4759bc5222921d200ea9b26cd6a
+      resize: null
+    ucsd_mosaics:
+      version: 20261124-cfc389d
+      manifest_sha256: cba5e5c2a58f3dea6b59f825e3d963cc13a934f19988e6c8b7563e3f7f370a27
+      resize: null
+  taxonomy:
+    version: 20261124-e6abfad
+    manifest_sha256: fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43
+label_keys_sha1: a33016a28be3c938a74cfc8047b3bae9a8490cb4
+data_config: configs/data_config.yaml
+data_config_sha1: 481533397cf784d9b3b9eec961000e7350983832
+concepts_csv: configs/class_to_concepts.csv
+concepts_csv_sha1: b55540ec6b964a08fbd280dc6f9639a95d3394b9
+schema_config: configs/data_config.yaml
+created: '2026-11-27T16:33:54'
+git_sha: 744ffcd6dfc8be7d92e0268cc64c21ba869d360a
+git_dirty: false
+training_config: configs/training_config_cbm_final.yaml
+concept_removal: configs/concept_removals/min_coverage_trainval.csv
+concept_removal_sha1: 7dfea22ebdc28888259e97770537d6b7c6f9da94
+concept_source_mask: configs/concept_source_masks/coralnet_only_false.csv
+concept_source_mask_sha1: f6097f641b734a7cf4089b4923dba002f02de582
+acknowledged: configs/label_spaces/cbm_final/acknowledged.csv
+acknowledged_sha1: d0a76ed01a3d191fda6a50c382d05585a0a23b9b
+n_classes: 78
+n_extra_classes: 7
+n_source_labels: 5728
+drops:
+  no_ancestor_in_subset: 66
+  not_in_subset: 8
+  unmapped: 4355

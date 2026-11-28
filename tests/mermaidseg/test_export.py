@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,7 @@ def _sidecar_kwargs(**overrides):
         "input_size": (56, 56),
         "mean": (0.5, 0.5, 0.5),
         "std": (0.25, 0.25, 0.25),
+        "label_space": {"classes.csv": "aa", "concepts.csv": "bb"},
         "lineage": {"seed": 7},
     }
     return {**kwargs, **overrides}
@@ -90,6 +92,7 @@ def test_resume_with_the_same_contract_refreshes_the_lineage(tmp_path: Path):
     [
         ({"id2label": {0: "ignore", 1: "sand"}}, "id2label"),
         ({"model_class": "Other"}, "architecture"),
+        ({"label_space": {"classes.csv": "aa", "concepts.csv": "cc"}}, "label_space"),
     ],
 )
 def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, override, key):
@@ -100,9 +103,23 @@ def test_resume_with_a_different_contract_names_the_differing_key(tmp_path, over
     assert (tmp_path / MODEL_JSON).read_text() == before
 
 
-def test_bundle_directory_holds_only_the_sidecar_and_weights(bundle_dir):
-    assert sorted(p.name for p in bundle_dir.iterdir()) == [MODEL_JSON, WEIGHTS]
-    assert [p.name for p in bundle_dir.parent.iterdir()] == [bundle_dir.name]
+def test_bundle_directory_holds_the_sidecar_weights_and_label_space(deployable, tmp_path):
+    checkpoint, repo, _ = deployable
+    run_dir = tmp_path / "run"
+    shutil.copytree(checkpoint.parent, run_dir)
+    run_space = run_dir / "label_space"
+    (run_space / "extra.csv").write_text("unlisted\n")
+    bundle_dir = export_ckpt(run_dir / checkpoint.name, tmp_path / "bundle", repo_dir=repo)
+    assert sorted(p.name for p in bundle_dir.iterdir()) == ["label_space", MODEL_JSON, WEIGHTS]
+    assert sorted(p.name for p in (bundle_dir / "label_space").iterdir()) == [
+        "classes.csv",
+        "concepts.csv",
+    ]
+    assert [p.name for p in bundle_dir.parent.iterdir()] == [bundle_dir.name, "run"] or sorted(
+        p.name for p in bundle_dir.parent.iterdir()
+    ) == ["bundle", "run"]
+    for name in ("classes.csv", "concepts.csv"):
+        assert (bundle_dir / "label_space" / name).read_bytes() == (run_space / name).read_bytes()
 
 
 def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(deployable, bundle_dir):
@@ -161,7 +178,7 @@ def test_export_accepts_an_existing_empty_output_directory(run, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     export_ckpt(run[0], out, repo_dir=run[1])
-    assert sorted(p.name for p in out.iterdir()) == sorted([MODEL_JSON, WEIGHTS])
+    assert sorted(p.name for p in out.iterdir()) == sorted(["label_space", MODEL_JSON, WEIGHTS])
 
 
 @pytest.mark.parametrize("key", ["config"])
@@ -289,3 +306,12 @@ def test_export_propagates_a_non_missing_key_s3_error_unchanged(deployable, tmp_
     with pytest.raises(ClientError):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=FakeS3({}, error=error))
     assert not (tmp_path / "out").exists()
+
+
+def test_resume_into_a_sidecar_without_a_label_space_key_is_refused_naming_it(tmp_path: Path):
+    write_sidecar(tmp_path, **_sidecar_kwargs())
+    old = {k: v for k, v in _read(tmp_path / MODEL_JSON).items() if k != "label_space"}
+    (tmp_path / MODEL_JSON).write_text(json.dumps(old))
+
+    with pytest.raises(ValueError, match="label_space"):
+        write_sidecar(tmp_path, **_sidecar_kwargs())

@@ -1,14 +1,14 @@
 """Registry and model construction shared by the training pipeline and the evaluation suite.
 
-Every run freezes its concept channels to the datasets of ``configs/data_config.yaml`` and
-its target classes to the sorted ``class_subset``, so a run trained on part of the data (a
-data-size profile) and an evaluation that only builds val splits use the same layout.
+Every run reads its concept channels and target classes from the committed label space that
+``training.label_space`` names, so a run trained on part of the data (a data-size profile) and
+an evaluation that only builds val splits use the same layout.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -17,14 +17,24 @@ import yaml
 
 from mermaidseg.config import to_plain_dict
 from mermaidseg.data.base import VersionDataset
+from mermaidseg.data.config import DataSection
+from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1
 from mermaidseg.dataset_reconciliation.concept_removal import load_concept_removal
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     ConceptSourceMask,
     load_concept_source_mask,
 )
+from mermaidseg.dataset_reconciliation.label_space import (
+    SOURCE_LABELS_CSV,
+    LabelSpace,
+    label_keys_sha1,
+    read_label_space,
+    read_label_space_meta,
+)
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
+from mermaidseg.lineage import data_version
 from mermaidseg.model.meta import MetaModel
 
 DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
@@ -48,11 +58,6 @@ def concept_mapping_path(training_cfg: Any) -> str:
     return str(resolve_repo_path(training_cfg.concept_mapping_path))
 
 
-def target_labels(training_cfg: Any) -> list[str]:
-    """Target classes 1..M: the sorted, lower-cased ``class_subset``."""
-    return sorted(dict.fromkeys(str(label).lower() for label in training_cfg.class_subset))
-
-
 def concept_removal_list(training_cfg: Any) -> list[str]:
     """Channel names listed by ``training.concept_removal`` (a CSV path), or none."""
     path = training_cfg["concept_removal"]
@@ -61,13 +66,43 @@ def concept_removal_list(training_cfg: Any) -> list[str]:
     return load_concept_removal(resolve_repo_path(path))
 
 
+def _check_input_sha1(
+    meta: Mapping[str, Any], training_cfg: Any, key: str, meta_key: str, directory: Path
+) -> None:
+    """Raise ValueError unless the file ``training_cfg[key]`` names has the sha1 ``meta`` records."""
+    value = training_cfg[key]
+    current = file_sha1(resolve_repo_path(value)) if value else None
+    if current != meta.get(meta_key):
+        raise ValueError(
+            f"{key}: {value or 'none'} has sha1 {current}, but the label space {directory} "
+            f"records {meta_key} {meta.get(meta_key)}"
+        )
+
+
 def load_run_concept_source_mask(
-    training_cfg: Any, schema: ConceptSchema
+    training_cfg: Any, schema: ConceptSchema, *, label_space_dir: Path | None = None
 ) -> ConceptSourceMask | None:
-    """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``."""
+    """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``.
+
+    The mask must be built for the concept table whose sha1 the label space records. That label
+    space is ``label_space_dir``, else the one ``training.label_space`` names. With
+    ``label_space_dir`` (a trained bundle's), the mask and removal files must also be those the
+    label space was built from.
+
+    Raises:
+        ValueError: With ``label_space_dir``, the mask or removal file differs from the one the
+            label space records.
+    """
     path = training_cfg.concept_source_mask
     if not path:
         return None
+    directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
+    meta = read_label_space_meta(directory)
+    if label_space_dir is not None:
+        _check_input_sha1(
+            meta, training_cfg, "concept_source_mask", "concept_source_mask_sha1", directory
+        )
+        _check_input_sha1(meta, training_cfg, "concept_removal", "concept_removal_sha1", directory)
     return load_concept_source_mask(
         resolve_repo_path(path),
         schema,
@@ -75,61 +110,188 @@ def load_run_concept_source_mask(
     )
 
 
+# Training key -> label space meta key of the sha1 of the file it names.
+_LABEL_SPACE_FILES = {
+    "concept_mapping_path": "concepts_csv_sha1",
+    "concept_removal": "concept_removal_sha1",
+    "concept_source_mask": "concept_source_mask_sha1",
+}
+
+
+def _pin(pin: Mapping[str, Any]) -> tuple[str, str]:
+    return (pin["version"], pin["manifest_sha256"])
+
+
+def _describe_pin(pin: tuple[str, str] | None) -> str:
+    return "nothing" if pin is None else f"version {pin[0]} (manifest {pin[1]})"
+
+
+def _pin_mismatches(
+    space_version: Mapping[str, Any], run_version: Mapping[str, Any], datasets: Iterable[str]
+) -> list[str]:
+    """The run's dataset pins of ``datasets``, and its taxonomy pin, that the label space lacks."""
+    space_datasets = space_version.get("datasets") or {}
+    problems = []
+    for name in sorted(datasets):
+        run_pin = _pin(run_version["datasets"][name])
+        space_entry = space_datasets.get(name)
+        space_pin = None if space_entry is None else _pin(space_entry)
+        if run_pin != space_pin:
+            problems.append(
+                f"dataset {name}: the run pins {_describe_pin(run_pin)}, "
+                f"the label space {_describe_pin(space_pin)}"
+            )
+    run_taxonomy = _pin(run_version["taxonomy"])
+    space_taxonomy = _pin(space_version["taxonomy"])
+    if run_taxonomy != space_taxonomy:
+        problems.append(
+            f"taxonomy: the run pins {_describe_pin(run_taxonomy)}, "
+            f"the label space {_describe_pin(space_taxonomy)}"
+        )
+    return problems
+
+
+def _input_mismatches(meta: Mapping[str, Any], training_cfg: Any) -> list[str]:
+    """The label keys and input files of ``training_cfg`` that differ from the label space meta."""
+    problems = []
+    keys_sha1 = label_keys_sha1(training_cfg)
+    if keys_sha1 != meta.get("label_keys_sha1"):
+        problems.append(
+            f"label_keys_sha1: the run's training keys give {keys_sha1}, "
+            f"the label space {meta.get('label_keys_sha1')}"
+        )
+    for key, meta_key in _LABEL_SPACE_FILES.items():
+        value = training_cfg[key]
+        current = file_sha1(resolve_repo_path(value)) if value else None
+        if current != meta.get(meta_key):
+            problems.append(
+                f"{key}: {value or 'none'} has sha1 {current}, "
+                f"the label space {meta_key} {meta.get(meta_key)}"
+            )
+    return problems
+
+
+def _missing_reader_labels(space: LabelSpace, readers: Iterable[VersionDataset]) -> list[str]:
+    """Per reader, its ``(dataset, version, label_id)`` labels absent from ``source_labels``."""
+    labels = space.source_labels
+    known = {
+        (dataset, version, int(label_id))
+        for dataset, version, label_id in zip(
+            labels["dataset"], labels["version"], labels["label_id"], strict=True
+        )
+    }
+    problems = []
+    for ds in readers:
+        version = ds.version.manifest.version
+        missing = sorted(
+            int(i)
+            for i in ds.version.labels.column("label_id").to_pylist()
+            if (ds.source_name, version, int(i)) not in known
+        )
+        if missing:
+            more = " ..." if len(missing) > 10 else ""
+            problems.append(
+                f"dataset {ds.source_name} {version}: label ids {missing[:10]}{more} "
+                f"are not in {SOURCE_LABELS_CSV}"
+            )
+    return problems
+
+
+def _check_label_space_current(
+    directory: Path,
+    space: LabelSpace,
+    training_cfg: Any,
+    section: DataSection,
+    readers: Sequence[VersionDataset],
+    *,
+    check_inputs: bool,
+) -> None:
+    """Raise ValueError naming every way ``space`` is stale for this run.
+
+    The run's dataset and taxonomy pins must be those the label space was built from, and every
+    label of its readers must have a row. With ``check_inputs``, its label keys and input files
+    must be those the label space was built from too. The label space may hold datasets the run
+    does not build.
+    """
+    problems = [
+        *_pin_mismatches(
+            space.meta.get("data_version") or {},
+            data_version(section),
+            [ds.source_name for ds in readers],
+        ),
+        *(_input_mismatches(space.meta, training_cfg) if check_inputs else []),
+        *_missing_reader_labels(space, readers),
+    ]
+    if problems:
+        raise ValueError(
+            f"label space {directory} does not match this run; rebuild it with "
+            "scripts/build_label_space.py:\n" + "\n".join(problems)
+        )
+
+
 def build_registry(
     dataset_dict: Mapping[tuple[str, str], VersionDataset],
     training_cfg: Any,
     *,
+    section: DataSection,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
-    benthic_hierarchy: Mapping[str, str | None],
     device: torch.device | str = "cpu",
+    label_space_dir: Path | None = None,
 ) -> tuple[SourceLabelRegistry, ConceptSchema]:
-    """Label registry over ``dataset_dict``, with concepts frozen to ``schema_config``.
+    """Label registry over ``dataset_dict``, from the label space of ``training.label_space``.
 
-    The concept channels come from the dataset names of the ``data`` section of
-    ``schema_config``. The registry reads one reader per source: its train split, else the first
-    split listed. Every split of a source shares its global offset (see
-    :func:`mermaidseg.data.factory.source_offsets`), so any split stands for the source.
+    With ``label_space_dir`` (a trained bundle's label space), that directory is read instead and
+    only the dataset pins and reader labels are checked: the label space is fixed, so the
+    repository's label keys and input files are not compared with it.
+
+    The registry reads one reader per source: its train split, else the first split listed.
+    Every split of a source shares its global offset (see
+    :func:`mermaidseg.data.factory.source_offsets`), so any split stands for the source. The
+    concept channels and target classes are those of the label space.
 
     Args:
         dataset_dict: Built readers keyed by ``(name, split)``.
         training_cfg: The ``training`` section.
-        schema_config: Data config whose datasets freeze the concept channels.
-        benthic_hierarchy: Benthic-attribute name -> parent name, read only with
-            ``training.label_roll_up`` (see ``mermaidseg.data.factory.load_benthic_hierarchy``).
+        section: The ``data`` section the readers were built from; its pins must be those of
+            the label space.
+        schema_config: Data config whose datasets the built datasets must be among.
         device: Device of the registry's lookup tensors.
+        label_space_dir: Label space directory to read in place of ``training.label_space``.
 
     Raises:
         SystemExit: A built dataset is not in ``schema_config``.
+        ValueError: ``training_cfg`` names no label space, or the label space does not match the
+            run; the message names every mismatch.
     """
     by_source: dict[str, VersionDataset] = {}
     for (_, split), ds in dataset_dict.items():
         if ds.source_name not in by_source or split == "train":
             by_source[ds.source_name] = ds
     registry_datasets = list(by_source.values())
-    run_sources = set(by_source)
     schema_sources = set(load_section(schema_config, "data")["datasets"])
-    missing = run_sources - schema_sources
+    missing = set(by_source) - schema_sources
     if missing:
         raise SystemExit(
             f"built datasets {sorted(missing)} are missing from the frozen concept schema "
             f"({schema_config})"
         )
-    mapping_path = concept_mapping_path(training_cfg)
-    removed = concept_removal_list(training_cfg)
-    schema = ConceptSchema.from_csv(mapping_path, sources=schema_sources, removed_concepts=removed)
-    if removed:
-        print(
-            f"Removed {len(removed)} concept channels ({training_cfg.concept_removal}); "
-            f"{schema.num_channels} remain"
+    if label_space_dir is None and "label_space" not in training_cfg:
+        raise ValueError(
+            "the run config has no training.label_space; it was trained before label spaces "
+            "existed, so retrain it or evaluate with a config that names one"
         )
-    registry = SourceLabelRegistry(
+    directory = label_space_dir or resolve_repo_path(training_cfg.label_space)
+    space = read_label_space(directory)
+    _check_label_space_current(
+        directory,
+        space,
+        training_cfg,
+        section,
         registry_datasets,
-        target_labels=target_labels(training_cfg),
-        target_label_subset=training_cfg.class_subset,
-        concept_schema=schema,
-        label_roll_up=training_cfg.label_roll_up,
-        benthic_hierarchy=benthic_hierarchy,
-    ).to(device)
+        check_inputs=label_space_dir is None,
+    )
+    schema = ConceptSchema.from_label_space(space)
+    registry = SourceLabelRegistry(registry_datasets, space).to(device)
     return registry, schema
 
 

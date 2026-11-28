@@ -37,6 +37,7 @@ from coralnet_scraper import walker as walker_mod
 from coralnet_scraper.downloader import CoralNetDownloader
 from coralnet_scraper.errors import ExportEmpty
 from coralnet_scraper.models import ImageFailures
+from coralnet_scraper.pin import RawPin
 from coralnet_scraper.verify import Verification
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coralnet_html"
@@ -580,6 +581,16 @@ def test_verify_existing_fails_a_source_whose_overview_lists_no_total(http_serve
     assert res.errors == ["overview_total_missing"]
 
 
+def test_verify_existing_reports_a_permission_denied_source_as_inaccessible(http_server, fake_s3):
+    http_server.script("/source/1/", Reply(200, _fixture("source_denied.html").encode()))
+
+    res = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
+
+    assert res.ok is False
+    assert res.errors == ["cannot access source 1: Permission denied"]
+    assert fake_s3.objects == {}
+
+
 def test_an_overview_total_changed_during_the_walk_redoes_it_against_the_new_total(
     http_server, fake_s3
 ):
@@ -666,3 +677,61 @@ def test_prune_deletes_nothing_when_a_stage_before_verification_fails(
     assert ("b", "p/s1/images/99.jpg") in fake_s3.objects
     assert not [k for op, k in fake_s3.events if op == "delete" and "/images/" in k]
     assert ("b", _MARKER) not in fake_s3.objects
+
+
+_PARENT = {"dataset": "coralnet-raw", "version": "20261124-abc", "manifest_sha256": "deadbeef"}
+
+
+def _pinned(http_server, fake_s3, ids: dict[int, frozenset[int]]) -> CoralNetDownloader:
+    dl = _site_downloader(http_server, fake_s3)
+    dl.pin = RawPin("20261124-abc", "deadbeef", ids)
+    return dl
+
+
+def _store_one_image_source(fake_s3, *, image: bool) -> None:
+    fake_s3.put(
+        "b", "p/s1/image_list.csv", b"Name,Image Page,Image URL\nimg1.jpg,/image/1/view/,\n"
+    )
+    fake_s3.put("b", "p/s1/annotations.csv", _ann_csv([("img1.jpg", 1, 1, 7)]).encode())
+    if image:
+        fake_s3.put("b", "p/s1/images/1.jpg", b"JPEG1")
+
+
+def test_verify_existing_marks_a_source_whose_image_is_only_in_the_pin(http_server, fake_s3):
+    _script_source(http_server, [[1]])
+    _store_one_image_source(fake_s3, image=False)
+
+    res = _pinned(http_server, fake_s3, {1: frozenset({1})}).verify_existing(1, "b", "p")
+
+    assert res.ok is True
+    marker = json.loads(fake_s3.objects[("b", _MARKER)])
+    assert marker["parent"] == _PARENT
+    assert marker["pinned_images"] == 1
+
+
+def test_a_pinned_source_that_needs_no_pin_gets_no_parent(http_server, fake_s3):
+    _script_source(http_server, [[1]])
+    _store_one_image_source(fake_s3, image=True)
+
+    res = _pinned(http_server, fake_s3, {1: frozenset({1})}).verify_existing(1, "b", "p")
+
+    assert res.ok is True
+    marker = json.loads(fake_s3.objects[("b", _MARKER)])
+    assert marker["pinned_images"] == 0
+    assert "parent" not in marker
+
+
+def test_a_download_skips_the_pinned_image_and_records_the_parent(http_server, fake_s3):
+    _script_source(http_server, [[1, 2]])
+    dl = _pinned(http_server, fake_s3, {1: frozenset({1})})
+
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert (res.ok, res.errors) == (True, [])
+    assert http_server.requests_to("/image/1/view/") == []
+    assert http_server.requests_to("/media/1.jpg") == []
+    assert len(http_server.requests_to("/image/2/view/")) == 1
+    assert ("b", "p/s1/images/1.jpg") not in fake_s3.objects
+    marker = json.loads(fake_s3.objects[("b", _MARKER)])
+    assert marker["parent"] == _PARENT
+    assert marker["pinned_images"] == 1

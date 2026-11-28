@@ -34,8 +34,10 @@ from segdata_spec.git import on_remote
 from segdata_spec.manifest import Pin
 from segdata_spec.sync import check_published_manifest
 
+LABEL_SPACE_DIR = "label_space"
+
 # Sections that must not change when a run resumes into an existing sidecar.
-_CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing")
+_CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing", "label_space")
 
 
 def _jsonable(value: Any) -> Any:
@@ -58,6 +60,7 @@ def _build_sidecar(
     input_size: Sequence[int],
     mean: Sequence[float],
     std: Sequence[float],
+    label_space: Mapping[str, str],
     lineage: dict,
 ) -> dict:
     kwargs = {k: v for k, v in model_kwargs.items() if k != "encoder_name"}
@@ -81,6 +84,7 @@ def _build_sidecar(
                 "channel_order": CHANNEL_ORDER,
                 "interpolation": INTERPOLATION,
             },
+            "label_space": label_space,
             "lineage": lineage,
         }
     )
@@ -108,12 +112,14 @@ def write_sidecar(
     input_size: Sequence[int],
     mean: Sequence[float],
     std: Sequence[float],
+    label_space: Mapping[str, str],
     lineage: dict,
 ) -> Path:
     """Write ``model.json`` atomically into ``run_dir`` and return its path.
 
-    An existing sidecar must carry the same architecture, id2label, concept_id2name and
-    preprocessing; only its lineage is replaced.
+    ``label_space`` maps each file of the run's label space copy to its sha256. An existing
+    sidecar must carry the same architecture, id2label, concept_id2name, preprocessing and
+    label_space; only its lineage is replaced.
 
     Raises:
         ValueError: The existing sidecar differs; the message names the differing keys.
@@ -128,6 +134,7 @@ def write_sidecar(
         input_size=input_size,
         mean=mean,
         std=std,
+        label_space=label_space,
         lineage=lineage,
     )
     path = Path(run_dir) / MODEL_JSON
@@ -190,6 +197,18 @@ def _require_empty_out_dir(out_dir: Path) -> None:
         raise ValueError(f"output directory {out_dir} exists and is not empty")
 
 
+def require_label_space(source: Path, listed: Mapping[str, str]) -> None:
+    """Raise ValueError unless ``source`` holds every file of ``listed`` with its sha256."""
+    if not source.is_dir():
+        raise ValueError(f"label space directory not found: {source}")
+    for name, expected in listed.items():
+        path = source / name
+        if name != Path(name).name or not path.is_file():
+            raise ValueError(f"label space file {name!r} listed in {MODEL_JSON} is missing: {path}")
+        if sha256_file(path) != expected:
+            raise ValueError(f"label space file {name!r} differs from the sha256 in {MODEL_JSON}")
+
+
 def _require_parent_exists(out_dir: Path) -> None:
     if not out_dir.parent.is_dir():
         raise FileNotFoundError(f"parent directory of {out_dir} does not exist: {out_dir.parent}")
@@ -208,9 +227,16 @@ def _current_umask() -> int:
 
 
 def _write_bundle_dir(
-    out_dir: Path, state_dict: Mapping[str, torch.Tensor], metadata: dict[str, Any]
+    out_dir: Path,
+    state_dict: Mapping[str, torch.Tensor],
+    metadata: dict[str, Any],
+    label_space_source: Path,
 ) -> None:
-    """Write the bundle into a fresh temporary sibling of ``out_dir`` and rename it onto ``out_dir``."""
+    """Write the bundle into a fresh temporary sibling of ``out_dir`` and rename it onto ``out_dir``.
+
+    The bundle's ``label_space/`` holds the files that ``metadata['label_space']`` lists,
+    copied from ``label_space_source``.
+    """
     staging = Path(
         tempfile.mkdtemp(prefix=out_dir.name + ".", suffix=".partial", dir=out_dir.parent)
     )
@@ -220,6 +246,9 @@ def _write_bundle_dir(
         (staging / MODEL_JSON).write_text(
             json.dumps({**metadata, WEIGHTS_SHA256: digest}, indent=2)
         )
+        (staging / LABEL_SPACE_DIR).mkdir()
+        for name in metadata["label_space"]:
+            shutil.copy2(label_space_source / name, staging / LABEL_SPACE_DIR / name)
         os.chmod(staging, 0o777 & ~_current_umask())
         os.replace(staging, out_dir)
     except BaseException:
@@ -233,12 +262,15 @@ def export_bundle(
     """Export ``checkpoint`` into a bundle directory at ``out_dir`` and return it.
 
     The sidecar ``model.json`` beside the checkpoint supplies the architecture, label maps
-    and preprocessing; the lineage is the checkpoint's own, from the session that wrote it.
-    ``s3_client`` reads the pinned manifests; ``repo_dir`` (default: the working directory)
-    is the git checkout whose remote-tracking branches must contain the lineage's commit.
+    and preprocessing, and the ``label_space/`` directory beside it supplies the label space
+    files that the bundle carries; the lineage is the checkpoint's own, from the session that
+    wrote it. ``s3_client`` reads the pinned manifests; ``repo_dir`` (default: the working
+    directory) is the git checkout whose remote-tracking branches must contain the lineage's
+    commit.
 
     Raises:
-        FileNotFoundError: The sidecar is missing or ``out_dir``'s parent does not exist.
+        FileNotFoundError: The sidecar is missing, ``out_dir``'s parent does not exist, or a
+            file the sidecar lists is missing from the label space directory.
         RuntimeError: The checkpoint cannot be loaded or lacks a required key, ``lineage``
             included; the message names its path.
         ValueError: The checkpoint's tree was dirty, ``out_dir`` is not empty, a pinned
@@ -252,6 +284,7 @@ def export_bundle(
     sidecar = json.loads(sidecar_path.read_text())
     _require_empty_out_dir(out_dir)
     _require_parent_exists(out_dir)
+    label_space_source = checkpoint.parent / LABEL_SPACE_DIR
     ckpt = read_checkpoint(
         checkpoint,
         required_keys=("config", "model_state_dict", "epoch", "global_step", "lineage"),
@@ -265,5 +298,5 @@ def export_bundle(
         "weights": WEIGHTS,
         "checkpoint": {"epoch": ckpt["epoch"], "global_step": ckpt["global_step"]},
     }
-    _write_bundle_dir(out_dir, ckpt["model_state_dict"], metadata)
+    _write_bundle_dir(out_dir, ckpt["model_state_dict"], metadata, label_space_source)
     return out_dir

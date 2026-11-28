@@ -4,7 +4,7 @@
 Reads only the local cache: no S3 call, and no re-hash of images or tables. Each dataset is opened
 by the same ``build_datasets`` call that training makes, so the check fails exactly when job
 start-up would: a missing or corrupt marker, a pin mismatch, a missing table, a selected group that
-is absent or unsynced, or a missing image or mask file. The pinned taxonomy must be in the cache too.
+is absent or unsynced, or a missing image or mask file.
 Prints one line per dataset and exits 1 if any check failed. A failed check names its cause and
 the step that fixes it: usually ``scripts/sync_data.py``, or a fix to the data config.
 
@@ -21,7 +21,7 @@ import argparse
 from pathlib import Path
 
 from mermaidseg.data.config import DataSection
-from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
+from mermaidseg.data.factory import build_datasets
 from mermaidseg.io import REPO_ROOT, load_section
 from segdata_spec.errors import SegdataError
 
@@ -40,15 +40,6 @@ def _check_dataset(section: DataSection, name: str, cache_dir: Path) -> str | No
         build_datasets(
             one, cache_dir, repo_root=REPO_ROOT, padding=_PADDING, input_size=_INPUT_SIZE
         )
-    except _CHECK_ERRORS as e:
-        return _failure(e)
-    return None
-
-
-def _check_taxonomy(section: DataSection, cache_dir: Path) -> str | None:
-    """Return the failure of the pinned taxonomy in the cache, or None if it is usable."""
-    try:
-        load_benthic_hierarchy(section, cache_dir)
     except _CHECK_ERRORS as e:
         return _failure(e)
     return None
@@ -73,7 +64,7 @@ def _line(name: str, ok_detail: str, failure: str | None) -> tuple[str, bool]:
 
 
 def check_cache(section: DataSection, cache_dir: Path) -> list[tuple[str, bool]]:
-    """Check every pinned dataset and the taxonomy against the cache.
+    """Check every pinned dataset against the cache.
 
     Returns:
         One ``(line, passed)`` pair per check, to print as is.
@@ -83,8 +74,6 @@ def check_cache(section: DataSection, cache_dir: Path) -> list[tuple[str, bool]]
         resize = entry.resize.id if entry.resize else "original"
         failure = _check_dataset(section, name, cache_dir)
         results.append(_line(name, f"version {entry.version}, resize {resize}", failure))
-    failure = _check_taxonomy(section, cache_dir)
-    results.append(_line("taxonomy", f"version {section.taxonomy.version}", failure))
     return results
 
 

@@ -8,6 +8,7 @@ import io
 import json
 import math
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -166,11 +167,15 @@ def source() -> RecordingS3:
     return s3
 
 
+PIN = {"dataset": "coralnet-raw", "version": "v1", "manifest_sha256": "abc"}
+
+
 def _build(
     source: FakeS3,
     tmp_path: Path,
     build: raw.BuildTables | None = None,
     parent_images: pa.Table | None = None,
+    pinned_sources: Mapping[int, Mapping[str, Any]] | None = None,
 ) -> raw.RawTables:
     return raw.build_raw(
         source,
@@ -180,6 +185,7 @@ def _build(
         workers=1,
         checkpoint=tmp_path / "checkpoint.parquet",
         parent_images=parent_images,
+        pinned_sources=pinned_sources or {},
         csv_reader=make_csv_reader_s3(source),
     )
 
@@ -401,6 +407,40 @@ def test_a_not_found_build_row_the_parent_lacks_is_dropped_as_no_dimensions(
     assert "30" not in result.tables["images.parquet"].column("image_id").to_pylist()
     assert result.dropped["no_dimensions"] == 2
     assert result.dropped["carried_from_parent"] == 0
+
+
+def test_a_not_found_image_the_parent_holds_in_a_pinned_source_is_carried(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    build = _build_with_unlisted_image("not_found", None, None)
+
+    result = _build(source, tmp_path, build, _parent_holding(CARRIED_ROW), {1: PIN})
+
+    assert result.dropped["carried_from_parent"] == 1
+    assert result.carried == {"30"}
+
+
+def test_a_not_found_image_the_parent_lacks_in_a_pinned_source_is_lost(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    other = {**CARRIED_ROW, "image_id": "31", "key": "s1/31.jpg"}
+    build = _build_with_unlisted_image("not_found", None, None)
+
+    with pytest.raises(raw.PinnedImageLost, match=r"not_found: 1 images.*\[1\]") as exc:
+        _build(source, tmp_path, build, _parent_holding(other), {1: PIN})
+
+    assert "s1 marker records coralnet-raw@v1 (manifest_sha256 abc)" in str(exc.value)
+
+
+def test_an_unlisted_image_the_parent_lacks_in_a_pinned_source_is_lost(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    other = {**CARRIED_ROW, "image_id": "31", "key": "s1/31.jpg"}
+
+    with pytest.raises(raw.PinnedImageLost, match=r"source_missing: 1 images.*\[1\]") as exc:
+        _build(source, tmp_path, _build_with_unlisted_image(), _parent_holding(other), {1: PIN})
+
+    assert "s1 marker records coralnet-raw@v1 (manifest_sha256 abc)" in str(exc.value)
 
 
 @pytest.mark.parametrize(("width", "height"), [(111, 2000), (3000, 222)], ids=["width", "height"])
@@ -921,6 +961,19 @@ def test_a_staged_parent_pin_carries_an_image_whose_scrape_original_is_gone(
     old = {r["image_id"]: r for r in pq.read_table(parent / "images.parquet").to_pylist()}
     new = {r["image_id"]: r for r in pq.read_table(child / "images.parquet").to_pylist()}
     assert new["10"] == old["10"]
+
+
+def test_a_pinned_source_without_a_parent_is_refused_before_any_probe(
+    staging: RecordingS3, tmp_path: Path
+) -> None:
+    pin = {"dataset": "coralnet-raw", "version": "v", "manifest_sha256": "sha"}
+    staging.put(SRC, f"{PREFIX}/s1/_complete.json", json.dumps({"parent": pin}).encode())
+    argv = ["build", "coralnet", "raw", "--stage-dir", str(tmp_path / "stage")]
+
+    with pytest.raises(raw.ParentRequired, match=r"\[1\]"):
+        cli.main([*argv, "--build-run", "run1", "--workers", "1"])
+
+    assert staging.image_heads() == [] and staging.image_gets() == []
 
 
 @pytest.mark.parametrize(
