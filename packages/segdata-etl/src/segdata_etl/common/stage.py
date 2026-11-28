@@ -17,7 +17,7 @@ import pyarrow as pa
 
 from segdata_etl.common.copy_plan import StagedFile, write_copies, write_uploads
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import GitState, probe_git, refuse_unpublishable
+from segdata_spec.git import Publishable
 from segdata_spec.layout import cache_path, dataset_prefix, taxonomy_prefix
 from segdata_spec.manifest import (
     ImageStore,
@@ -96,39 +96,6 @@ def next_version(
     )
 
 
-def find_repo_root(start: Path) -> Path:
-    """Return the nearest directory at or above ``start`` holding both ``.git`` and ``uv.lock``.
-
-    Raises:
-        FileNotFoundError: No such directory exists.
-    """
-    for directory in (start, *start.parents):
-        if (directory / ".git").exists() and (directory / "uv.lock").is_file():
-            return directory
-    raise FileNotFoundError(f"no git root holding uv.lock at or above {start}")
-
-
-@dataclass(frozen=True)
-class Publishable:
-    """The repo root and git state a version is stamped with; the tree is clean and pushed."""
-
-    root: Path
-    git: GitState
-
-
-def publishable_repo() -> Publishable:
-    """Locate this repo, probe its git state, and refuse a dirty, unpushed or lock-less tree.
-
-    Raises:
-        FileNotFoundError: No repo root holding ``uv.lock`` is found.
-        PublishRefused: The git tree is dirty or unpushed, or ``uv.lock`` is missing.
-    """
-    root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(root)
-    refuse_unpublishable(git, root)
-    return Publishable(root=root, git=git)
-
-
 @dataclass(frozen=True)
 class StagedVersion:
     """A version staged on disk: its dataset (or taxonomy) name, version, manifest and manifest sha256."""
@@ -169,7 +136,6 @@ def stage_version(
     from ``stage_dir`` first, then ``extra_parent_dirs``. Prints ``version:`` and ``manifest_sha256:``.
 
     Raises:
-        PublishRefused: The version's manifest is already staged.
         SchemaValidationError: A table fails its schema or the cross-table rules.
         ObjectConflict: A staged table or plan file exists with other bytes.
     """
@@ -190,8 +156,7 @@ def stage_version(
         label_mapping=label_mapping,
         dropped=dropped,
         taxonomy=taxonomy,
-        repo_dir=repo.root,
-        git=repo.git,
+        repo=repo,
     )
     if copies:
         write_copies(stage_dir, dataset_prefix(dataset, version), copies)
@@ -221,7 +186,6 @@ def stage_taxonomy_version(
     The version is the first free name against ``stage_dir`` and the bucket (``client``).
 
     Raises:
-        PublishRefused: The version's manifest is already staged.
         SchemaValidationError: A table is missing, unknown or fails its schema.
         ObjectExists: A staged table exists with different bytes.
     """
@@ -241,8 +205,7 @@ def stage_taxonomy_version(
         etl_package=ETL_PACKAGE,
         etl_command=etl_command,
         source=source,
-        repo_dir=repo.root,
-        git=repo.git,
+        repo=repo,
     )
     staged = StagedVersion(dataset=name, version=version, manifest=manifest, sha256=sha)
     _report(staged, "")

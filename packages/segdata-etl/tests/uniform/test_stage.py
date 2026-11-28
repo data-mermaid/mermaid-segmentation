@@ -13,15 +13,12 @@ from s3_fake import FakeS3
 from segdata_etl.common import stage
 from segdata_etl.common.copy_plan import StagedFile
 from segdata_etl.common.stage import (
-    Publishable,
-    find_repo_root,
     next_version,
-    publishable_repo,
     stage_version,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import ManifestNotFound, PublishRefused
-from segdata_spec.git import GitState
+from segdata_spec.errors import ManifestNotFound
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
 
 GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
@@ -99,7 +96,7 @@ def _stage(
 ):
     return stage_version(
         stage_dir,
-        repo=Publishable(root=repo_root, git=GIT),
+        repo=Publishable(root=repo_root, git=GIT, uv_lock_sha256="0" * 64),
         client=client,
         dataset="ds",
         kind="points",
@@ -117,26 +114,6 @@ def repo_root(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "uv.lock").write_text("lock")
     return root
-
-
-def test_publishable_repo_refuses_a_dirty_tree(repo_root: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(stage, "find_repo_root", lambda _start: repo_root)
-    monkeypatch.setattr(stage, "probe_git", lambda _dir: GitState("abcdef1", True, True))
-    with pytest.raises(PublishRefused):
-        publishable_repo()
-
-
-def test_find_repo_root_without_a_git_and_lock_ancestor_raises(tmp_path: Path):
-    with pytest.raises(FileNotFoundError):
-        find_repo_root(tmp_path)
-
-
-def test_find_repo_root_returns_the_nearest_directory_holding_git_and_lock(tmp_path: Path):
-    (tmp_path / ".git").mkdir()
-    (tmp_path / "uv.lock").write_text("lock")
-    nested = tmp_path / "a" / "b"
-    nested.mkdir(parents=True)
-    assert find_repo_root(nested) == tmp_path
 
 
 def test_stage_version_stages_names_plans_and_prints(

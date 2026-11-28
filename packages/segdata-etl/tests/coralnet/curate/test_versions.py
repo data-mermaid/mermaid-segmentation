@@ -20,7 +20,7 @@ from segdata_etl.datasets.coralnet.curate import versions
 from segdata_etl.label_maps import coralnet_api
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.schema import IMAGES_SCHEMA, POINTS_SCHEMA
 from segdata_spec.stage import stage_dataset, stage_taxonomy
@@ -190,8 +190,7 @@ def _stage_raw(stage_dir: Path, version: str, repo: Path) -> Pin:
         etl_package="segdata-etl",
         etl_command="test",
         source=RAW_SOURCE,
-        repo_dir=repo,
-        git=CLEAN_GIT,
+        repo=Publishable(root=repo, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
     )
     return Pin(name="coralnet-raw", version=version, manifest_sha256=sha)
 
@@ -257,8 +256,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         config / "annotation_overrides.parquet"
     )
     monkeypatch.setattr(versions, "PACKAGED_CONFIG", config)
-    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: repo)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_spec.git.find_repo_root", lambda _start: repo)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _dir: CLEAN_GIT)
     monkeypatch.setattr(coralnet_api, "_retrying_session", lambda: FakeApiSession(API_ROWS))
 
     s3 = FakeS3()
@@ -275,8 +274,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         etl_package="segdata-etl",
         etl_command="test",
         source=RAW_SOURCE,
-        repo_dir=repo,
-        git=CLEAN_GIT,
+        repo=Publishable(root=repo, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
     )
     _upload_staged(s3, seed)
     s3.calls.clear()
@@ -383,7 +381,7 @@ def test_curated_against_a_raw_staged_only_in_the_stage_dir_reads_no_raw_from_s3
 def test_a_dirty_or_unpushed_tree_is_refused_before_any_s3_call(
     world: World, monkeypatch: pytest.MonkeyPatch, git: GitState, message: str
 ) -> None:
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: git)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _dir: git)
     monkeypatch.setattr(cli, "make_s3_client", NoS3)
 
     with pytest.raises(PublishRefused, match=message):

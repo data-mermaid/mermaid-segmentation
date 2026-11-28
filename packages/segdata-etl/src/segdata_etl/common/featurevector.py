@@ -34,7 +34,7 @@ from segdata_etl.common.copy_plan import read_full, write_copies
 from segdata_etl.common.s3_objects import head_with_checksum, md5_hex
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.features import EXTRACTOR_IDENTITY_KEYS, feature_file_key
-from segdata_spec.git import GitState
+from segdata_spec.git import Publishable
 from segdata_spec.layout import feature_set_prefix
 from segdata_spec.manifest import FeatureSetPin, ImageStore, Pin
 from segdata_spec.s3 import crc64nvme_b64, norm_etag
@@ -469,13 +469,12 @@ def stage_features(
     extractor: Mapping[str, Any],
     allow_missing: bool,
     command: str,
-    repo_dir: Path,
-    git: GitState,
+    repo: Publishable,
 ) -> FeatureSetPin:
     """Stage feature set ``family`` of ``dataset`` and the ``copies.jsonl`` of its vectors.
 
     Raises:
-        PublishRefused: The tree is dirty or unpushed, or the set is already staged.
+        PublishRefused: The set is already staged.
         ManifestNotFound: No directory in ``dataset_dirs`` holds the dataset manifest.
         FeatureIndexInvalid: The index leaves images out without ``allow_missing``.
     """
@@ -490,8 +489,7 @@ def stage_features(
         allow_missing=allow_missing,
         etl_package="segdata-etl",
         etl_command=command,
-        repo_dir=repo_dir,
-        git=git,
+        repo=repo,
     )
     write_copies(
         stage_dir, feature_set_prefix(dataset.name, dataset.version, family), gathered.copies

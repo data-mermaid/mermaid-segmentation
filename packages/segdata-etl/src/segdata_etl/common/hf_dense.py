@@ -31,9 +31,10 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import publishable_repo, stage_version
+from segdata_etl.common.stage import stage_version
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import publishable_repo
 from segdata_spec.manifest import ImageStore, LabelMapping, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
@@ -333,7 +334,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         ObjectConflict: A staged file exists with other bytes.
         PublishRefused: The git tree is dirty or unpushed.
     """
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision

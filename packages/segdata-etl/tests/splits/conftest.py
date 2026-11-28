@@ -14,7 +14,7 @@ import pyarrow as pa
 import pytest
 from s3_fake import FakeS3
 
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.manifest import ImageStore, ParentRef, Pin, SourceInfo
 from segdata_spec.stage import stage_dataset, stage_taxonomy
 
@@ -132,8 +132,7 @@ class FixtureCache:
             etl_command="test",
             source=SOURCE,
             parents=parents,
-            repo_dir=self.repo_dir,
-            git=CLEAN_GIT,
+            repo=Publishable(root=self.repo_dir, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
         )
         return Pin(name=name, version=version, manifest_sha256=sha)
 
@@ -150,8 +149,7 @@ class FixtureCache:
             etl_package="segdata-etl",
             etl_command="test",
             source=SOURCE,
-            repo_dir=self.repo_dir,
-            git=CLEAN_GIT,
+            repo=Publishable(root=self.repo_dir, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
         )
         pin = Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
         manifest = self.cache_dir / BUCKET / "taxonomy" / pin.name / version / "manifest.json"

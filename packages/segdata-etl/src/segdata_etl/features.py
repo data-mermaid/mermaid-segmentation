@@ -15,10 +15,11 @@ from typing import Any
 
 from segdata_etl.common.cli_flags import pin_flags
 from segdata_etl.common.featurevector import gather_features, read_extractor_spec, stage_features
-from segdata_etl.common.stage import DEFAULT_CACHE_DIR, Publishable, publishable_repo
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.features import check_claimed_extractor
+from segdata_spec.git import Publishable, publishable_repo
 from segdata_spec.layout import MANIFEST_NAME, feature_set_prefix
 from segdata_spec.manifest import FeatureSetPin, Pin
 from segdata_spec.read import open_tables
@@ -125,8 +126,7 @@ def attach(
         extractor=extractor,
         allow_missing=allow_missing,
         command=command,
-        repo_dir=repo.root,
-        git=repo.git,
+        repo=repo,
     )
     logger.info(
         "staged %s of %s %s (set manifest sha256 %s): %d to copy, %d adopted, %d missing",
@@ -165,7 +165,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
             any S3 call.
     """
     extractor = read_extractor_spec(args.extractor_spec)
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     attach(
         client,
         Pin(name=args.dataset, version=args.version, manifest_sha256=args.manifest_sha256),

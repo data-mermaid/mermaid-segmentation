@@ -48,12 +48,11 @@ from segdata_etl.common.s3_objects import (
 )
 from segdata_etl.common.stage import (
     DEFAULT_CACHE_DIR,
-    Publishable,
-    publishable_repo,
     stage_version,
 )
 from segdata_etl.label_maps.curated import CuratedSource, curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import Publishable, publishable_repo
 from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
 from segdata_spec.read import Taxonomy, open_taxonomy
@@ -554,7 +553,7 @@ def read_external_inputs(args: argparse.Namespace, client: Any, dataset: str) ->
     Raises:
         PublishRefused: The git tree is dirty or unpushed, or the pinned taxonomy is not published.
     """
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     taxonomy = load_taxonomy(
         client,
         DATASET_BUCKET,

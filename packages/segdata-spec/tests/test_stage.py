@@ -1,5 +1,4 @@
 import hashlib
-import subprocess
 from pathlib import Path
 
 import pyarrow as pa
@@ -10,10 +9,9 @@ from segdata_spec.errors import (
     ManifestNotFound,
     ObjectExists,
     PinMismatch,
-    PublishRefused,
     SchemaValidationError,
 )
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.layout import cache_path
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
 from segdata_spec.stage import (
@@ -33,6 +31,7 @@ TABLES = (
     "stats/label_counts.parquet",
 )
 CLEAN = GitState(sha="abcdef1234567", dirty=False, pushed=True)
+LOCK = b"lock-bytes"
 STORE = ImageStore(bucket="img-bucket", prefix="images/ds/", owner="segdata")
 SOURCE = SourceInfo(type="test", uri="s3://src/", revision="r1")
 
@@ -101,11 +100,10 @@ def _dataset_tables(
 
 
 @pytest.fixture
-def repo_dir(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "uv.lock").write_bytes(b"lock-bytes")
-    return repo
+def repo(tmp_path: Path) -> Publishable:
+    return Publishable(
+        root=tmp_path / "repo", git=CLEAN, uv_lock_sha256=hashlib.sha256(LOCK).hexdigest()
+    )
 
 
 @pytest.fixture
@@ -113,7 +111,7 @@ def stage_dir(tmp_path: Path) -> Path:
     return tmp_path / "stage"
 
 
-def _stage(stage_dir: Path, repo_dir: Path, **overrides):
+def _stage(stage_dir: Path, repo: Publishable, **overrides):
     kwargs = {
         "parent_dirs": (stage_dir,),
         "bucket": BUCKET,
@@ -125,8 +123,7 @@ def _stage(stage_dir: Path, repo_dir: Path, **overrides):
         "etl_package": "segdata-etl",
         "etl_command": "segdata build ds",
         "source": SOURCE,
-        "repo_dir": repo_dir,
-        "git": CLEAN,
+        "repo": repo,
     }
     kwargs.update(overrides)
     return stage_dataset(stage_dir, **kwargs)
@@ -154,8 +151,8 @@ def write_log(monkeypatch) -> list[Path]:
     return written
 
 
-def test_tables_precede_manifest(stage_dir, repo_dir, write_log):
-    manifest, sha = _stage(stage_dir, repo_dir)
+def test_tables_precede_manifest(stage_dir, repo, write_log):
+    manifest, sha = _stage(stage_dir, repo)
 
     version_dir = _version_dir(stage_dir)
     assert write_log[-1] == version_dir / "manifest.json"
@@ -171,8 +168,8 @@ def test_tables_precede_manifest(stage_dir, repo_dir, write_log):
     assert manifest.etl.uv_lock_sha256 == hashlib.sha256(b"lock-bytes").hexdigest()
 
 
-def test_stats_are_derived_from_tables(stage_dir, repo_dir):
-    manifest, _ = _stage(stage_dir, repo_dir, dropped={"missing_image": 4})
+def test_stats_are_derived_from_tables(stage_dir, repo):
+    manifest, _ = _stage(stage_dir, repo, dropped={"missing_image": 4})
 
     assert manifest.stats.model_dump() == {
         "n_images": 3,
@@ -183,36 +180,16 @@ def test_stats_are_derived_from_tables(stage_dir, repo_dir):
     }
 
 
-def test_existing_staged_manifest_refuses_and_writes_nothing(stage_dir, repo_dir):
-    version_dir = _version_dir(stage_dir)
-    version_dir.mkdir(parents=True)
-    (version_dir / "manifest.json").write_bytes(b"{}")
-
-    with pytest.raises(PublishRefused):
-        _stage(stage_dir, repo_dir)
-
-    assert _files(stage_dir) == [version_dir / "manifest.json"]
-    assert (version_dir / "manifest.json").read_bytes() == b"{}"
-
-
-def test_existing_different_table_raises_and_manifest_is_not_written(stage_dir, repo_dir):
+def test_existing_different_table_raises_and_manifest_is_not_written(stage_dir, repo):
     version_dir = _version_dir(stage_dir)
     version_dir.mkdir(parents=True)
     (version_dir / "images.parquet").write_bytes(b"old")
 
     with pytest.raises(ObjectExists):
-        _stage(stage_dir, repo_dir)
+        _stage(stage_dir, repo)
 
     assert (version_dir / "images.parquet").read_bytes() == b"old"
     assert not (version_dir / "manifest.json").exists()
-
-
-def test_dirty_tree_refuses_before_any_write(stage_dir, repo_dir):
-    git = GitState(sha="abcdef1", dirty=True, pushed=True)
-    with pytest.raises(PublishRefused):
-        _stage(stage_dir, repo_dir, git=git)
-
-    assert _files(stage_dir) == []
 
 
 def test_diff_counts_image_and_point_changes():
@@ -236,37 +213,35 @@ def test_diff_counts_image_and_point_changes():
     }
 
 
-def _parent_version(stage_dir, repo_dir):
+def _parent_version(stage_dir, repo):
     tables = _dataset_tables(
         images=_images([("a", "e1", 10, "g1"), ("b", "e2", 20, "g1")]),
         points=_points([("a", 1, 1, 5), ("b", 2, 2, 6)]),
     )
-    _, sha = _stage(
-        stage_dir, repo_dir, dataset="parent", version="20261101-1234567", tables=tables
-    )
+    _, sha = _stage(stage_dir, repo, dataset="parent", version="20261101-1234567", tables=tables)
     return ParentRef(dataset="parent", version="20261101-1234567", manifest_sha256=sha)
 
 
-def test_parent_pin_mismatch_writes_nothing(stage_dir, repo_dir):
-    parent = _parent_version(stage_dir, repo_dir)
+def test_parent_pin_mismatch_writes_nothing(stage_dir, repo):
+    parent = _parent_version(stage_dir, repo)
     bad = parent.model_copy(update={"manifest_sha256": "0" * 64})
     before = _files(stage_dir)
 
     with pytest.raises(PinMismatch):
-        _stage(stage_dir, repo_dir, parents=(bad,))
+        _stage(stage_dir, repo, parents=(bad,))
 
     assert _files(stage_dir) == before
 
 
-def test_diff_is_taken_against_the_first_parent_only(stage_dir, repo_dir):
-    first = _parent_version(stage_dir, repo_dir)
+def test_diff_is_taken_against_the_first_parent_only(stage_dir, repo):
+    first = _parent_version(stage_dir, repo)
     ghost = ParentRef(dataset="ghost", version="20261001-7654321", manifest_sha256="1" * 64)
     child = _dataset_tables(
         images=_images([("b", "e2", 20, "g1"), ("c", "e3", 30, "g2")]),
         points=_points([("b", 2, 2, 6)]),
     )
 
-    manifest, _ = _stage(stage_dir, repo_dir, parents=(first, ghost), tables=child)
+    manifest, _ = _stage(stage_dir, repo, parents=(first, ghost), tables=child)
 
     assert manifest.parents == (first, ghost)
     assert manifest.diff_from_parent.model_dump() == {
@@ -278,7 +253,7 @@ def test_diff_is_taken_against_the_first_parent_only(stage_dir, repo_dir):
     }
 
 
-def _taxonomy_kwargs(repo_dir: Path, tables: dict) -> dict:
+def _taxonomy_kwargs(repo: Publishable, tables: dict) -> dict:
     return {
         "bucket": BUCKET,
         "name": "mermaid-benthic",
@@ -287,8 +262,7 @@ def _taxonomy_kwargs(repo_dir: Path, tables: dict) -> dict:
         "etl_package": "segdata-etl",
         "etl_command": "segdata taxonomy",
         "source": SOURCE,
-        "repo_dir": repo_dir,
-        "git": CLEAN,
+        "repo": repo,
     }
 
 
@@ -301,10 +275,10 @@ def _taxonomy_tables() -> dict[str, pa.Table]:
     }
 
 
-def test_taxonomy_tables_precede_manifest(stage_dir, repo_dir, write_log):
+def test_taxonomy_tables_precede_manifest(stage_dir, repo, write_log):
     tables = _taxonomy_tables()
 
-    manifest, sha = stage_taxonomy(stage_dir, **_taxonomy_kwargs(repo_dir, tables))
+    manifest, sha = stage_taxonomy(stage_dir, **_taxonomy_kwargs(repo, tables))
 
     version_dir = cache_path(stage_dir, BUCKET, f"taxonomy/mermaid-benthic/{VERSION}/")
     assert write_log == [
@@ -316,41 +290,30 @@ def test_taxonomy_tables_precede_manifest(stage_dir, repo_dir, write_log):
     assert manifest.files["growth_forms.parquet"].rows == 1
 
 
-def test_taxonomy_existing_staged_manifest_refuses(stage_dir, repo_dir):
-    version_dir = cache_path(stage_dir, BUCKET, f"taxonomy/mermaid-benthic/{VERSION}/")
-    version_dir.mkdir(parents=True)
-    (version_dir / "manifest.json").write_bytes(b"{}")
-
-    with pytest.raises(PublishRefused):
-        stage_taxonomy(stage_dir, **_taxonomy_kwargs(repo_dir, _taxonomy_tables()))
-
-    assert _files(stage_dir) == [version_dir / "manifest.json"]
-
-
-def test_invalid_table_raises_before_any_write(stage_dir, repo_dir):
+def test_invalid_table_raises_before_any_write(stage_dir, repo):
     tables = _dataset_tables()
     tables["labels.parquet"] = tables["labels.parquet"].drop(["name"])
 
     with pytest.raises(SchemaValidationError):
-        _stage(stage_dir, repo_dir, tables=tables)
+        _stage(stage_dir, repo, tables=tables)
 
     assert _files(stage_dir) == []
 
 
-def test_rerun_after_a_partial_stage_adopts_identical_tables(stage_dir, repo_dir):
-    _stage(stage_dir, repo_dir)
+def test_rerun_after_a_partial_stage_adopts_identical_tables(stage_dir, repo):
+    _stage(stage_dir, repo)
     version_dir = _version_dir(stage_dir)
     (version_dir / "manifest.json").unlink()
 
-    _, sha = _stage(stage_dir, repo_dir)
+    _, sha = _stage(stage_dir, repo)
 
     assert sha == hashlib.sha256((version_dir / "manifest.json").read_bytes()).hexdigest()
     assert len(_files(stage_dir)) == 5
 
 
-def test_read_parent_tables_uses_the_first_dir_holding_the_manifest(tmp_path, repo_dir):
+def test_read_parent_tables_uses_the_first_dir_holding_the_manifest(tmp_path, repo):
     first, second = tmp_path / "first", tmp_path / "second"
-    parent = _parent_version(second, repo_dir)
+    parent = _parent_version(second, repo)
 
     tables = read_parent_tables([first, second], BUCKET, parent)
 
@@ -359,10 +322,10 @@ def test_read_parent_tables_uses_the_first_dir_holding_the_manifest(tmp_path, re
     assert tables["images.parquet"] == (parent_dir / "images.parquet").read_bytes()
 
 
-def test_read_parent_tables_prefers_the_earlier_dir(tmp_path, repo_dir):
+def test_read_parent_tables_prefers_the_earlier_dir(tmp_path, repo):
     first, second = tmp_path / "first", tmp_path / "second"
-    parent = _parent_version(first, repo_dir)
-    _parent_version(second, repo_dir)
+    parent = _parent_version(first, repo)
+    _parent_version(second, repo)
     parent_dir = _version_dir(second, "datasets/parent/20261101-1234567/")
     (parent_dir / "images.parquet").write_bytes(b"differs")
 
@@ -376,46 +339,9 @@ def test_read_parent_tables_names_a_parent_found_in_no_dir(tmp_path):
         read_parent_tables([tmp_path / "a", tmp_path / "b"], BUCKET, ghost)
 
 
-def test_read_parent_tables_refuses_a_manifest_that_misses_its_pin(tmp_path, repo_dir):
-    parent = _parent_version(tmp_path, repo_dir)
+def test_read_parent_tables_refuses_a_manifest_that_misses_its_pin(tmp_path, repo):
+    parent = _parent_version(tmp_path, repo)
     bad = parent.model_copy(update={"manifest_sha256": "0" * 64})
 
     with pytest.raises(PinMismatch):
         read_parent_tables([tmp_path], BUCKET, bad)
-
-
-def _dirty_repo(root: Path) -> Path:
-    """A repo with a committed uv.lock and tracked file, the tracked file then modified."""
-    root.mkdir()
-
-    def run(*args: str) -> None:
-        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
-
-    run("init", "-b", "main")
-    run("config", "user.name", "t")
-    run("config", "user.email", "t@example.com")
-    (root / "uv.lock").write_text("lock")
-    (root / "f.txt").write_text("one")
-    run("add", ".")
-    run("-c", "commit.gpgsign=false", "commit", "-m", "one")
-    (root / "f.txt").write_text("two")
-    return root
-
-
-@pytest.mark.parametrize("which", ["dataset", "taxonomy"])
-def test_staging_without_a_git_state_probes_the_repo_and_refuses_a_dirty_one(
-    which, tmp_path, stage_dir, monkeypatch
-):
-    repo = _dirty_repo(tmp_path / "dirty")
-    not_a_repo = tmp_path / "outside"
-    not_a_repo.mkdir()
-    monkeypatch.chdir(not_a_repo)
-
-    with pytest.raises(PublishRefused, match="uncommitted"):
-        if which == "dataset":
-            _stage(stage_dir, repo, git=None)
-        else:
-            kwargs = {**_taxonomy_kwargs(repo, _taxonomy_tables()), "git": None}
-            stage_taxonomy(stage_dir, **kwargs)
-
-    assert _files(stage_dir) == []

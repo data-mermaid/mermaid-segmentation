@@ -19,7 +19,7 @@ from typing import Any
 import pyarrow as pa
 
 from segdata_etl.common.cli_flags import pin_command_parts, pin_values
-from segdata_etl.common.stage import publishable_repo, stage_version
+from segdata_etl.common.stage import stage_version
 from segdata_etl.datasets.coralnet.curate.build import curate
 from segdata_etl.label_maps.coralnet_api import (
     CoralNetLabelMappings,
@@ -28,6 +28,7 @@ from segdata_etl.label_maps.coralnet_api import (
 )
 from segdata_etl.splits.inputs import sync_tables
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import publishable_repo
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.read import DatasetVersion, open_taxonomy
 
@@ -160,7 +161,7 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
         requests.RequestException: The LabelMapping API request fails after its retries; the
             error propagates and nothing is staged.
     """
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     with resources.as_file(PACKAGED_CONFIG) as config_dir:
         built = _curate(args, source_client, DATASET_BUCKET, config_dir)
     stage_version(

@@ -12,7 +12,7 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 | Caller | Calls |
 |---|---|
-| ETL | `stage.stage_dataset` and `stage.stage_taxonomy`, which write a version to a local stage directory. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. `segdata promote` in `segdata-etl` uploads a staged version; `stage.stage_feature_set` stages a feature set the same way and returns a `manifest.FeatureSetPin` (dataset `Pin`, family, feature-set manifest sha256). `features.claim_extractor` is the one S3 write in this package; see [Feature sets](#feature-sets). Also `stage.read_version_tables`, `stage.read_parent_tables`, `git.probe_git` and `git.refuse_unpublishable`. |
+| ETL | `stage.stage_dataset` and `stage.stage_taxonomy`, which write a version to a local stage directory. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. `segdata promote` in `segdata-etl` uploads a staged version; `stage.stage_feature_set` stages a feature set the same way and returns a `manifest.FeatureSetPin` (dataset `Pin`, family, feature-set manifest sha256). `features.claim_extractor` is the one S3 write in this package; see [Feature sets](#feature-sets). Also `stage.read_version_tables`, `stage.read_parent_tables`, `git.probe_git`, `git.find_repo_root` and `git.publishable_repo`, which returns the `git.Publishable` that the stage functions require. |
 | Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access; `sync.check_published_manifest(client, bucket, pin, taxonomy=...)`, which reads the manifest without caching it; then `read.open_version(..., resize=...)`, `read.open_tables` and `read.open_taxonomy`, which read only the cache. For tables without images: `sync.sync_tables` (needs S3 access) in place of `sync.sync`. For features: `sync.sync_feature_set` (needs S3 access) and `read.open_feature_set` (cache only), both taking a `manifest.FeatureSetPin`. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
 | ETL | `sync.require_published_taxonomy(client, bucket, pin)`, which raises `PublishRefused` when the taxonomy manifest is absent or does not match the pin. The builders and `promote` in `segdata-etl` call it. |
 | Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`; `layout` for the S3 keys and cache paths; `s3` for `exists`, `get_bytes`, `is_not_found`, `is_precondition_failed`, `norm_etag` and `crc64nvme_b64`. |
@@ -77,9 +77,9 @@ Immutability:
 | `crc64nvme` | string | yes |
 | `n_points` | int32 | no |
 
-`stage.stage_feature_set(stage_dir, *, dataset_dirs, bucket, dataset, family, index, extractor, allow_missing=False, etl_package, etl_command, repo_dir, git=None)` returns a `FeatureSetPin`. It writes `index.parquet` and then `manifest.json` to `<stage_dir>/<bucket>/datasets/<d>/<v>/features/<family>/`. `segdata promote` publishes those bytes unchanged. All checks run before the first file is written:
+`stage.stage_feature_set(stage_dir, *, dataset_dirs, bucket, dataset, family, index, extractor, allow_missing=False, etl_package, etl_command, repo)` returns a `FeatureSetPin`. It writes `index.parquet` and then `manifest.json` to `<stage_dir>/<bucket>/datasets/<d>/<v>/features/<family>/`. `segdata promote` publishes those bytes unchanged. All checks run before the first file is written:
 
-- The git tree is clean and pushed and has a `uv.lock`, else `PublishRefused`. The manifest records the ETL provenance, as `stage_dataset` does.
+- `repo` is a `git.Publishable`: the caller has proved the tree clean, pushed and locked. The manifest records the ETL provenance, as `stage_dataset` does.
 - The dataset manifest is read from the first of `dataset_dirs` that holds it, else `ManifestNotFound`. It is verified against `dataset`, and `images.parquet` against the manifest. Pass the stage directory for a version staged alongside, or the cache that `sync_tables` filled for a published one.
 - `index` conforms to `FEATURE_INDEX_SCHEMA`, else `SchemaValidationError`.
 - The dataset's image store is `images/<store>/` in `bucket`, else `ValueError`.
@@ -140,8 +140,8 @@ Stage:
 - `stage_dataset` and `stage_taxonomy` write under `<stage_dir>/<bucket>/<key>`, the cache layout, and write nothing to S3.
 - Every file is write-once. An existing file with identical bytes counts as written, so a rerun after a partial stage adopts the tables already there; an existing file with other bytes raises `ObjectExists`.
 - Table files are written first and `manifest.json` last. A version folder without a manifest is an incomplete stage.
-- A version whose `manifest.json` is already staged is refused with `PublishRefused`.
-- A dirty tree (tracked files only), a `HEAD` that no remote branch contains, and a missing `uv.lock` are refused with `PublishRefused`. The manifest records the git SHA and the sha256 of `uv.lock`.
+- The stage functions do not check the tree. They take a required keyword `repo: git.Publishable`, which `git.publishable_repo(start)` returns, or raises `PublishRefused` for a dirty tree (tracked files only), a `HEAD` that no remote branch contains, or a missing `uv.lock`. The manifest records the git SHA and the sha256 of `uv.lock` from it.
+- `stage_dataset` and `stage_taxonomy` do not refuse an already-staged version; the caller names the version and table files are write-once. `stage_feature_set` refuses a set that is already staged.
 - With `parents`, `stage_dataset` reads the first parent's manifest and tables from the first of `parent_dirs` that holds the manifest, checks them against the `ParentRef` and the manifest, and records the diff from that parent.
 - `stage_dataset(taxonomy=...)` records the taxonomy pin in the manifest's `taxonomy` field. Without it, `manifest.json` has no `taxonomy` key.
 - The same tables always serialize to the same bytes.
@@ -165,7 +165,7 @@ All derive from `errors.SegdataError`.
 
 | Class | Raised when |
 |---|---|
-| `PublishRefused` | The tree is dirty or unpushed, `uv.lock` is missing, or the version is already staged. |
+| `PublishRefused` | `git.publishable_repo` finds a dirty or unpushed tree or a missing `uv.lock`, or `stage_feature_set` finds the set already staged. |
 | `ObjectExists` | A write-once staged file exists with different bytes. |
 | `SchemaValidationError` | A table fails its schema, or the cross-table rules. Also a `ValueError`. |
 | `PinMismatch` | A manifest's sha256 differs from its pin, or a feature-set manifest differs from its sha256 or records another dataset manifest sha256. |

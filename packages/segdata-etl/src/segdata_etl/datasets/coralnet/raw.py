@@ -50,10 +50,11 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import publishable_repo, stage_version
+from segdata_etl.common.stage import stage_version
 from segdata_etl.common.versions import bare_fingerprints, count_labels, image_store
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ManifestNotFound
+from segdata_spec.git import publishable_repo
 from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import ParentRef, Pin, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
@@ -828,7 +829,7 @@ def run_raw(args: argparse.Namespace) -> int:
         ParentRequired: A source's marker pins a parent version and no parent was given.
         PinnedImageLost: A pinned source has an image in neither the scrape bucket nor the parent.
     """
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     parent = _parent_ref(args)
     workers = _workers(args.workers)
     source_bucket, prefix = _source_bucket(), get_prefix()

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from segdata_spec.errors import PublishRefused
-from segdata_spec.git import GitState, on_remote, probe_git, refuse_unpublishable
+from segdata_spec.git import Publishable, on_remote, probe_git, publishable_repo
 
 
 def _run(cwd: Path, *args: str) -> None:
@@ -94,25 +94,67 @@ def test_probe_git_reports_dirty_and_pushed(tmp_path):
     assert (local.dirty, local.pushed) == (False, False)
 
 
+def _repo_with_lock(tmp_path: Path) -> tuple[Path, str]:
+    """A pushed repo holding a committed ``uv.lock``; returns it and the lock's sha256."""
+    work, _ = _repo_with_remote(tmp_path)
+    (work / "uv.lock").write_bytes(b"lock-bytes")
+    _run(work, "add", "uv.lock")
+    _run(work, "commit", "-m", "lock")
+    _run(work, "push")
+    return work, hashlib.sha256(b"lock-bytes").hexdigest()
+
+
+def test_publishable_repo_returns_root_git_state_and_lock_hash_for_a_clean_pushed_repo(tmp_path):
+    work, lock = _repo_with_lock(tmp_path)
+    nested = work / "pkg" / "src"
+    nested.mkdir(parents=True)
+
+    repo = publishable_repo(nested)
+
+    assert isinstance(repo, Publishable)
+    assert repo.root == work
+    assert (repo.git.dirty, repo.git.pushed) == (False, True)
+    assert repo.git.sha == _head(work)
+    assert repo.uv_lock_sha256 == lock
+
+
+def _make_dirty(work: Path) -> None:
+    (work / "f.txt").write_text("changed")
+
+
+def _make_unpushed(work: Path) -> None:
+    (work / "g.txt").write_text("two")
+    _run(work, "add", "g.txt")
+    _run(work, "commit", "-m", "two")
+
+
 @pytest.mark.parametrize(
-    ("dirty", "pushed", "with_lock", "keyword"),
+    ("spoil", "keyword"),
     [
-        (True, True, True, "uncommitted"),
-        (False, False, True, "not contained in any remote branch"),
-        (False, True, False, "no uv.lock"),
+        (_make_dirty, "uncommitted"),
+        (_make_unpushed, "not contained in any remote branch"),
     ],
-    ids=["dirty", "unpushed", "no-uv-lock"],
+    ids=["dirty", "unpushed"],
 )
-def test_refuse_unpublishable_refuses_an_unpublishable_tree(
-    tmp_path, dirty, pushed, with_lock, keyword
-):
-    if with_lock:
-        (tmp_path / "uv.lock").write_text("lock")
+def test_publishable_repo_refuses_an_unpublishable_tree(tmp_path, spoil, keyword):
+    work, _ = _repo_with_lock(tmp_path)
+    spoil(work)
+
     with pytest.raises(PublishRefused, match=keyword):
-        refuse_unpublishable(GitState(sha="abc", dirty=dirty, pushed=pushed), tmp_path)
+        publishable_repo(work)
 
 
-def test_refuse_unpublishable_returns_the_uv_lock_hash_for_a_clean_pushed_tree(tmp_path):
-    (tmp_path / "uv.lock").write_bytes(b"lock-bytes")
-    lock = refuse_unpublishable(GitState(sha="abc", dirty=False, pushed=True), tmp_path)
-    assert lock == hashlib.sha256(b"lock-bytes").hexdigest()
+def test_publishable_repo_refuses_a_missing_uv_lock(tmp_path, monkeypatch):
+    work, _ = _repo_with_remote(tmp_path)
+    (work / "uv.lock").write_bytes(b"lock-bytes")
+    # find_repo_root requires the lock, so a lock deleted after the root is found models the gap.
+    monkeypatch.setattr("segdata_spec.git.find_repo_root", lambda _start: work)
+    (work / "uv.lock").unlink()
+
+    with pytest.raises(PublishRefused, match="no uv.lock"):
+        publishable_repo(work)
+
+
+def test_publishable_repo_raises_when_no_root_holds_git_and_uv_lock(tmp_path):
+    with pytest.raises(FileNotFoundError, match="uv.lock"):
+        publishable_repo(tmp_path)

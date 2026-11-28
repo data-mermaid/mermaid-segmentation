@@ -39,10 +39,11 @@ from segdata_etl.common.featurevector import (
     stage_features,
 )
 from segdata_etl.common.s3_objects import EXTENSIONS
-from segdata_etl.common.stage import publishable_repo, stage_version
+from segdata_etl.common.stage import stage_version
 from segdata_etl.common.versions import bare_fingerprints
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.features import feature_store_name
+from segdata_spec.git import publishable_repo
 from segdata_spec.layout import (
     cache_path,
     dataset_prefix,
@@ -443,7 +444,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     parents = _parent_refs(args)
     extractor = read_extractor_spec(args.extractor_spec)
     feature_store_prefix(feature_store_name(IMAGE_STORE, DATASET_BUCKET), args.feature_family)
-    repo = publishable_repo()
+    repo = publishable_repo(Path(__file__).resolve().parent)
     source = read_annotations(client, args.annotations_uri)
     annotations, n_after_cutoff = apply_cutoff(source.table, args.annotation_date_cutoff)
     parent_rows = load_parent_rows(args.stage_dir, args.parent_version)
@@ -515,8 +516,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         extractor=extractor,
         allow_missing=args.allow_missing_features,
         command=_command_line(args),
-        repo_dir=repo.root,
-        git=repo.git,
+        repo=repo,
     )
     jpg_ids = sorted(o.image_id for o in outcomes if o.found_as_jpg and o.row is not None)
     if jpg_ids:

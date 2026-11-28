@@ -132,7 +132,7 @@ def test_dirty_git_refuses_before_any_shard_download(monkeypatch, tmp_path):
         shards={"data/palwave13-00000-of-00001.parquet": shard("PALWave13", ["a.jpg"])},
     )
     dirty = GitState(sha="abcdef1234567", dirty=True, pushed=True)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _: dirty)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _: dirty)
     args = cli.build_parser().parse_args(
         ["build", "ucsd_mosaics", "--stage-dir", str(tmp_path / "stage")]
     )

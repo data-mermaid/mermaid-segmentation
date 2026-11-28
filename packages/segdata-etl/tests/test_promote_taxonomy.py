@@ -11,7 +11,7 @@ from s3_fake import FakeS3
 from segdata_etl import cli, promote
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
-from segdata_spec.git import GitState
+from segdata_spec.git import GitState, Publishable
 from segdata_spec.manifest import SourceInfo
 from segdata_spec.stage import stage_taxonomy
 
@@ -41,8 +41,7 @@ def stage(tmp_path: Path) -> Path:
         etl_package="segdata-etl",
         etl_command="segdata taxonomy",
         source=SourceInfo(type="test", uri="https://api.test", revision="r1"),
-        repo_dir=repo,
-        git=CLEAN_GIT,
+        repo=Publishable(root=repo, git=CLEAN_GIT, uv_lock_sha256="0" * 64),
     )
     return tmp_path / "stage"
 

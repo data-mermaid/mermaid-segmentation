@@ -115,9 +115,9 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_bytes(b"lock")
-    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_spec.git.find_repo_root", lambda _start: root)
     git = GitState(sha="abcdef1234567", dirty=False, pushed=True)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _: git)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _: git)
     return root
 
 
@@ -454,7 +454,7 @@ def test_dirty_git_refuses_before_reading_the_annotations(repo, tmp_path, monkey
     fake = FakeS3()
     seed(fake, [ann("i1", "p1", 1, 1)], {"i1": png_bytes(4, 4)})
     dirty = GitState(sha="abcdef1234567", dirty=True, pushed=True)
-    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _: dirty)
+    monkeypatch.setattr("segdata_spec.git.probe_git", lambda _: dirty)
 
     with pytest.raises(PublishRefused, match="uncommitted"):
         build(fake, tmp_path / "stage")

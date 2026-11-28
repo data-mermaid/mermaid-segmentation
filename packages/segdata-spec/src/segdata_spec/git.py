@@ -59,7 +59,7 @@ def uv_lock_sha256(repo_dir: Path) -> str | None:
     return hashlib.sha256(lock.read_bytes()).hexdigest()
 
 
-def refuse_unpublishable(git: GitState, repo_dir: Path) -> str:
+def _refuse_unpublishable(git: GitState, repo_dir: Path) -> str:
     """Return the sha256 of ``repo_dir``'s ``uv.lock`` for a publishable tree.
 
     Raises:
@@ -74,3 +74,36 @@ def refuse_unpublishable(git: GitState, repo_dir: Path) -> str:
     if lock is None:
         raise PublishRefused(f"no uv.lock in {repo_dir}")
     return lock
+
+
+def find_repo_root(start: Path) -> Path:
+    """Return the nearest directory at or above ``start`` holding both ``.git`` and ``uv.lock``.
+
+    Raises:
+        FileNotFoundError: No such directory exists.
+    """
+    for directory in (start, *start.parents):
+        if (directory / ".git").exists() and (directory / "uv.lock").is_file():
+            return directory
+    raise FileNotFoundError(f"no git root holding uv.lock at or above {start}")
+
+
+@dataclass(frozen=True)
+class Publishable:
+    """A repo whose tree was checked clean, pushed and locked; holding one is the proof."""
+
+    root: Path
+    git: GitState
+    uv_lock_sha256: str
+
+
+def publishable_repo(start: Path) -> Publishable:
+    """Find the repo root above ``start``, probe its git state and refuse an unpublishable tree.
+
+    Raises:
+        FileNotFoundError: No repo root holding ``uv.lock`` is found.
+        PublishRefused: The git tree is dirty or unpushed, or ``uv.lock`` is missing.
+    """
+    root = find_repo_root(start)
+    git = probe_git(root)
+    return Publishable(root=root, git=git, uv_lock_sha256=_refuse_unpublishable(git, root))
