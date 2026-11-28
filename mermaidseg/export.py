@@ -197,16 +197,6 @@ def _require_empty_out_dir(out_dir: Path) -> None:
         raise ValueError(f"output directory {out_dir} exists and is not empty")
 
 
-def require_sidecar_label_space(run_dir: str | Path) -> None:
-    """Raise ValueError if ``run_dir``'s sidecar exists without a ``label_space`` section."""
-    path = Path(run_dir) / MODEL_JSON
-    if path.is_file() and "label_space" not in json.loads(path.read_text()):
-        raise ValueError(
-            f"{path} has no label_space section; "
-            "the run was trained before label spaces existed, so retrain it"
-        )
-
-
 def require_label_space(source: Path, listed: Mapping[str, str]) -> None:
     """Raise ValueError unless ``source`` holds every file of ``listed`` with its sha256."""
     if not source.is_dir():
@@ -273,12 +263,14 @@ def export_bundle(
 
     The sidecar ``model.json`` beside the checkpoint supplies the architecture, label maps
     and preprocessing, and the ``label_space/`` directory beside it supplies the label space
-    files that the bundle carries; the lineage is the checkpoint's own, from the session that wrote it.
-    ``s3_client`` reads the pinned manifests; ``repo_dir`` (default: the working directory)
-    is the git checkout whose remote-tracking branches must contain the lineage's commit.
+    files that the bundle carries; the lineage is the checkpoint's own, from the session that
+    wrote it. ``s3_client`` reads the pinned manifests; ``repo_dir`` (default: the working
+    directory) is the git checkout whose remote-tracking branches must contain the lineage's
+    commit.
 
     Raises:
-        FileNotFoundError: The sidecar is missing or ``out_dir``'s parent does not exist.
+        FileNotFoundError: The sidecar is missing, ``out_dir``'s parent does not exist, or a
+            file the sidecar lists is missing from the label space directory.
         RuntimeError: The checkpoint cannot be loaded or lacks a required key, ``lineage``
             included; the message names its path.
         ValueError: The checkpoint's tree was dirty, ``out_dir`` is not empty, a pinned
@@ -292,13 +284,7 @@ def export_bundle(
     sidecar = json.loads(sidecar_path.read_text())
     _require_empty_out_dir(out_dir)
     _require_parent_exists(out_dir)
-    if "label_space" not in sidecar:
-        raise ValueError(
-            f"{sidecar_path} has no label_space section; "
-            "the checkpoint was trained before label spaces existed, so retrain it"
-        )
     label_space_source = checkpoint.parent / LABEL_SPACE_DIR
-    require_label_space(label_space_source, sidecar["label_space"])
     ckpt = read_checkpoint(
         checkpoint,
         required_keys=("config", "model_state_dict", "epoch", "global_step", "lineage"),

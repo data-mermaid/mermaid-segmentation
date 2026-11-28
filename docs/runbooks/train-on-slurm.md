@@ -71,7 +71,7 @@ The encoder download still runs, so `HF_TOKEN` is still required. AWS credential
 
 The check stats each selected file. On a large cache on shared scratch, it can take a few minutes. That is far faster than the full sync, which reads and hashes every file.
 
-It also checks the pinned taxonomy. It prints one line per dataset, `<name>: version V, resize R, ok`, and one for the taxonomy, `taxonomy: version V, ok`. A failed line is `<name>: <ErrorType>: <message>; <what to do>`. It reports every dataset, not only the first failure. An unexpected error, which is a bug, stops it with a traceback. It exits 1 if any check fails. You can run it by hand with the command above. If it fails, the launcher prints `cache check failed; nothing submitted` and exits 1.
+It prints one line per dataset, `<name>: version V, resize R, ok`. A failed line is `<name>: <ErrorType>: <message>; <what to do>`. It reports every dataset, not only the first failure. An unexpected error, which is a bug, stops it with a traceback. It exits 1 if any check fails. You can run it by hand with the command above. If it fails, the launcher prints `cache check failed; nothing submitted` and exits 1.
 
 The check does not read image or mask bytes. A file that is corrupted but present, or present but not readable by you (for example in a cache another user synced), is found only when training reads it. A file that was deleted after the sync, for example by an interrupted `rsync` or a scratch purge, fails the check. To verify the bytes, launch without `--skip-sync`.
 

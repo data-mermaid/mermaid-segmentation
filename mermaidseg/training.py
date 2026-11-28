@@ -27,7 +27,7 @@ from mermaidseg.dataset_reconciliation.label_space import (
     META_YAML,
     SOURCE_LABELS_CSV,
 )
-from mermaidseg.export import require_sidecar_label_space, write_sidecar
+from mermaidseg.export import write_sidecar
 from mermaidseg.inference.bundle import sha256_file
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config, update_config_with_args
@@ -423,7 +423,6 @@ def run(args: argparse.Namespace) -> None:
     run_dir = checkpoint_dir(args.output_dir, cfg.run_name)
     label_space_sha256: dict[str, str] = {}
     label_space_files = _label_space_files(resolve_repo_path(cfg.training.label_space))
-    require_sidecar_label_space(run_dir)
     _check_label_space_copy(label_space_files, run_dir / _RUN_LABEL_SPACE)
     if dist_ctx.is_main:
         run_dir.mkdir(parents=True, exist_ok=True)

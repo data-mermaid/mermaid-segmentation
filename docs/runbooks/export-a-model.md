@@ -24,7 +24,7 @@ uv run python scripts/export.py \
     --output-dir /path/to/bundle
 ```
 
-The script prints the bundle path. The bundle holds `model.json`, `weights.safetensors` and a `label_space/` directory. `load_bundle` in `mermaidseg/inference/bundle.py` reads the first two and ignores `label_space/`. The export copies `label_space/` from the directory beside the checkpoint and checks each file against the sha256 that `model.json` lists under `label_space`. `model.json` records the sha256 of `weights.safetensors`, and `load_bundle` refuses weights that do not match it.
+The script prints the bundle path. The bundle holds `model.json`, `weights.safetensors` and a `label_space/` directory. `load_bundle` in `mermaidseg/inference/bundle.py` reads the first two and ignores `label_space/`. The export copies each file that `model.json` lists under `label_space` from the directory beside the checkpoint into the bundle's `label_space/`. It does not compare the files' sha256 with the values that `model.json` lists. A listed file missing from that directory fails the copy with `FileNotFoundError`. The evaluation that reads the bundle checks each file against its sha256 (`mermaidseg/evaluation/val_loss.py`). `model.json` records the sha256 of `weights.safetensors`, and `load_bundle` refuses weights that do not match it.
 
 Bundles exported before the `weights_sha256` key existed have no key, and `load_bundle` refuses them. Re-export each one from its checkpoint with `scripts/export.py`.
 
@@ -35,7 +35,6 @@ Bundles exported before the `weights_sha256` key existed have no key, and `load_
 | Refusal | What to do |
 |---|---|
 | No `model.json` beside the checkpoint | Copy the run's `model.json` into the checkpoint's directory. For SageMaker, download it with the checkpoint. |
-| `model.json` has no `label_space` section, the `label_space/` directory is missing, or a file in it differs from its sha256 | The run was trained before label spaces existed, or the copy was changed or not downloaded. Copy the run's `label_space/` beside the checkpoint unchanged. A run without the section must be trained again. |
 | The checkpoint cannot be loaded, or lacks a required key | Use another checkpoint of the run. A `*.partial` file is incomplete. |
 | No recorded lineage | Export a checkpoint that `scripts/train.py` wrote. Each checkpoint records the lineage of the session that wrote it. |
 | The lineage records a dirty git tree | The session that wrote the checkpoint ran on uncommitted code. A run that resumed or warm-started from a checkpoint inherits that checkpoint's git state, so a source that was dirty gives the same refusal. A checkpoint without lineage cannot be resumed or warm-started at all. `lineage.parent` in the checkpoint shows the source's git SHA, dirty state and data version. You cannot export it. Train again from a clean commit, from scratch or from a clean checkpoint. The resumed or warm-started session must itself run on a clean tree; a clean checkpoint does not help if the code is dirty. |
