@@ -15,7 +15,7 @@ from mermaidseg.lineage import check_same_data, collect_lineage, data_version, i
 
 
 def _collect(**overrides):
-    kwargs = {"resolved_config": {"a": 1}, "seed": 7, "data_version": {"x": 1}}
+    kwargs = {"resolved_config": {"a": 1}, "seed": 7, "data_version": {"x": 1}, "inputs": []}
     return collect_lineage(**{**kwargs, **overrides})
 
 
@@ -43,6 +43,22 @@ def git_repo(monkeypatch, tmp_path: Path) -> Path:
 def test_untracked_file_alone_is_not_dirty(git_repo):
     (git_repo / "new.txt").write_text("x\n")
     assert _collect()["git_dirty"] is False
+
+
+def test_an_untracked_input_makes_a_clean_repo_dirty(git_repo):
+    (git_repo / "cfg.yaml").write_text("x: 1\n")
+    inputs = [git_repo / "tracked.txt", git_repo / "cfg.yaml"]
+    assert _collect(inputs=inputs)["git_dirty"] is True
+
+
+def test_tracked_inputs_leave_a_clean_repo_clean(git_repo):
+    assert _collect(inputs=[git_repo / "tracked.txt"])["git_dirty"] is False
+
+
+def test_build_sha_image_ignores_inputs(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(lineage, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("MERMAIDSEG_GIT_SHA", "abc123")
+    assert _collect(inputs=[tmp_path / "missing.yaml"])["git_dirty"] is False
 
 
 @pytest.mark.parametrize(

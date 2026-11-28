@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
 
 from mermaidseg.data.config import DataSection
 from mermaidseg.io import REPO_ROOT
+from segdata_spec.git import is_tracked
 
 GIT_TIMEOUT_SEC = 10
 # CI builds container images from a committed tree and passes the commit here; the image has no .git.
@@ -75,21 +77,30 @@ def data_version(section: DataSection) -> dict:
     }
 
 
-def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> dict:
+def _untracked_inputs(inputs: Sequence[Path]) -> bool:
+    """Whether any of ``inputs`` is not a git-tracked file of the repo."""
+    return any(not is_tracked(Path(REPO_ROOT), path) for path in inputs)
+
+
+def collect_lineage(
+    *, resolved_config: dict, seed: int, data_version: dict, inputs: Sequence[Path]
+) -> dict:
     """Everything needed to trace a run back to its code, environment, config and data.
 
-    ``git_dirty`` counts tracked changes only; unreadable git counts as dirty.
+    ``git_dirty`` is True when tracked files differ from HEAD, when any of ``inputs`` (the config and
+    reference files the run reads) is not a git-tracked file of the repo, or when git cannot be read.
     Inside a checkout (``REPO_ROOT/.git`` exists as a directory or a worktree file) git gives the
     revision and dirty state. Without ``.git``, a non-empty ``MERMAIDSEG_GIT_SHA`` is the revision of
     a CI-built image: it is recorded as ``git_sha`` with ``git_dirty`` False (the tree is committed by
-    construction) and git is not run.
+    construction); git is not run and ``inputs`` are not checked.
     """
     build_sha = os.environ.get(BUILD_GIT_SHA_ENV)
     if build_sha and not (Path(REPO_ROOT) / ".git").exists():
         git_sha: str | None = build_sha
         git_dirty = False
     else:
-        git_sha, git_dirty = _git_sha(), _git_dirty()
+        git_sha = _git_sha()
+        git_dirty = _git_dirty() or _untracked_inputs(inputs)
     return {
         "git_sha": git_sha,
         "git_dirty": git_dirty,

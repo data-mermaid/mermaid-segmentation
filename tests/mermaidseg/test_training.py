@@ -190,6 +190,47 @@ def test_check_label_space_copy_refuses_a_differing_copy_naming_the_file(tmp_pat
         _check_label_space_copy(files, target)
 
 
+def test_lineage_inputs_name_every_repo_file_the_run_reads(tmp_path):
+    space = tmp_path / "space"
+    space.mkdir()
+    (space / "acknowledged.csv").write_text("dataset,native_name,kind,reason\n")
+    concepts, removal, mask = (tmp_path / n for n in ("concepts.csv", "removal.csv", "mask.csv"))
+    split_file = tmp_path / "coralnet.csv"
+    training_cfg = ConfigDict(
+        label_space=str(space),
+        concept_mapping_path=str(concepts),
+        concept_removal=str(removal),
+        concept_source_mask=str(mask),
+    )
+    pin = {"version": "v", "manifest_sha256": "s"}
+    # "other" has no split file: an empty optional key names nothing.
+    section = DataSection.model_validate(
+        {
+            "taxonomy": pin,
+            "datasets": {"coralnet": {**pin, "split_file": str(split_file)}, "other": pin},
+        }
+    )
+    args = argparse.Namespace(
+        training_config=tmp_path / "training.yaml", concept_schema_config=tmp_path / "schema.yaml"
+    )
+
+    assert training._lineage_inputs(args, training_cfg, section) == [
+        tmp_path / "training.yaml",
+        tmp_path / "schema.yaml",
+        space / "classes.csv",
+        space / "concepts.csv",
+        space / "source_labels.csv",
+        space / "label_space.meta.yaml",
+        space / "acknowledged.csv",
+        concepts,
+        removal,
+        mask,
+        tmp_path / "removal.meta.yaml",
+        tmp_path / "mask.meta.yaml",
+        split_file,
+    ]
+
+
 def _order(generator: torch.Generator) -> list[int]:
     loader = make_shuffled_loader(
         DistContext(), ConcatDataset([_Indices()]), batch_size=4, generator=generator

@@ -494,14 +494,12 @@ def read_label_space_meta(directory: Path) -> dict:
     """Read the provenance of the label space in ``directory``.
 
     Raises:
-        ValueError: ``label_space.meta.yaml`` is not a mapping or lacks ``concepts_csv_sha1``.
+        ValueError: ``label_space.meta.yaml`` is not a mapping.
     """
     path = directory / META_YAML
     meta = yaml.safe_load(path.read_text())
     if not isinstance(meta, dict):
         raise ValueError(f"{path} is not a YAML mapping")
-    if "concepts_csv_sha1" not in meta:
-        raise ValueError(f"{path} lacks concepts_csv_sha1")
     return meta
 
 
@@ -512,8 +510,7 @@ def read_label_space(directory: Path) -> LabelSpace:
         ValueError: A table misses a column; ``class_id`` is not 0..n-1 or ``channel_id`` not
             1..n in row order; a dataset appears under more than one version;
             ``source_labels.csv`` repeats a ``(dataset, version, label_id)`` or names a class or
-            concept that its table lacks; or the meta file is not a mapping with
-            ``concepts_csv_sha1``.
+            concept that its table lacks; or the meta file is not a mapping.
     """
     classes = _read_table(directory, CLASSES_CSV, CLASS_COLUMNS)
     concepts = _read_table(directory, CONCEPTS_CSV, CONCEPT_COLUMNS)

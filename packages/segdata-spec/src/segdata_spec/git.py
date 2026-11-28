@@ -89,8 +89,13 @@ def find_repo_root(start: Path) -> Path:
     raise FileNotFoundError(f"no git root holding uv.lock at or above {start}")
 
 
-def _is_tracked(repo_dir: Path, path: Path) -> bool:
-    """Whether ``path`` is a file tracked by the repo at ``repo_dir``; False outside it."""
+def is_tracked(repo_dir: Path, path: Path) -> bool:
+    """Whether ``path`` is a file tracked by the repo at ``repo_dir``; False outside it.
+
+    Args:
+        repo_dir: A directory inside the repo to ask.
+        path: The file to look up; relative paths resolve against the current directory.
+    """
     result = subprocess.run(  # noqa: S603
         ["git", "-C", str(repo_dir), "ls-files", "--error-unmatch", "--", str(path.resolve())],  # noqa: S607
         capture_output=True,
@@ -116,7 +121,7 @@ def clean_git_state(start: Path, *, inputs: Sequence[Path] = ()) -> GitState:
     if git.dirty:
         raise DirtyTree("working tree has uncommitted changes to tracked files")
     for path in inputs:
-        if not _is_tracked(root, path):
+        if not is_tracked(root, path):
             raise DirtyTree(f"{path} is not a git-tracked file of {root}")
     return git
 

@@ -177,14 +177,12 @@ def _unknown_reader_label(run: SimpleNamespace) -> None:
     )
 
 
-def _pin_and_subset(run: SimpleNamespace) -> None:
+def _pin_and_reader_label(run: SimpleNamespace) -> None:
     _other_pin(run)
-    _other_subset(run)
+    _unknown_reader_label(run)
 
 
 _PIN = rf"coralscapes_v2.*20990101-fffffff.*{VERSION}"
-_LABEL_KEYS = r"label_keys_sha1"
-_CONCEPTS = r"concept_mapping_path"
 _LABEL = r"pacific_labeled_corals.*\[5\]"
 
 
@@ -194,17 +192,13 @@ _LABEL = r"pacific_labeled_corals.*\[5\]"
         (_other_pin, [_PIN]),
         (_other_taxonomy_manifest, [r"taxonomy.*other"]),
         (_other_dataset_manifest, [r"dataset coralscapes_v2.*other"]),
-        (_other_subset, [_LABEL_KEYS]),
-        (_other_concepts, [_CONCEPTS]),
         (_unknown_reader_label, [_LABEL]),
-        (_pin_and_subset, [_PIN, _LABEL_KEYS]),
+        (_pin_and_reader_label, [_PIN, _LABEL]),
     ],
     ids=[
         "dataset-pin",
         "taxonomy-manifest",
         "dataset-manifest",
-        "label-keys",
-        "concepts-csv",
         "reader-label",
         "several",
     ],

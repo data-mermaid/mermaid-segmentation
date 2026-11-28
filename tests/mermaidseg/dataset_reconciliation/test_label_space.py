@@ -578,8 +578,8 @@ def test_read_refuses_ids_that_are_not_row_order_ids_naming_the_file(
 
 @pytest.mark.parametrize(
     "text",
-    ["", "- concepts_csv_sha1\n- x\n", "name: tiny\n"],
-    ids=["empty", "list", "missing-sha1"],
+    ["", "- concepts_csv_sha1\n- x\n"],
+    ids=["empty", "list"],
 )
 def test_read_refuses_a_malformed_meta_naming_the_file(tmp_path: Path, text: str) -> None:
     write_label_space(tmp_path / "space", _round_trip_space(tmp_path))

@@ -60,5 +60,5 @@ training:
                     'Turf algae', 'Zoanthid']
     padding: 3
     label_roll_up: True
-    # Built by scripts/build_label_space.py from these keys; training refuses it when stale.
+    # Built by scripts/build_label_space.py from these keys; training refuses changed pins, and CI checks the rest.
     label_space: configs/label_spaces/cbm_final
