@@ -6,10 +6,8 @@ rule:
   min_coralnet_sources: 3
 rule_description: remove if (images < 100 and non-CoralNet images < 50) or annotations
   < 500 (dense mask = 50) or (no non-CoralNet dataset and CoralNet sources < 3)
-data_config: configs/data_config.yaml
-data_config_sha1: 481533397cf784d9b3b9eec961000e7350983832
 dataset_versions:
-  catlin_seaview: 20261124-cfc389d
+  catlin_seaview: 20261127-4a6492a
   coralnet: 20261124-cfc389d
   coralscapes_v2: 20261124-cfc389d
   mermaid: 20261124-cfc389d
@@ -22,9 +20,6 @@ datasets_counted:
 - mermaid
 - moorea_labeled_corals
 - ucsd_mosaics
-concepts_csv: configs/class_to_concepts.csv
-concepts_csv_sha1: b55540ec6b964a08fbd280dc6f9639a95d3394b9
-schema_config: configs/data_config.yaml
 n_channels: 706
 n_removed: 354
 removed_by_kind:
@@ -43,6 +38,11 @@ channels_by_kind:
   kingdom: 6
   order: 72
   phylum: 17
-created: '2026-11-26T10:49:54'
-git_sha: 09357334d2eeb28e64e3d24a6d8540faf63362c6
+data_config: configs/data_config.yaml
+data_config_sha1: 135206db4183c17b3e0ef2c70365e0c4139c4331
+concepts_csv: configs/class_to_concepts.csv
+concepts_csv_sha1: b55540ec6b964a08fbd280dc6f9639a95d3394b9
+schema_config: configs/data_config.yaml
+created: '2026-11-27T18:22:56'
+git_sha: 941edd03a3bf7d516184d75397ffee7fde7b3071
 git_dirty: false
